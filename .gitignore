@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# 环境与密钥
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 运行时数据
+/data/
+/pgdata/
+*.db
+*.sqlite
+*.sqlite3
+
+# 编辑器与系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 日志与临时文件
+*.log
+/tmp/

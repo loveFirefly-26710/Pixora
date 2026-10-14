@@ -1,0 +1,2673 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pixora UI 预览</title>
+<style>
+:root{
+  --bg:#f6f7f9; --surface:#fff; --border:#e5e7eb; --border2:#d1d5db;
+  --text:#1f2328; --muted:#6b7280; --faint:#9ca3af;
+  --primary:#2563eb; --primary-soft:#eff6ff;
+  --success:#16a34a; --success-soft:#f0fdf4;
+  --warning:#d97706; --warning-soft:#fffbeb;
+  --danger:#dc2626; --danger-soft:#fef2f2;
+  --purple:#7c3aed; --purple-soft:#f5f3ff;
+  --r:10px;
+}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+a{color:inherit}
+.top{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid var(--border);padding:11px 20px;display:flex;align-items:center;gap:14px}
+.top b{font-size:15px}
+.top .hint{font-size:12px;color:var(--muted)}
+.top .legend{margin-left:auto;display:flex;gap:14px;font-size:12px;color:var(--muted)}
+.top .legend span{display:flex;align-items:center;gap:5px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.layout{display:flex;align-items:flex-start}
+.nav{width:216px;flex:0 0 216px;background:#fff;border-right:1px solid var(--border);padding:10px 8px 40px;position:sticky;top:47px;height:calc(100vh - 47px);overflow:auto}
+.nav .grp{font-size:11px;color:var(--faint);padding:14px 10px 5px;letter-spacing:.05em}
+.nav button{display:block;width:100%;text-align:left;padding:7px 10px;border:0;background:none;border-radius:8px;color:#374151;font-size:13px;cursor:pointer;font-family:inherit}
+.nav button:hover{background:#f3f4f6}
+.nav button.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
+main{flex:1;padding:20px 22px 60px;min-width:0}
+.screen{display:none}
+.screen.on{display:block}
+.head{margin-bottom:12px}
+.head h2{font-size:16px;margin:0 0 3px}
+.head p{margin:0;font-size:13px;color:var(--muted)}
+.note{margin-top:8px;font-size:12.5px;background:#fff;border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:6px;padding:8px 12px;color:#4b5563}
+.note.w{border-left-color:var(--warning)}
+.note.g{border-left-color:var(--success)}
+.note.d{border-left-color:var(--danger)}
+.frame{border:1px solid var(--border);border-radius:12px;overflow:hidden;background:#fff;position:relative}
+.bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#f3f4f6;border-bottom:1px solid var(--border)}
+.dots{display:flex;gap:5px}
+.dots i{width:10px;height:10px;border-radius:50%;background:#d1d5db;display:block}
+.url{flex:1;background:#fff;border:1px solid var(--border);border-radius:6px;padding:3px 10px;font-size:12px;color:var(--faint);font-family:ui-monospace,Consolas,monospace}
+.pad{padding:18px}
+.navbar{display:flex;align-items:center;gap:14px;padding:11px 18px;border-bottom:1px solid var(--border)}
+.logo{font-weight:700;font-size:15px;letter-spacing:.2px}
+.logo em{color:var(--primary);font-style:normal}
+.search{flex:1;max-width:340px;display:flex;align-items:center;gap:8px;background:#f3f4f6;border:1px solid var(--border);border-radius:8px;padding:6px 11px;color:var(--faint);font-size:13px}
+.spacer{flex:1}
+.btn{border:1px solid var(--border2);background:#fff;border-radius:8px;padding:6px 13px;font-size:13px;cursor:pointer;font-family:inherit;color:#374151;white-space:nowrap}
+.btn:hover{border-color:var(--faint)}
+.btn.pri{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.gho{border-color:transparent;background:#f3f4f6}
+.btn.sm{padding:4px 9px;font-size:12px;border-radius:6px}
+.btn.dgr{color:var(--danger);border-color:#fca5a5}
+.btn.wrn{color:var(--warning);border-color:#fcd34d}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);background:#fff;border-radius:20px;padding:3px 11px;font-size:12.5px;color:#4b5563;cursor:pointer}
+.chip.on{background:var(--primary-soft);border-color:#bfdbfe;color:var(--primary);font-weight:600}
+.tag{display:inline-block;background:#f3f4f6;color:#4b5563;border-radius:5px;padding:1px 7px;font-size:11.5px;margin-right:4px}
+.tag.b{background:var(--primary-soft);color:var(--primary)}
+.badge{display:inline-block;border-radius:5px;padding:1px 7px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.badge.ok{background:var(--success-soft);color:var(--success)}
+.badge.warn{background:var(--warning-soft);color:var(--warning)}
+.badge.err{background:var(--danger-soft);color:var(--danger)}
+.badge.info{background:var(--primary-soft);color:var(--primary)}
+.badge.mute{background:#f3f4f6;color:var(--muted)}
+.badge.pp{background:var(--purple-soft);color:var(--purple)}
+.card{border:1px solid var(--border);border-radius:var(--r);padding:14px;background:#fff}
+.card h4{margin:0 0 10px;font-size:13.5px}
+.card h4 small{font-weight:400;color:var(--muted);font-size:12px}
+label.f{display:block;font-size:12.5px;color:#4b5563;margin:0 0 5px}
+input.f,select.f,textarea.f{width:100%;border:1px solid var(--border2);border-radius:8px;padding:7px 11px;font-size:13px;font-family:inherit;color:var(--text);background:#fff}
+input.f[readonly]{background:#f9fafb;color:#6b7280}
+input.f::placeholder{color:var(--faint)}
+.row{display:flex;gap:12px}
+.row>*{flex:1;min-width:0}
+.fld{margin-bottom:13px}
+.tip{font-size:12px;color:var(--muted);margin-top:5px}
+.sw{width:38px;height:21px;border-radius:11px;background:var(--primary);position:relative;flex:0 0 38px}
+.sw::after{content:"";position:absolute;top:2px;right:2px;width:17px;height:17px;border-radius:50%;background:#fff}
+.sw.off{background:var(--border2)}
+.sw.off::after{left:2px;right:auto}
+.swrow{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid #f3f4f6}
+.swrow:last-child{border-bottom:0}
+.swrow .txt{flex:1}
+.swrow .txt b{display:block;font-size:13px;font-weight:600;margin-bottom:1px}
+.swrow .txt small{color:var(--muted);font-size:12px}
+.ph{background:#e8eaee;border-radius:8px;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#98a1ad;font-size:11px;text-align:center}
+.ph.c1{background:#dfe7f3}.ph.c2{background:#e6e2dc}.ph.c3{background:#ddeae2}
+.ph.c4{background:#ece0e6}.ph.c5{background:#e3e0f0}.ph.c6{background:#e8e6d9}
+.grid{display:grid;gap:12px}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g4{grid-template-columns:repeat(4,1fr)}
+.g5{grid-template-columns:repeat(5,1fr)}
+.g6{grid-template-columns:repeat(6,1fr)}
+.g8{grid-template-columns:repeat(8,1fr)}
+.tile{border:1px solid var(--border);border-radius:var(--r);overflow:hidden;background:#fff;cursor:pointer}
+.tile .ph{height:112px;border-radius:0}
+.tile .meta{padding:8px 10px}
+.tile .meta .n{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .meta .s{font-size:11.5px;color:var(--faint);margin-top:2px}
+.tile.sel{border-color:var(--primary);box-shadow:0 0 0 2px var(--primary-soft)}
+.tile.sel .ph::after{content:"✓";position:absolute;top:6px;left:6px;width:20px;height:20px;border-radius:5px;background:var(--primary);color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;font-weight:700}
+.tile .anchor{position:absolute;top:6px;right:6px;background:var(--primary);color:#fff;font-size:10px;border-radius:4px;padding:1px 5px;z-index:2}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:12px;color:var(--muted);font-weight:600;padding:9px 10px;border-bottom:1px solid var(--border);background:#fafafa;white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid #f3f4f6;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tr.pick{background:var(--primary-soft)}
+.mini{width:34px;height:34px;border-radius:6px}
+.bar-l{height:6px;border-radius:4px;background:#f3f4f6;overflow:hidden}
+.bar-l i{display:block;height:100%;background:var(--primary);border-radius:4px}
+.bar-l i.w{background:var(--warning)}
+.bar-l i.d{background:var(--danger)}
+.stat{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.stat .card{padding:12px 14px}
+.stat .card .k{font-size:12px;color:var(--muted)}
+.stat .card .v{font-size:20px;font-weight:700;margin-top:2px}
+.albumlist{border-right:1px solid var(--border);padding:12px;width:186px;flex:0 0 186px}
+.albumlist a{display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:8px;font-size:13px;color:#374151;text-decoration:none;cursor:pointer}
+.albumlist a.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
+.albumlist a .c{margin-left:auto;font-size:11px;color:var(--faint)}
+.albumlist .par{font-size:12px;font-weight:600;color:#6b7280;padding:12px 9px 3px;letter-spacing:.02em}
+.albumlist a.sub{padding-left:20px;font-size:12.5px}
+.split{display:flex}
+.toolbar{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);background:#fafafa;font-size:13px;flex-wrap:wrap}
+.toolbar.sel{background:var(--primary-soft);border-bottom-color:#bfdbfe}
+.toast{display:inline-flex;align-items:center;gap:9px;background:#111827;color:#fff;border-radius:9px;padding:9px 14px;font-size:12.5px}
+.toast code{font-family:ui-monospace,Consolas,monospace;background:rgba(255,255,255,.14);padding:2px 7px;border-radius:5px}
+.steps{display:flex;padding:16px 18px;border-bottom:1px solid var(--border);background:#fafafa}
+.step{flex:1;display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--faint)}
+.step .n{width:22px;height:22px;border-radius:50%;border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;font-size:11.5px;background:#fff;flex:0 0 22px}
+.step.on{color:var(--primary);font-weight:600}
+.step.on .n{background:var(--primary);border-color:var(--primary);color:#fff}
+.step.done .n{background:var(--success-soft);border-color:#86efac;color:var(--success)}
+.qtip{display:flex;gap:10px;align-items:flex-start;background:var(--warning-soft);border:1px solid #fde68a;border-radius:8px;padding:10px 12px;font-size:12.5px;color:#92400e}
+.qtip.ok{background:var(--success-soft);border-color:#bbf7d0;color:#166534}
+.qtip.err{background:var(--danger-soft);border-color:#fecaca;color:#991b1b}
+.qtip.info{background:var(--primary-soft);border-color:#bfdbfe;color:#1e40af}
+.qtip b{display:block;margin-bottom:1px}
+.qtip .ic{flex:0 0 16px;font-weight:700}
+.flexline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.kbd{display:inline-block;border:1px solid var(--border2);border-bottom-width:2px;border-radius:5px;padding:0 6px;font-size:11.5px;background:#fff;font-family:ui-monospace,Consolas,monospace;white-space:nowrap}
+.code{background:#0f172a;color:#e2e8f0;border-radius:8px;padding:12px 14px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:1.8;overflow:auto;white-space:pre;margin:0}
+.code .c{color:#64748b}
+.code .k{color:#7dd3fc}
+.code .s{color:#86efac}
+.code .n{color:#fca5a5}
+.m{font-family:ui-monospace,Consolas,monospace;font-size:11px;font-weight:700;border-radius:5px;padding:2px 7px;color:#fff;flex:0 0 auto}
+.m.get{background:#2563eb}.m.post{background:#16a34a}.m.patch{background:#d97706}.m.del{background:#dc2626}
+.endpoint{border:1px solid var(--border);border-radius:var(--r);overflow:hidden;margin-bottom:12px}
+.endpoint .ep-h{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#fafafa;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.endpoint .ep-h .p{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;font-weight:600}
+.endpoint .ep-b{padding:14px}
+.meth{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.meth .m-box{flex:1;min-width:158px;border:1px solid var(--border);border-radius:var(--r);padding:13px;text-align:center;background:#fff}
+.meth .m-box b{display:block;font-size:13px;margin-bottom:3px}
+.meth .m-box small{color:var(--muted);font-size:11.5px;line-height:1.5;display:block}
+.dropzone{border:1.5px dashed var(--border2);border-radius:var(--r);padding:24px;text-align:center;background:#fafafa;margin-bottom:12px}
+.dropzone.hot{border-color:var(--primary);background:var(--primary-soft)}
+.qitem{border:1px solid var(--border);border-radius:8px;overflow:hidden;background:#fff;position:relative}
+.qitem .ph{height:78px;border-radius:0}
+.qitem .rm{position:absolute;top:5px;right:5px;width:18px;height:18px;border-radius:50%;background:rgba(17,24,39,.62);color:#fff;border:0;font-size:11px;line-height:1;cursor:pointer}
+.qitem .nm{font-size:11px;padding:5px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#4b5563}
+.dz{border:1px solid #fecaca;background:var(--danger-soft);border-radius:var(--r);padding:14px}
+.dz h4{margin:0 0 4px;color:#991b1b;font-size:13.5px}
+.dz p{margin:0 0 10px;font-size:12.5px;color:#b91c1c}
+.lb{position:absolute;inset:0;background:rgba(15,23,42,.94);z-index:9;display:none;flex-direction:column}
+.lb.on{display:flex}
+.lb .lb-top{display:flex;align-items:center;gap:10px;padding:10px 16px;color:#e2e8f0;font-size:12.5px}
+.lb .lb-top .spacer{flex:1}
+.lb .lb-x{background:rgba(255,255,255,.14);border:0;color:#fff;border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:14px;line-height:1}
+.lb .lb-main{flex:1;display:flex;gap:16px;padding:0 16px 12px;min-height:0}
+.lb .lb-stage{flex:1;display:flex;align-items:center;justify-content:center;gap:12px;position:relative}
+.lb .lb-nav{background:rgba(255,255,255,.14);border:0;color:#fff;border-radius:8px;width:32px;height:52px;cursor:pointer;font-size:16px}
+.lb .lb-side{width:212px;background:#fff;border-radius:10px;padding:13px;font-size:12.5px;align-self:flex-start}
+.lb .lb-thumbs{display:flex;gap:7px;padding:10px 16px;background:rgba(0,0,0,.28);align-items:center;overflow:auto}
+.lb .lb-thumbs .ph{width:50px;height:36px;flex:0 0 50px;border-radius:5px}
+.lb .lb-thumbs .ph.cur{outline:2px solid #2563eb}
+.cnt{font-size:12.5px;color:#9ca3af;margin-left:6px}
+
+/* 移动端手机框 */
+.pgrid{display:flex;flex-wrap:wrap;gap:20px}
+.pcell{width:296px;flex:0 0 296px}
+.pcell .plabel{font-size:12.5px;font-weight:600;color:#374151;margin-bottom:7px}
+.pcell .plabel small{font-weight:400;color:var(--muted);display:block;font-size:11.5px;margin-top:1px}
+.phone{border:1px solid var(--border2);border-radius:24px;overflow:hidden;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+.pstat{height:22px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;font-size:9.5px;color:var(--muted);background:#f9fafb}
+.pnav{height:42px;display:flex;align-items:center;gap:8px;padding:0 13px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600}
+.pbody{height:466px;overflow:auto;position:relative;background:#fff}
+.ptab{height:50px;border-top:1px solid var(--border);display:flex;background:#fff}
+.ptab .it{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:9.5px;color:var(--muted)}
+.ptab .it.on{color:var(--primary);font-weight:600}
+.ptab .it .ic{font-size:15px;line-height:1}
+.fab{position:absolute;right:14px;bottom:62px;width:44px;height:44px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 4px 12px rgba(37,99,235,.32);z-index:3}
+.pgrid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px}
+.pcard{border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#fff}
+.pcard .ph{height:84px;border-radius:0}
+.pcard .pm{padding:6px 8px;font-size:10.5px;color:var(--muted)}
+.pcard .pm b{display:block;color:var(--text);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pcard.sel{border-color:var(--primary);box-shadow:0 0 0 2px var(--primary-soft)}
+.pcard.sel .ph::after{content:"✓";position:absolute;top:5px;left:5px;width:18px;height:18px;border-radius:5px;background:var(--primary);color:#fff;font-size:11px;display:flex;align-items:center;justify-content:center;font-weight:700}
+.pchips{display:flex;gap:6px;padding:9px 10px;overflow:auto}
+.pchips .chip{flex:0 0 auto;font-size:11.5px;padding:2px 9px}
+.prow{display:flex;align-items:center;gap:9px;padding:11px 13px;border-bottom:1px solid #f3f4f6;font-size:12.5px}
+.prow .rt{margin-left:auto;color:var(--faint);font-size:11.5px}
+.pnote{margin:9px 10px;padding:8px 10px;border-radius:8px;font-size:11.5px;line-height:1.6}
+.pnote.i{background:var(--primary-soft);color:#1e40af}
+.pnote.w{background:var(--warning-soft);color:#92400e}
+.pnote.g{background:var(--success-soft);color:#166534}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <b>Pixora · UI 预览</b>
+  <span class="hint">共 27 个界面，点左侧切换 · 网格/列表页可点「预览浮层」按钮看交互</span>
+  <span class="legend">
+    <span><i class="dot" style="background:#2563eb"></i>主操作</span>
+    <span><i class="dot" style="background:#16a34a"></i>成功/正常</span>
+    <span><i class="dot" style="background:#d97706"></i>需注意</span>
+    <span><i class="dot" style="background:#dc2626"></i>危险操作</span>
+  </span>
+</div>
+
+<div class="layout">
+<nav class="nav" id="nav">
+  <div class="grp">前台</div>
+  <button data-s="plaza-guest">广场（未登录）</button>
+  <button data-s="plaza-user">广场（已登录）</button>
+  <button data-s="direct-link">直链与配额</button>
+  <div class="grp">认证</div>
+  <button data-s="login">登录</button>
+  <button data-s="register">注册 · 邮箱验证</button>
+  <button data-s="suspended">账号暂停 · 三端表现</button>
+  <div class="grp">用户中心</div>
+  <button data-s="albums-grid">我的相册 · 网格</button>
+  <button data-s="albums-list">我的相册 · 列表</button>
+  <button data-s="upload">上传面板</button>
+  <button data-s="queue">上传队列</button>
+  <button data-s="api-doc">API 文档</button>
+  <button data-s="account-info">账号信息</button>
+  <button data-s="account-security">安全</button>
+  <button data-s="account-api">API Token</button>
+  <button data-s="account-terms">服务调整 · 服务条款</button>
+  <div class="grp">管理后台</div>
+  <button data-s="admin-users">用户管理</button>
+  <button data-s="admin-user-detail">用户详情与处置</button>
+  <button data-s="admin-user-view">查看指定用户相册</button>
+  <button data-s="admin-storage">存储管理</button>
+  <button data-s="admin-quota">配额与容量</button>
+  <button data-s="admin-ratelimit">频率限制</button>
+  <button data-s="admin-ip">IP 黑名单</button>
+  <button data-s="admin-settings">系统设置</button>
+  <button data-s="admin-terms">服务条款管理</button>
+  <div class="grp">适配</div>
+  <button data-s="mobile">移动端适配</button>
+  <button data-s="responsive">响应式规范</button>
+  <div class="grp">安装</div>
+  <button data-s="install">安装向导</button>
+</nav>
+
+<main>
+
+<!-- ===== 广场 · 未登录 ===== -->
+<section class="screen" id="s-plaza-guest">
+  <div class="head"><h2>广场 · 未登录</h2><p>只能看广场，可按标签和关键词搜索。右上角只放登录/注册入口，页面上没有上传区。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span>
+      <span class="search">⌕ 搜索标签、关键词…</span>
+      <span class="spacer"></span>
+      <button class="btn">登录</button><button class="btn pri">注册</button>
+    </div>
+    <div class="pad">
+      <div class="flexline" style="margin-bottom:14px">
+        <span class="chip on">全部</span><span class="chip">风景</span><span class="chip">人物</span>
+        <span class="chip">建筑</span><span class="chip">插画</span><span class="chip">摄影</span>
+        <span class="spacer"></span><span class="chip on">最新</span><span class="chip">最热</span>
+      </div>
+      <div class="grid g4">
+        <div class="tile"><div class="ph c1">a3f9c1b8.webp</div><div class="meta"><div class="n">雪山日出</div><div class="s"><span class="tag b">风景</span>u_1001 · 2 小时前</div></div></div>
+        <div class="tile"><div class="ph c2">7b21d0f4.jpg</div><div class="meta"><div class="n">老城街角</div><div class="s"><span class="tag b">建筑</span>u_2044 · 5 小时前</div></div></div>
+        <div class="tile"><div class="ph c3">c81a55ee.png</div><div class="meta"><div class="n">苔原</div><div class="s"><span class="tag b">风景</span>u_1001 · 昨天</div></div></div>
+        <div class="tile"><div class="ph c4">19fe0b7a.webp</div><div class="meta"><div class="n">霓虹夜</div><div class="s"><span class="tag b">摄影</span>u_3087 · 昨天</div></div></div>
+        <div class="tile"><div class="ph c5">42d9a1c0.avif</div><div class="meta"><div class="n">线稿练习</div><div class="s"><span class="tag b">插画</span>u_2044 · 2 天前</div></div></div>
+        <div class="tile"><div class="ph c6">8c33e2d9.jpg</div><div class="meta"><div class="n">午后窗台</div><div class="s"><span class="tag b">摄影</span>u_1001 · 2 天前</div></div></div>
+        <div class="tile"><div class="ph c2">d0a77f13.webp</div><div class="meta"><div class="n">沙丘</div><div class="s"><span class="tag b">风景</span>u_3087 · 3 天前</div></div></div>
+        <div class="tile"><div class="ph c1">6e5b90ca.png</div><div class="meta"><div class="n">静物</div><div class="s"><span class="tag b">摄影</span>u_2044 · 3 天前</div></div></div>
+      </div>
+      <div class="flexline" style="justify-content:center;margin-top:18px">
+        <button class="btn sm">上一页</button><button class="btn sm pri">1</button><button class="btn sm">2</button><button class="btn sm">3</button><button class="btn sm">下一页</button>
+      </div>
+    </div>
+  </div>
+  <div class="note">未登录用户点任意图片也能看预览浮层和详情，只是没有下载原图和复制直链的权限，那两个按钮换成「登录后可用」。</div>
+</section>
+
+<!-- ===== 广场 · 已登录 ===== -->
+<section class="screen" id="s-plaza-user">
+  <div class="head"><h2>广场 · 已登录</h2><p>上传区放在广场上方，广场内容在下方，同屏可见。上传区支持粘贴、选文件、选文件夹、拖拽四种入口。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span>
+      <span class="search">⌕ 搜索标签、关键词…</span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">我的相册</button><button class="btn gho sm">设置</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:11px">C</span>
+    </div>
+    <div class="pad">
+      <div class="card" style="margin-bottom:18px">
+        <div class="meth">
+          <div class="m-box"><b>拖拽到此处</b><small>把文件或整个文件夹拖进下面的虚线框</small></div>
+          <div class="m-box"><b>选择文件</b><small>支持多选，一次最多 1000 张</small></div>
+          <div class="m-box"><b>选择文件夹</b><small>递归扫描目录下的所有图片</small></div>
+          <div class="m-box"><b>粘贴</b><small><span class="kbd">Ctrl</span> + <span class="kbd">V</span> 直接贴截图</small></div>
+        </div>
+        <div class="dropzone hot">
+          <div class="ph" style="width:46px;height:46px;border-radius:10px;margin:0 auto 8px">＋</div>
+          <div style="font-size:13.5px;font-weight:600">松开鼠标即加入队列</div>
+          <div class="tip" style="margin-top:3px">已选中 8 张 · 支持 JPG / PNG / GIF / WebP / AVIF / HEIC / TIFF / SVG，单张最大 20MB</div>
+        </div>
+        <div class="grid g8" style="margin-bottom:14px">
+          <div class="qitem"><button class="rm">×</button><div class="ph c1"></div><div class="nm">IMG_0312.jpg</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c3"></div><div class="nm">IMG_0313.jpg</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c5"></div><div class="nm">IMG_0314.heic</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c2"></div><div class="nm">IMG_0315.png</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c4"></div><div class="nm">IMG_0316.jpg</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c6"></div><div class="nm">IMG_0317.tiff</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c1"></div><div class="nm">IMG_0318.jpg</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c3"></div><div class="nm">IMG_0319.jpg</div></div>
+        </div>
+        <div class="flexline">
+          <select class="f" style="width:132px"><option>默认相册</option><option>旅行</option></select>
+          <input class="f" placeholder="标签，逗号分隔" style="width:180px">
+          <select class="f" style="width:104px"><option>公开</option><option>私有</option></select>
+          <span class="spacer"></span>
+          <span class="tip" style="margin:0">预检后 3 张已存在，将自动跳过</span>
+          <button class="btn pri">上传 8 张</button>
+        </div>
+      </div>
+      <div class="flexline" style="margin-bottom:14px">
+        <span class="chip on">全部</span><span class="chip">风景</span><span class="chip">人物</span><span class="chip">建筑</span><span class="chip">插画</span>
+        <span class="spacer"></span><span class="chip on">最新</span><span class="chip">最热</span>
+      </div>
+      <div class="grid g4">
+        <div class="tile"><div class="ph c1">a3f9c1b8.webp</div><div class="meta"><div class="n">雪山日出</div><div class="s"><span class="tag b">风景</span>u_1001 · 2 小时前</div></div></div>
+        <div class="tile"><div class="ph c2">7b21d0f4.jpg</div><div class="meta"><div class="n">老城街角</div><div class="s"><span class="tag b">建筑</span>u_2044 · 5 小时前</div></div></div>
+        <div class="tile"><div class="ph c3">c81a55ee.png</div><div class="meta"><div class="n">苔原</div><div class="s"><span class="tag b">风景</span>u_1001 · 昨天</div></div></div>
+        <div class="tile"><div class="ph c4">19fe0b7a.webp</div><div class="meta"><div class="n">霓虹夜</div><div class="s"><span class="tag b">摄影</span>u_3087 · 昨天</div></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 直链与配额 ===== -->
+<section class="screen" id="s-direct-link">
+  <div class="head"><h2>直链与配额展示</h2><p>直链只有一级目录加哈希文件名，不含 UID、相册名和原始文件名。普通用户只看管理员分配的额度。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/albums</span></div>
+    <div class="pad">
+      <div style="margin-bottom:6px;font-size:12.5px;color:var(--muted)">点击复制后的提示：</div>
+      <div class="toast">✓ 已复制直链 <code>https://img.example.com/images/a3f9c1b8d2e4f6a7b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2.webp</code></div>
+      <div class="note g" style="margin-top:12px">
+        真实路径 <span class="mono">/data/1001/旅行/a3f9c1b8….webp</span> 和原始文件名 <span class="mono">IMG_20240912_雪山.jpg</span> 都不出现在链接里。一级目录 <span class="mono">images</span> 可在后台改，改完旧链依然有效。
+      </div>
+      <div class="row" style="margin-top:20px">
+        <div class="card">
+          <h4>普通用户看到的</h4>
+          <div style="font-size:13px;margin-bottom:6px">已用 <b>2.4 GB</b> / 配额 <b>10 GB</b></div>
+          <div class="bar-l"><i style="width:24%"></i></div>
+          <div class="tip">这 10 GB 是管理员分配给你的额度，跟服务器真实磁盘容量无关。</div>
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f3f4f6;font-size:12.5px;color:var(--muted)">相册 3 个 · 图片 1,284 张 · 本月上传 96 张</div>
+        </div>
+        <div class="card">
+          <h4>管理员看到的（容量展示三模式）</h4>
+          <div class="swrow"><div class="txt"><b>自动探测</b><small>识别到 ossfs 网络挂载，已自动隐藏真实容量</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>手动填写总量</b><small>管理员填 500 GB，已用量由已存文件实时汇总</small></div><span class="sw off"></span></div>
+          <div class="swrow"><div class="txt"><b>不显示磁盘容量</b><small>界面上完全不出现这一项</small></div><span class="sw off"></span></div>
+        </div>
+      </div>
+      <div class="qtip" style="margin-top:14px"><span class="ic">!</span><div><b>检测结果</b>当前存储路径挂载在 ossfs（f_type=0x65735546），statfs 返回 16 EB，这是挂载伪值不是真实容量。已自动降级，总量取管理员在「配额与容量」里配置的 500 GB。</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 登录 ===== -->
+<section class="screen" id="s-login">
+  <div class="head"><h2>登录</h2><p>邮箱加密码，管理员账号支持 TOTP 二次验证。连续失败会临时锁定，命中 IP 黑名单直接拒绝。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/login</span></div>
+    <div class="pad" style="max-width:420px;margin:0 auto;padding:38px 18px">
+      <div style="text-align:center;margin-bottom:22px">
+        <div class="logo" style="font-size:20px">Pi<em>x</em>ora</div>
+        <div class="tip">登录后管理你的相册</div>
+      </div>
+      <div class="fld"><label class="f">邮箱</label><input class="f" value="chenyu@example.com"></div>
+      <div class="fld"><label class="f">密码</label><input class="f" type="password" value="············"></div>
+      <div class="flexline" style="justify-content:space-between;margin-bottom:16px;font-size:12.5px">
+        <label style="display:flex;align-items:center;gap:6px;color:#4b5563"><input type="checkbox" checked> 记住我</label>
+        <a href="#" style="color:var(--primary);text-decoration:none">忘记密码？</a>
+      </div>
+      <button class="btn pri" style="width:100%;padding:9px">登录</button>
+      <div class="tip" style="text-align:center;margin-top:16px">还没有账号？<a href="#" style="color:var(--primary);text-decoration:none">注册</a></div>
+      <div class="qtip info" style="margin-top:18px"><span class="ic">i</span><div>账号被管理员暂停或封禁时，登录页给出明确原因和申诉入口，不要只说「登录失败」。</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 注册 ===== -->
+<section class="screen" id="s-register">
+  <div class="head"><h2>注册 · 邮箱验证</h2><p>验证码通过阿里云企业邮箱 SMTP 下发。临时邮箱域名直接拒绝，系统容量触顶时注册入口会自动关闭。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/register</span></div>
+    <div class="pad" style="max-width:440px;margin:0 auto;padding:34px 18px">
+      <div class="fld"><label class="f">邮箱</label><input class="f" value="chenyu@example.com"></div>
+      <div class="fld">
+        <label class="f">邮箱验证码</label>
+        <div class="row"><input class="f" value="482913"><button class="btn" style="flex:0 0 118px">重新发送 (58s)</button></div>
+        <div class="tip">10 分钟内有效，同一邮箱每小时最多 5 次。</div>
+      </div>
+      <div class="fld"><label class="f">密码</label><input class="f" type="password" placeholder="至少 10 位，含大小写与数字"></div>
+      <div class="fld"><label class="f">确认密码</label><input class="f" type="password" value="············"></div>
+      <div class="qtip ok"><span class="ic">✓</span><div><b>注册成功后将获得 10 GB 默认配额</b>额度由管理员统一配置，可在「配额与容量」中调整。</div></div>
+      <button class="btn pri" style="width:100%;padding:9px;margin-top:14px">创建账号</button>
+      <div class="tip" style="text-align:center;margin-top:16px">已有账号？<a href="#" style="color:var(--primary);text-decoration:none">去登录</a></div>
+    </div>
+  </div>
+  <div class="note w">容量触顶后这个页面整页替换成提示：<b>「系统存储容量已达上限，暂停新用户注册」</b>，并说明已注册用户不受影响、何时可能恢复。不要只把注册按钮灰掉。</div>
+</section>
+
+<!-- ===== 账号暂停 · 三端表现 ===== -->
+<section class="screen" id="s-suspended">
+  <div class="head"><h2>账号暂停 · 三端表现</h2><p>管理员一点暂停，WEB 登录和 API 调用同时失效，并由管理员邮箱自动发出一封带解封指引的通知邮件。</p></div>
+
+  <div style="font-size:12.5px;color:var(--muted);margin:0 0 6px">① WEB 端 · 被暂停的用户尝试登录或访问任意页面时看到的整页提示</div>
+  <div class="frame" style="margin-bottom:20px">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/suspended</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span><span class="spacer"></span>
+      <button class="btn gho sm">退出登录</button>
+    </div>
+    <div class="pad" style="max-width:600px;margin:0 auto;padding:32px 18px">
+      <div style="text-align:center;margin-bottom:22px">
+        <div style="width:54px;height:54px;border-radius:50%;background:var(--warning-soft);border:1px solid #fcd34d;display:flex;align-items:center;justify-content:center;font-size:24px;color:var(--warning);margin:0 auto 14px">!</div>
+        <div style="font-size:19px;font-weight:700;margin-bottom:6px">账号已被暂停使用</div>
+        <div style="font-size:13px;color:var(--muted)">暂停期间，网页登录和 API 调用都无法使用</div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <div style="font-size:13px;line-height:2.1;color:#374151">
+          账号 <b>spam@tempmail.xyz</b>（UID <span class="mono">4120</span>）<br>
+          暂停时间 <b>2026-10-14 15:30</b><br>
+          操作人 admin<br>
+          暂停原因 <b style="color:var(--danger)">上传违规内容，违反服务条款第 3 条</b>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <h4>如何解封</h4>
+        <div style="font-size:13px;line-height:1.9;color:#374151">
+          <div style="display:flex;gap:10px;margin-bottom:12px">
+            <span style="flex:0 0 22px;height:22px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:700">1</span>
+            <div><b>准备材料</b><br><span style="color:var(--muted)">本人手持身份证的清晰照片；手写承诺书，写明账号邮箱与「承诺遵守服务条款、不再上传违规内容」。</span></div>
+          </div>
+          <div style="display:flex;gap:10px;margin-bottom:12px">
+            <span style="flex:0 0 22px;height:22px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:700">2</span>
+            <div style="flex:1;min-width:0">
+              <b>发送到管理员邮箱</b><br>
+              <div class="flexline" style="margin-top:6px">
+                <input class="f mono" readonly value="admin@example.com" style="flex:1;min-width:180px">
+                <button class="btn sm">复制邮箱</button>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px">
+            <span style="flex:0 0 22px;height:22px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:700">3</span>
+            <div><b>邮件主题写</b> <span class="mono">解封申请 - spam@tempmail.xyz</span><br><span style="color:var(--muted)">审核一般 1-3 个工作日内完成，结果通过邮件回复。如果你认为这是误判，也可以在邮件里说明情况。</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flexline" style="justify-content:center">
+        <button class="btn">复制管理员邮箱</button>
+        <button class="btn">返回首页</button>
+      </div>
+
+      <div class="qtip info" style="margin-top:16px"><span class="ic">i</span><div>你已上传的内容不会被删除。暂停期间账号内容对他人不可见，解封后自动恢复。</div></div>
+    </div>
+  </div>
+
+  <div style="font-size:12.5px;color:var(--muted);margin:0 0 6px">② API 端 · 所有需要鉴权的端点统一返回 403，用 <span class="mono">code</span> 区分暂停与封禁</div>
+  <div class="frame" style="margin-bottom:20px">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">POST https://img.example.com/api/v1/upload</span></div>
+    <div class="pad">
+      <div class="row" style="margin-bottom:14px">
+        <div>
+          <div class="tip" style="margin:0 0 6px">响应</div>
+          <pre class="code">HTTP/1.1 <span class="n">403 Forbidden</span>
+Content-Type: application/json
+
+{
+  <span class="k">"data"</span>: <span class="n">null</span>,
+  <span class="k">"error"</span>: {
+    <span class="k">"code"</span>: <span class="s">"ACCOUNT_SUSPENDED"</span>,
+    <span class="k">"message"</span>: <span class="s">"账号已被暂停使用，无法调用 API"</span>,
+    <span class="k">"suspended_at"</span>: <span class="s">"2026-10-14T15:30:00+08:00"</span>,
+    <span class="k">"reason"</span>: <span class="s">"上传违规内容，违反服务条款第 3 条"</span>,
+    <span class="k">"appeal_email"</span>: <span class="s">"admin@example.com"</span>,
+    <span class="k">"appeal_url"</span>: <span class="s">"https://img.example.com/suspended"</span>
+  }
+}</pre>
+        </div>
+        <div>
+          <div class="tip" style="margin:0 0 6px">客户端可以据此给出不同提示</div>
+          <pre class="code"><span class="c">// PicGo 自定义图床的错误处理</span>
+if (res.status === <span class="n">403</span>) {
+  const e = (await res.json()).error;
+  if (e.code === <span class="s">"ACCOUNT_SUSPENDED"</span>)
+    <span class="c">// 弹窗：账号已暂停，去 ${e.appeal_url} 看解封指引</span>
+  if (e.code === <span class="s">"ACCOUNT_BANNED"</span>)
+    <span class="c">// 弹窗：账号已封禁，联系 ${e.appeal_email}</span>
+}</pre>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th style="width:190px">code</th><th style="width:88px">HTTP</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">ACCOUNT_SUSPENDED</td><td><span class="badge err">403</span></td><td>账号被暂停，WEB 与 API 均不可用，可按指引申请解封</td></tr>
+          <tr><td class="mono">ACCOUNT_BANNED</td><td><span class="badge err">403</span></td><td>账号被封禁，需管理员解封，无法自助申请</td></tr>
+          <tr><td class="mono">ACCOUNT_PENDING</td><td><span class="badge warn">403</span></td><td>邮箱未验证，账号未激活</td></tr>
+          <tr><td class="mono">IP_BLOCKED</td><td><span class="badge err">403</span></td><td>来源 IP 命中黑名单</td></tr>
+          <tr><td class="mono">TOKEN_REVOKED</td><td><span class="badge err">401</span></td><td>Token 已撤销或过期</td></tr>
+          <tr><td class="mono">QUOTA_EXCEEDED</td><td><span class="badge warn">413</span></td><td>超出账号配额</td></tr>
+        </tbody>
+      </table>
+      <div class="tip" style="margin-top:10px">暂停和封禁都是 403，靠 <span class="mono">code</span> 区分。客户端别只看状态码，否则没法给用户正确的提示。</div>
+    </div>
+  </div>
+
+  <div style="font-size:12.5px;color:var(--muted);margin:0 0 6px">③ 通知邮件 · 管理员点击暂停后自动发出，发件地址就是注册时发验证码的那个邮箱</div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">邮箱客户端</span></div>
+    <div class="pad">
+      <div style="border:1px solid var(--border);border-radius:var(--r);overflow:hidden">
+        <div style="padding:12px 16px;background:#fafafa;border-bottom:1px solid var(--border);font-size:12.5px;line-height:1.9">
+          <div><span style="color:var(--muted);display:inline-block;width:52px">发件人</span><span class="mono">Pixora 管理团队 &lt;noreply@example.com&gt;</span></div>
+          <div><span style="color:var(--muted);display:inline-block;width:52px">收件人</span><span class="mono">spam@tempmail.xyz</span></div>
+          <div><span style="color:var(--muted);display:inline-block;width:52px">主题</span><b>【Pixora】你的账号已被暂停使用 - 解封指引</b></div>
+        </div>
+        <div style="padding:18px 20px;font-size:13px;line-height:1.95;color:#374151">
+          <p style="margin:0 0 12px">你好，</p>
+          <p style="margin:0 0 12px">你的 Pixora 账号（<b>spam@tempmail.xyz</b>，UID 4120）已于 <b>2026-10-14 15:30</b> 被暂停使用。</p>
+          <p style="margin:0 0 12px">暂停原因：<b style="color:var(--danger)">上传违规内容，违反服务条款第 3 条</b></p>
+          <p style="margin:0 0 12px">暂停期间，你的账号无法通过网页登录，也无法调用 API 上传。你已上传的内容会被保留，公开内容将暂时隐藏，解封后自动恢复。</p>
+          <p style="margin:0 0 8px"><b>如何解封</b></p>
+          <ol style="margin:0 0 12px;padding-left:20px">
+            <li>准备材料：本人手持身份证的清晰照片；手写承诺书，写明账号邮箱与「承诺遵守服务条款、不再上传违规内容」。</li>
+            <li>将材料作为附件发送至 <b class="mono">admin@example.com</b></li>
+            <li>邮件主题格式：<span class="mono">解封申请 - spam@tempmail.xyz</span></li>
+          </ol>
+          <p style="margin:0 0 12px">我们会在 1-3 个工作日内审核并邮件回复结果。如果你认为这是误判，请在邮件中说明情况。</p>
+          <p style="margin:0 0 12px;color:var(--muted);font-size:12.5px">本邮件由系统自动发出，请勿直接回复本地址。申诉请发至 admin@example.com。</p>
+          <p style="margin:0">Pixora 管理团队</p>
+        </div>
+      </div>
+      <div class="qtip info" style="margin-top:12px"><span class="ic">i</span><div>发件邮箱固定取「系统设置 → 邮件与注册验证」里的发信账号，也就是给用户发注册验证码的那个。不额外配一个申诉邮箱，避免管理员漏看。</div></div>
+    </div>
+  </div>
+
+  <div class="note w">暂停和封禁的邮件文案要有区别：暂停写「可申请解封」并给材料清单，封禁只写「请联系管理员」不承诺解封，否则会给出错误预期。</div>
+</section>
+
+<!-- ===== 我的相册 · 网格 ===== -->
+<section class="screen" id="s-albums-grid">
+  <div class="head"><h2>我的相册 · 网格视图</h2><p>左键单击任意图片直接打开预览浮层，Shift + 左键按网格宽度范围连续选中多张。不需要单独的预览选项卡。</p></div>
+  <div class="frame" id="fr-grid">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/albums/旅行</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span><span class="spacer"></span>
+      <button class="btn pri sm">＋ 上传图片</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:11px">C</span>
+    </div>
+    <div class="split">
+      <div class="albumlist">
+        <div style="font-size:11px;color:var(--faint);padding:4px 9px 6px">我的相册</div>
+        <a><span>▤</span>全部图片<span class="c">1284</span></a>
+        <a class="on"><span>▤</span>旅行<span class="c">236</span></a>
+        <a><span>▤</span>工作<span class="c">412</span></a>
+        <a><span>▤</span>头像<span class="c">8</span></a>
+        <a style="color:var(--primary)"><span>＋</span>新建相册</a>
+        <div style="font-size:11px;color:var(--faint);padding:14px 9px 6px">用量</div>
+        <div style="padding:0 9px"><div class="bar-l"><i style="width:24%"></i></div><div class="tip" style="margin-top:6px">已用 2.4 GB / 10 GB</div></div>
+      </div>
+      <div style="flex:1;min-width:0">
+        <div class="toolbar sel">
+          <span>已选 <b>3</b> 张</span>
+          <button class="btn sm">打标签</button><button class="btn sm">移动到相册</button><button class="btn sm">复制直链</button><button class="btn sm dgr">删除</button>
+          <span class="spacer"></span>
+          <button class="btn sm gho" onclick="lb('grid')">预览浮层</button>
+          <button class="btn sm gho">取消选择</button>
+        </div>
+        <div class="pad">
+          <div class="grid g4">
+            <div class="tile sel" style="position:relative"><span class="anchor">起点</span><div class="ph c1">a3f9c1b8.webp</div><div class="meta"><div class="n">雪山日出</div><div class="s">2.4 MB · 4032×3024</div></div></div>
+            <div class="tile sel"><div class="ph c2">7b21d0f4.jpg</div><div class="meta"><div class="n">老城街角</div><div class="s">1.8 MB · 3840×2560</div></div></div>
+            <div class="tile sel" style="position:relative"><span class="anchor">终点</span><div class="ph c3">c81a55ee.png</div><div class="meta"><div class="n">苔原</div><div class="s">3.1 MB · 4096×2731</div></div></div>
+            <div class="tile"><div class="ph c4">19fe0b7a.webp</div><div class="meta"><div class="n">霓虹夜</div><div class="s">1.2 MB · 3024×4032</div></div></div>
+            <div class="tile"><div class="ph c5">42d9a1c0.avif</div><div class="meta"><div class="n">线稿练习</div><div class="s">680 KB · 2048×2048</div></div></div>
+            <div class="tile"><div class="ph c6">8c33e2d9.jpg</div><div class="meta"><div class="n">午后窗台</div><div class="s">2.0 MB · 3600×2400</div></div></div>
+            <div class="tile"><div class="ph c2">d0a77f13.webp</div><div class="meta"><div class="n">沙丘</div><div class="s">1.6 MB · 3200×2133</div></div></div>
+            <div class="tile"><div class="ph c1">6e5b90ca.png</div><div class="meta"><div class="n">静物</div><div class="s">2.7 MB · 4000×2667</div></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="lb" id="lb-grid">
+      <div class="lb-top"><b>雪山日出</b><span class="cnt">2 / 236</span><span class="spacer"></span><span style="color:#94a3b8;font-size:12px">← → 切换 · Esc 关闭</span><button class="lb-x" onclick="lb('grid')">×</button></div>
+      <div class="lb-main">
+        <div class="lb-stage">
+          <button class="lb-nav">‹</button>
+          <div class="ph c1" style="width:340px;height:225px;font-size:12.5px;color:#5b6675">雪山日出 · 4032×3024</div>
+          <button class="lb-nav">›</button>
+        </div>
+        <div class="lb-side">
+          <div style="font-weight:700;font-size:13.5px;margin-bottom:8px">雪山日出</div>
+          <div style="color:var(--muted);line-height:1.9">尺寸 4032×3024<br>大小 2.4 MB<br>格式 WebP<br>相册 旅行<br>上传 2026-10-14 12:31</div>
+          <div style="margin:10px 0 4px;color:var(--muted)">SHA-256</div>
+          <div class="mono" style="font-size:10px;color:var(--faint);word-break:break-all">a3f9c1b8d2e4f6a7b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2</div>
+          <div style="margin-top:12px;display:flex;gap:6px">
+            <button class="btn sm pri" style="flex:1">复制直链</button><button class="btn sm" style="flex:1">下载</button>
+          </div>
+        </div>
+      </div>
+      <div class="lb-thumbs">
+        <div class="ph c3"></div><div class="ph c1 cur"></div><div class="ph c5"></div><div class="ph c2"></div><div class="ph c6"></div><div class="ph c4"></div>
+      </div>
+    </div>
+  </div>
+  <div class="note">
+    <b>交互规则</b>：<span class="kbd">左键</span> 打开预览浮层 · <span class="kbd">Shift</span> + <span class="kbd">左键</span> 从起点到终点按网格宽度范围连续选中（图中选中了整行）· <span class="kbd">Ctrl</span> + <span class="kbd">左键</span> 离散多选 · <span class="kbd">Esc</span> 关闭浮层或取消选择。浮层打开时按 <span class="kbd">←</span> <span class="kbd">→</span> 在当前筛选结果里切换。
+  </div>
+</section>
+
+<!-- ===== 我的相册 · 列表 ===== -->
+<section class="screen" id="s-albums-list">
+  <div class="head"><h2>我的相册 · 列表视图</h2><p>同一套交互，只是换成表格：左键点缩略图开预览，Shift + 左键按行范围选中。</p></div>
+  <div class="frame" id="fr-list">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/albums/旅行?view=list</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span><span class="spacer"></span>
+      <button class="btn pri sm">＋ 上传图片</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:11px">C</span>
+    </div>
+    <div class="toolbar">
+      <span class="chip">网格</span><span class="chip on">列表</span>
+      <span class="spacer"></span>
+      <input class="f" placeholder="在相册内搜索…" style="width:200px;padding:4px 10px;font-size:12.5px">
+      <select class="f" style="width:132px;padding:4px 10px;font-size:12.5px"><option>上传时间 ↓</option><option>大小 ↓</option><option>名称 ↑</option></select>
+      <button class="btn sm gho" onclick="lb('list')">预览浮层</button>
+    </div>
+    <div style="overflow:auto">
+      <table>
+        <thead><tr>
+          <th style="width:36px"><input type="checkbox"></th><th style="width:52px">预览</th><th>文件名</th>
+          <th>标签</th><th style="width:88px">大小</th><th style="width:118px">尺寸</th><th style="width:130px">上传时间</th><th style="width:150px">操作</th>
+        </tr></thead>
+        <tbody>
+          <tr class="pick">
+            <td><input type="checkbox" checked></td><td><div class="ph mini c1"></div></td>
+            <td><b>雪山日出</b><div class="mono" style="color:var(--faint);font-size:11px">a3f9c1b8….webp</div></td>
+            <td><span class="tag">风景</span><span class="tag">旅行</span></td><td>2.4 MB</td><td>4032×3024</td><td>10-14 12:31</td>
+            <td><button class="btn sm">复制</button> <button class="btn sm">预览</button> <button class="btn sm dgr">删除</button></td>
+          </tr>
+          <tr class="pick">
+            <td><input type="checkbox" checked></td><td><div class="ph mini c2"></div></td>
+            <td><b>老城街角</b><div class="mono" style="color:var(--faint);font-size:11px">7b21d0f4….jpg</div></td>
+            <td><span class="tag">建筑</span></td><td>1.8 MB</td><td>3840×2560</td><td>10-14 09:02</td>
+            <td><button class="btn sm">复制</button> <button class="btn sm">预览</button> <button class="btn sm dgr">删除</button></td>
+          </tr>
+          <tr class="pick">
+            <td><input type="checkbox" checked></td><td><div class="ph mini c3"></div></td>
+            <td><b>苔原</b><div class="mono" style="color:var(--faint);font-size:11px">c81a55ee….png</div></td>
+            <td><span class="tag">风景</span><span class="tag">自然</span></td><td>3.1 MB</td><td>4096×2731</td><td>10-13 21:47</td>
+            <td><button class="btn sm">复制</button> <button class="btn sm">预览</button> <button class="btn sm dgr">删除</button></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td><td><div class="ph mini c4"></div></td>
+            <td><b>霓虹夜</b><div class="mono" style="color:var(--faint);font-size:11px">19fe0b7a….webp</div></td>
+            <td><span class="tag">摄影</span><span class="tag">城市</span></td><td>1.2 MB</td><td>3024×4032</td><td>10-13 18:15</td>
+            <td><button class="btn sm">复制</button> <button class="btn sm">预览</button> <button class="btn sm dgr">删除</button></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td><td><div class="ph mini c5"></div></td>
+            <td><b>线稿练习</b><div class="mono" style="color:var(--faint);font-size:11px">42d9a1c0….avif</div></td>
+            <td><span class="tag">插画</span></td><td>680 KB</td><td>2048×2048</td><td>10-12 16:40</td>
+            <td><button class="btn sm">复制</button> <button class="btn sm">预览</button> <button class="btn sm dgr">删除</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="lb" id="lb-list">
+      <div class="lb-top"><b>雪山日出</b><span class="cnt">1 / 236</span><span class="spacer"></span><span style="color:#94a3b8;font-size:12px">← → 切换 · Esc 关闭</span><button class="lb-x" onclick="lb('list')">×</button></div>
+      <div class="lb-main">
+        <div class="lb-stage">
+          <button class="lb-nav">‹</button>
+          <div class="ph c1" style="width:340px;height:225px;font-size:12.5px;color:#5b6675">雪山日出 · 4032×3024</div>
+          <button class="lb-nav">›</button>
+        </div>
+        <div class="lb-side">
+          <div style="font-weight:700;font-size:13.5px;margin-bottom:8px">雪山日出</div>
+          <div style="color:var(--muted);line-height:1.9">尺寸 4032×3024<br>大小 2.4 MB<br>格式 WebP<br>相册 旅行<br>上传 2026-10-14 12:31</div>
+          <div style="margin-top:12px;display:flex;gap:6px">
+            <button class="btn sm pri" style="flex:1">复制直链</button><button class="btn sm" style="flex:1">下载</button>
+          </div>
+        </div>
+      </div>
+      <div class="lb-thumbs">
+        <div class="ph c1 cur"></div><div class="ph c2"></div><div class="ph c3"></div><div class="ph c4"></div><div class="ph c5"></div>
+      </div>
+    </div>
+  </div>
+  <div class="note">列表视图里 Shift 的语义按行生效：点第一行任意位置，按住 Shift 点第五行，中间四行整段选中。表头勾选框支持全选和半选状态。</div>
+</section>
+
+<!-- ===== 上传面板 ===== -->
+<section class="screen" id="s-upload">
+  <div class="head"><h2>上传面板</h2><p>粘贴、选文件、选文件夹、拖拽四种入口并列，上传框自带图片预览，每张可单独移除。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/albums/旅行/upload</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span><span class="spacer"></span>
+      <button class="btn gho sm">我的相册</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:11px">C</span>
+    </div>
+    <div class="pad">
+      <div class="card" style="margin-bottom:14px">
+        <h4>选择方式 <small>四种入口效果一样，进同一个队列</small></h4>
+        <div class="meth">
+          <div class="m-box"><b>拖拽</b><small>文件或文件夹拖进虚线框，松开即入队</small></div>
+          <div class="m-box"><b>选择文件</b><small>系统文件选择器，支持多选与 Ctrl+A</small></div>
+          <div class="m-box"><b>选择文件夹</b><small>递归扫描，保留相对路径作为标签</small></div>
+          <div class="m-box"><b>粘贴</b><small>页面任意位置 <span class="kbd">Ctrl</span>+<span class="kbd">V</span>，截图工具直接贴</small></div>
+        </div>
+        <div class="dropzone">
+          <div class="ph" style="width:46px;height:46px;border-radius:10px;margin:0 auto 8px">＋</div>
+          <div style="font-size:13.5px;font-weight:600">拖拽到此处，或点击选择文件 / 文件夹</div>
+          <div class="tip" style="margin-top:3px">也可以直接按 <span class="kbd">Ctrl</span> + <span class="kbd">V</span> 粘贴剪贴板里的图片</div>
+          <div class="flexline" style="justify-content:center;margin-top:12px">
+            <button class="btn sm pri">选择文件</button>
+            <button class="btn sm">选择文件夹</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <h4>待上传预览 <small>8 张 · 合计 18.6 MB · 缩略图已由浏览器生成</small></h4>
+        <div class="grid g8">
+          <div class="qitem"><button class="rm">×</button><div class="ph c1"></div><div class="nm">IMG_0312.jpg</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c3"></div><div class="nm">IMG_0313.jpg</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c5"></div><div class="nm">IMG_0314.heic</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c2"></div><div class="nm">IMG_0315.png</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c4"></div><div class="nm">IMG_0316.jpg</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c6"></div><div class="nm">IMG_0317.tiff</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c1"></div><div class="nm">IMG_0318.jpg</div></div>
+          <div class="qitem"><button class="rm">×</button><div class="ph c3"></div><div class="nm">IMG_0319.jpg</div></div>
+        </div>
+        <div class="qtip info" style="margin-top:12px"><span class="ic">i</span><div><b>预检结果</b>8 张里有 3 张服务器已存在，上传时自动跳过，不会重复占盘，也不消耗带宽。</div></div>
+      </div>
+
+      <div class="card">
+        <h4>上传设置</h4>
+        <div class="row" style="margin-bottom:12px">
+          <div class="fld" style="margin:0"><label class="f">目标相册</label><select class="f"><option>旅行</option><option>默认相册</option><option>工作</option></select></div>
+          <div class="fld" style="margin:0"><label class="f">标签（全部共用）</label><input class="f" value="风景,旅行"></div>
+          <div class="fld" style="margin:0"><label class="f">可见性</label><select class="f"><option>公开</option><option>私有</option></select></div>
+          <div class="fld" style="margin:0"><label class="f">并发数</label><select class="f"><option>1（逐张，推荐）</option><option>2</option><option>4</option></select></div>
+        </div>
+        <div class="flexline" style="justify-content:flex-end">
+          <span class="tip" style="margin:0;margin-right:auto">队列状态存在浏览器本地，刷新页面不会丢。</span>
+          <button class="btn">清空</button>
+          <button class="btn pri">开始上传（8 张）</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 上传队列 ===== -->
+<section class="screen" id="s-queue">
+  <div class="head"><h2>上传队列</h2><p>一次选 1000 张时逐张排队，不并发打满。已存在的文件在预检阶段就被跳过。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/albums/旅行</span></div>
+    <div class="pad">
+      <div class="card">
+        <div class="flexline" style="justify-content:space-between;margin-bottom:10px">
+          <div>
+            <div style="font-weight:700;font-size:13.5px">正在上传 1,000 张图片</div>
+            <div class="tip" style="margin-top:2px">目标相册「旅行」 · 标签「风景,旅行」 · 可见性 公开 · 并发 1</div>
+          </div>
+          <div class="flexline"><button class="btn sm">暂停</button><button class="btn sm dgr">取消</button></div>
+        </div>
+        <div class="bar-l" style="height:8px"><i style="width:38%"></i></div>
+        <div class="flexline" style="justify-content:space-between;margin-top:8px;font-size:12.5px;color:var(--muted)">
+          <span>已完成 <b style="color:var(--text)">380</b> / 1,000</span><span>预计剩余 6 分 12 秒</span>
+        </div>
+      </div>
+      <div class="stat" style="margin-top:14px">
+        <div class="card"><div class="k">上传成功</div><div class="v" style="color:var(--success)">342</div></div>
+        <div class="card"><div class="k">跳过（已存在）</div><div class="v" style="color:var(--primary)">31</div></div>
+        <div class="card"><div class="k">等待中</div><div class="v" style="color:var(--muted)">620</div></div>
+        <div class="card"><div class="k">失败</div><div class="v" style="color:var(--danger)">7</div></div>
+      </div>
+      <div class="card" style="margin-top:14px;padding:0;overflow:hidden">
+        <div style="max-height:220px;overflow:auto">
+          <table>
+            <thead><tr><th style="width:44%">文件</th><th style="width:110px">大小</th><th style="width:150px">状态</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td>IMG_0312.jpg</td><td>2.4 MB</td><td><span class="badge ok">已完成</span></td><td class="mono" style="font-size:11px;color:var(--faint)">a3f9c1b8….webp</td></tr>
+              <tr><td>IMG_0313.jpg</td><td>1.9 MB</td><td><span class="badge info">已跳过</span></td><td style="color:var(--muted)">服务器已有相同文件，未消耗带宽</td></tr>
+              <tr><td>IMG_0314.heic</td><td>3.2 MB</td><td><span class="badge ok">已完成</span></td><td style="color:var(--muted)">客户端已转 WebP 缩略图</td></tr>
+              <tr><td>IMG_0315.png</td><td>4.1 MB</td><td><span class="badge warn">上传中 62%</span></td><td style="color:var(--muted)">1 / 1 并发</td></tr>
+              <tr><td>IMG_0316.jpg</td><td>2.2 MB</td><td><span class="badge mute">等待中</span></td><td style="color:var(--faint)">队列第 381 位</td></tr>
+              <tr><td>IMG_0317.tiff</td><td>8.6 MB</td><td><span class="badge err">失败</span></td><td style="color:var(--danger)">像素超出上限</td></tr>
+              <tr><td>IMG_0318.jpg</td><td>2.0 MB</td><td><span class="badge err">失败</span></td><td style="color:var(--danger)">已重试 3 次，可点击重试</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="flexline" style="margin-top:14px">
+        <button class="btn">重试全部失败项</button><button class="btn">导出成功清单</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== API 文档 ===== -->
+<section class="screen" id="s-api-doc">
+  <div class="head"><h2>API 文档</h2><p>列出全部可用端点、参数含义和调用示例，用户照着复制就能接上 PicGo、PicList 或自己的脚本。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/docs/api</span></div>
+    <div class="pad">
+
+      <div class="row" style="margin-bottom:16px">
+        <div class="card">
+          <h4>基础信息</h4>
+          <div style="font-size:12.5px;line-height:2.1;color:#374151">
+            接口根地址 <span class="mono">https://img.example.com</span><br>
+            鉴权方式 <span class="mono">Authorization: Bearer &lt;token&gt;</span><br>
+            备用方式 <span class="mono">X-API-Key: &lt;token&gt;</span><br>
+            请求格式 <span class="mono">multipart/form-data</span> 或 <span class="mono">application/json</span><br>
+            响应格式 <span class="mono">application/json</span><br>
+            速率限制 每 Token 每分钟 300 次上传，超出返回 <span class="mono">429</span>
+          </div>
+        </div>
+        <div class="card">
+          <h4>Token 与权限</h4>
+          <div style="font-size:12.5px;line-height:2.1;color:#374151">
+            在「个人设置 → API Token」生成，只在创建时完整显示一次。<br>
+            <span class="tag">upload</span> 上传与预检<br>
+            <span class="tag">read</span> 读取图片、相册、目录树<br>
+            <span class="tag">write</span> 修改与删除<br>
+            <span class="tag">admin</span> 管理接口，仅管理员 Token 可用
+          </div>
+          <div class="tip">Token 在库里存的是哈希，服务端也拿不到明文。</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px;padding:0;overflow:hidden">
+        <table>
+          <thead><tr><th style="width:74px">方法</th><th style="width:210px">路径</th><th>作用</th><th style="width:96px">权限</th></tr></thead>
+          <tbody>
+            <tr><td><span class="m post">POST</span></td><td class="mono">/api/v1/upload</td><td>上传单张图片</td><td><span class="tag">upload</span></td></tr>
+            <tr><td><span class="m post">POST</span></td><td class="mono">/api/v1/blobs/exists</td><td>批量预检哈希，判断哪些文件已存在</td><td><span class="tag">upload</span></td></tr>
+            <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/images</td><td>图片列表，支持分页与标签筛选</td><td><span class="tag">read</span></td></tr>
+            <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/images/{id}</td><td>单张图片详情</td><td><span class="tag">read</span></td></tr>
+            <tr><td><span class="m patch">PATCH</span></td><td class="mono">/api/v1/images/{id}</td><td>改标签、可见性、所属相册</td><td><span class="tag">write</span></td></tr>
+            <tr><td><span class="m del">DELETE</span></td><td class="mono">/api/v1/images/{id}</td><td>删除图片（引用计数归零才删物理文件）</td><td><span class="tag">write</span></td></tr>
+            <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/albums</td><td>相册列表</td><td><span class="tag">read</span></td></tr>
+            <tr><td><span class="m post">POST</span></td><td class="mono">/api/v1/albums</td><td>新建相册</td><td><span class="tag">write</span></td></tr>
+            <tr><td><span class="m patch">PATCH</span></td><td class="mono">/api/v1/albums/{id}</td><td>改相册名称、可见性、排序</td><td><span class="tag">write</span></td></tr>
+            <tr><td><span class="m del">DELETE</span></td><td class="mono">/api/v1/albums/{id}</td><td>删除相册</td><td><span class="tag">write</span></td></tr>
+            <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/plaza</td><td>广场搜索，公开端点不需要鉴权</td><td><span class="badge mute">公开</span></td></tr>
+            <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/fs/tree</td><td>数据目录递归查询</td><td><span class="tag">read</span></td></tr>
+            <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/queue/{job_id}</td><td>查询队列任务状态</td><td><span class="tag">read</span></td></tr>
+            <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/me</td><td>当前用户信息与配额用量</td><td><span class="tag">read</span></td></tr>
+            <tr><td><span class="m post">POST</span></td><td class="mono">/upload</td><td>兼容旧版图床的调用方式</td><td><span class="tag">upload</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="endpoint">
+        <div class="ep-h"><span class="m post">POST</span><span class="p">/api/v1/upload</span><span class="spacer"></span><span class="badge info">上传单张</span></div>
+        <div class="ep-b">
+          <table style="margin-bottom:12px">
+            <thead><tr><th style="width:150px">参数</th><th style="width:96px">类型</th><th style="width:76px">必填</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">file</td><td>file</td><td><span class="badge err">必填</span></td><td>图片本体，字段名固定为 <span class="mono">file</span></td></tr>
+              <tr><td class="mono">sha256</td><td>string</td><td><span class="badge mute">可选</span></td><td>客户端算好的哈希。带上它服务端就不用再算一遍，重复文件可直接跳过</td></tr>
+              <tr><td class="mono">thumb</td><td>file</td><td><span class="badge mute">可选</span></td><td>客户端生成的缩略图，服务端直接存，不做缩放</td></tr>
+              <tr><td class="mono">album_id</td><td>int</td><td><span class="badge mute">可选</span></td><td>目标相册，省略则进默认相册</td></tr>
+              <tr><td class="mono">tags</td><td>string</td><td><span class="badge mute">可选</span></td><td>逗号分隔，如 <span class="mono">风景,旅行</span></td></tr>
+              <tr><td class="mono">visibility</td><td>string</td><td><span class="badge mute">可选</span></td><td><span class="mono">public</span> 或 <span class="mono">private</span>，默认 private</td></tr>
+              <tr><td class="mono">original_name</td><td>string</td><td><span class="badge mute">可选</span></td><td>保留原始文件名，仅内部记录，不出现在直链里</td></tr>
+            </tbody>
+          </table>
+          <div class="row">
+            <div>
+              <div class="tip" style="margin:0 0 6px">请求示例</div>
+              <pre class="code"><span class="c"># curl</span>
+curl -X POST <span class="s">"https://img.example.com/api/v1/upload"</span> \
+  -H <span class="s">"Authorization: Bearer px_live_9f2a7c41e8b3d605"</span> \
+  -F <span class="s">"file=@./photo.jpg"</span> \
+  -F <span class="s">"tags=风景,旅行"</span> \
+  -F <span class="s">"visibility=public"</span></pre>
+            </div>
+            <div>
+              <div class="tip" style="margin:0 0 6px">响应示例</div>
+              <pre class="code">{
+  <span class="k">"data"</span>: {
+    <span class="k">"id"</span>: <span class="n">88214</span>,
+    <span class="k">"url"</span>: <span class="s">"https://img.example.com/images/a3f9c1b8...e7.webp"</span>,
+    <span class="k">"sha256"</span>: <span class="s">"a3f9c1b8d2e4f6a7..."</span>,
+    <span class="k">"size"</span>: <span class="n">2411724</span>,
+    <span class="k">"dedup"</span>: <span class="n">false</span>
+  },
+  <span class="k">"error"</span>: <span class="n">null</span>
+}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="endpoint">
+        <div class="ep-h"><span class="m post">POST</span><span class="p">/api/v1/blobs/exists</span><span class="spacer"></span><span class="badge info">批量预检</span></div>
+        <div class="ep-b">
+          <table style="margin-bottom:12px">
+            <thead><tr><th style="width:150px">参数</th><th style="width:96px">类型</th><th style="width:76px">必填</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">hashes</td><td>string[]</td><td><span class="badge err">必填</span></td><td>SHA-256 数组，单次最多 1000 个</td></tr>
+            </tbody>
+          </table>
+          <div class="row">
+            <div>
+              <div class="tip" style="margin:0 0 6px">请求示例</div>
+              <pre class="code">curl -X POST <span class="s">"https://img.example.com/api/v1/blobs/exists"</span> \
+  -H <span class="s">"Authorization: Bearer $TOKEN"</span> \
+  -H <span class="s">"Content-Type: application/json"</span> \
+  -d <span class="s">'{"hashes":["a3f9c1b8...","7b21d0f4..."]}'</span></pre>
+            </div>
+            <div>
+              <div class="tip" style="margin:0 0 6px">响应示例</div>
+              <pre class="code">{
+  <span class="k">"data"</span>: {
+    <span class="k">"exist"</span>: [<span class="s">"a3f9c1b8..."</span>],
+    <span class="k">"missing"</span>: [<span class="s">"7b21d0f4..."</span>]
+  }
+}</pre>
+            </div>
+          </div>
+          <div class="tip" style="margin-top:10px">这是省带宽的关键一步：只把 <span class="mono">missing</span> 里的文件发出去，重复的连请求都不发。</div>
+        </div>
+      </div>
+
+      <div class="endpoint">
+        <div class="ep-h"><span class="m get">GET</span><span class="p">/api/v1/plaza</span><span class="spacer"></span><span class="badge mute">公开</span></div>
+        <div class="ep-b">
+          <table style="margin-bottom:12px">
+            <thead><tr><th style="width:150px">参数</th><th style="width:96px">类型</th><th style="width:76px">必填</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">q</td><td>string</td><td><span class="badge mute">可选</span></td><td>关键词，匹配标题与标签</td></tr>
+              <tr><td class="mono">tag</td><td>string</td><td><span class="badge mute">可选</span></td><td>精确匹配某个标签</td></tr>
+              <tr><td class="mono">sort</td><td>string</td><td><span class="badge mute">可选</span></td><td><span class="mono">new</span> 或 <span class="mono">hot</span>，默认 new</td></tr>
+              <tr><td class="mono">page</td><td>int</td><td><span class="badge mute">可选</span></td><td>页码，从 1 开始</td></tr>
+              <tr><td class="mono">per_page</td><td>int</td><td><span class="badge mute">可选</span></td><td>每页条数，默认 24，上限 100</td></tr>
+            </tbody>
+          </table>
+          <pre class="code">curl <span class="s">"https://img.example.com/api/v1/plaza?tag=风景&sort=hot&page=1"</span></pre>
+        </div>
+      </div>
+
+      <div class="endpoint">
+        <div class="ep-h"><span class="m get">GET</span><span class="p">/api/v1/fs/tree</span><span class="spacer"></span><span class="badge info">目录递归</span></div>
+        <div class="ep-b">
+          <table style="margin-bottom:12px">
+            <thead><tr><th style="width:150px">参数</th><th style="width:96px">类型</th><th style="width:76px">必填</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">uid</td><td>string</td><td><span class="badge mute">可选</span></td><td>用户 UID。管理员可指定他人，普通用户只能查自己</td></tr>
+              <tr><td class="mono">album</td><td>string</td><td><span class="badge mute">可选</span></td><td>相册 slug，省略则返回该用户全部相册</td></tr>
+              <tr><td class="mono">depth</td><td>int</td><td><span class="badge mute">可选</span></td><td>递归层数，默认 2，上限 5</td></tr>
+              <tr><td class="mono">cursor</td><td>string</td><td><span class="badge mute">可选</span></td><td>分页游标，取上一页返回的 <span class="mono">next_cursor</span></td></tr>
+            </tbody>
+          </table>
+          <div class="row">
+            <div>
+              <div class="tip" style="margin:0 0 6px">请求示例</div>
+              <pre class="code">curl <span class="s">"https://img.example.com/api/v1/fs/tree?uid=1001&album=旅行&depth=2"</span> \
+  -H <span class="s">"Authorization: Bearer $TOKEN"</span></pre>
+            </div>
+            <div>
+              <div class="tip" style="margin:0 0 6px">响应示例</div>
+              <pre class="code">{
+  <span class="k">"data"</span>: {
+    <span class="k">"uid"</span>: <span class="s">"1001"</span>,
+    <span class="k">"path"</span>: <span class="s">"/1001/旅行"</span>,
+    <span class="k">"files"</span>: <span class="n">236</span>,
+    <span class="k">"size"</span>: <span class="n">612430192</span>,
+    <span class="k">"next_cursor"</span>: <span class="n">null</span>
+  }
+}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:16px">
+        <div class="card">
+          <h4>PicGo / PicList 配置</h4>
+          <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px">装「自定义 Web 图床」插件后按下表填：</div>
+          <table>
+            <tbody>
+              <tr><td style="width:132px;color:var(--muted)">API 地址</td><td class="mono">https://img.example.com/api/v1/upload</td></tr>
+              <tr><td style="color:var(--muted)">文件字段名</td><td class="mono">file</td></tr>
+              <tr><td style="color:var(--muted)">额外请求头</td><td class="mono">Authorization: Bearer &lt;token&gt;</td></tr>
+              <tr><td style="color:var(--muted)">返回 URL 路径</td><td class="mono">data.url</td></tr>
+            </tbody>
+          </table>
+          <button class="btn pri sm" style="margin-top:10px">复制配置 JSON</button>
+        </div>
+        <div class="card">
+          <h4>兼容旧调用方式</h4>
+          <div style="font-size:12.5px;color:var(--muted);margin-bottom:8px">沿用原来的字段名和响应结构，老脚本不用改。</div>
+          <pre class="code">curl -X POST <span class="s">"https://img.example.com/upload"</span> \
+  -H <span class="s">"X-API-Key: $TOKEN"</span> \
+  -F <span class="s">"image=@./photo.jpg"</span> \
+  -F <span class="s">"tags=风景"</span></pre>
+          <div class="tip" style="margin-top:8px">响应 <span class="mono">{success, message, url, storage_type, tags}</span>，和旧版一致。</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  <div class="note">这份文档建议做成从 OpenAPI 规范自动生成的，改接口时文档跟着变，避免手写文档和代码脱节。</div>
+</section>
+
+<!-- ===== 用户中心 · 账号信息 ===== -->
+<section class="screen" id="s-account-info">
+  <div class="head"><h2>账号信息</h2><p>邮箱、UID、角色、状态与用量。频率限制由管理员配置，这里只读展示。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/settings/profile</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span><span class="spacer"></span>
+      <button class="btn gho sm">我的相册</button><button class="btn gho sm">广场</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:11px">C</span>
+    </div>
+    <div class="pad">
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>账号信息</h4>
+          <div style="font-size:13px;line-height:2">
+            邮箱 <b>chenyu@example.com</b> <span class="badge ok" style="margin-left:6px">已验证</span><br>
+            UID <span class="mono">1001</span><br>
+            角色 <span class="badge info">普通用户</span><br>
+            状态 <span class="badge ok">正常</span><br>
+            注册于 2026-08-02
+          </div>
+          <div class="tip">邮箱和密码由管理员在后台也能改，改完会给你发通知邮件。</div>
+        </div>
+        <div class="card">
+          <h4>存储用量</h4>
+          <div style="font-size:13px;margin-bottom:8px">已用 <b>2.4 GB</b> / 配额 <b>10 GB</b></div>
+          <div class="bar-l"><i style="width:24%"></i></div>
+          <div class="tip">配额由管理员分配，接近上限时会提前提示。</div>
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f3f4f6;font-size:12.5px;color:var(--muted)">相册 3 · 图片 1,284 · 其中公开 216</div>
+        </div>
+      </div>
+        <div class="card">
+          <h4>频率限制（只读）</h4>
+          <div class="row">
+            <div class="fld" style="margin:0"><label class="f">API 次 / 分钟</label><input class="f" value="120" readonly></div>
+            <div class="fld" style="margin:0"><label class="f">上传 张 / 分钟</label><input class="f" value="30" readonly></div>
+            <div class="fld" style="margin:0"><label class="f">上传 张 / 天</label><input class="f" value="2000" readonly></div>
+            <div class="fld" style="margin:0"><label class="f">单日流量</label><input class="f" value="5 GB" readonly></div>
+          </div>
+          <div class="tip">由管理员在后台配置，用户自己改不了。需要调整请联系管理员。</div>
+        </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 用户中心 · 安全 ===== -->
+<section class="screen" id="s-account-security">
+  <div class="head"><h2>安全</h2><p>密码、二次验证、登录提醒和活跃会话管理。三块内容都在这一页，不再分栏。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/settings/security</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span><span class="spacer"></span>
+      <button class="btn gho sm">我的相册</button><button class="btn gho sm">广场</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:11px">C</span>
+    </div>
+    <div class="pad">
+        <div class="row" style="margin-bottom:14px">
+          <div class="card">
+            <h4>密码</h4>
+            <div class="fld"><label class="f">当前密码</label><input class="f" type="password"></div>
+            <div class="row">
+              <div class="fld"><label class="f">新密码</label><input class="f" type="password" placeholder="至少 10 位，含大小写与数字"></div>
+              <div class="fld"><label class="f">确认新密码</label><input class="f" type="password"></div>
+            </div>
+            <button class="btn">修改密码</button>
+            <div class="tip">上次修改 2026-08-02。改完后其他设备上的会话会被踢下线。</div>
+          </div>
+          <div class="card">
+            <h4>验证与提醒</h4>
+            <div class="swrow"><div class="txt"><b>二次验证（TOTP）</b><small>验证器 App 生成动态码，2026-08-03 绑定</small></div><span class="sw on"></span></div>
+            <div class="swrow"><div class="txt"><b>登录提醒邮件</b><small>新设备登录时发送通知</small></div><span class="sw on"></span></div>
+            <div class="swrow"><div class="txt"><b>异常登录拦截</b><small>短时间内异地登录时要求二次验证</small></div><span class="sw on"></span></div>
+            <div class="flexline" style="margin-top:12px">
+              <button class="btn sm">重新生成恢复码</button>
+              <span class="badge mute">剩余 6 个</span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h4>活跃会话</h4>
+          <table>
+            <thead><tr><th style="width:180px">设备</th><th style="width:150px">IP</th><th style="width:130px">最近活动</th><th>登录时间</th><th style="width:96px">操作</th></tr></thead>
+            <tbody>
+              <tr><td>Chrome · Windows <span class="badge ok" style="margin-left:4px">当前</span></td><td class="mono">203.0.113.18</td><td>刚刚</td><td>2026-10-14 12:28</td><td><span style="font-size:12px;color:var(--faint)">—</span></td></tr>
+              <tr><td>PicGo · Windows</td><td class="mono">203.0.113.18</td><td>2 小时前</td><td>2026-10-10 09:15</td><td><button class="btn sm dgr">下线</button></td></tr>
+              <tr><td>Safari · iPhone</td><td class="mono">198.51.100.42</td><td>3 天前</td><td>2026-10-08 20:41</td><td><button class="btn sm dgr">下线</button></td></tr>
+            </tbody>
+          </table>
+          <div class="flexline" style="margin-top:10px"><button class="btn sm dgr">下线所有其他设备</button></div>
+        </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 用户中心 · API Token ===== -->
+<section class="screen" id="s-account-api">
+  <div class="head"><h2>API Token</h2><p>管理用于 API 上传的令牌，以及给 PicGo / PicList 用的配置片段。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/settings/tokens</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span><span class="spacer"></span>
+      <button class="btn gho sm">我的相册</button><button class="btn gho sm">广场</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:11px">C</span>
+    </div>
+    <div class="pad">
+        <div class="card" style="margin-bottom:14px">
+          <h4>已有 Token</h4>
+          <table>
+            <thead><tr><th>名称</th><th style="width:180px">权限</th><th style="width:130px">最后使用</th><th style="width:130px">过期时间</th><th style="width:76px"></th></tr></thead>
+            <tbody>
+              <tr><td>PicGo 桌面端</td><td><span class="tag">upload</span></td><td>2 小时前</td><td>永不过期</td><td><button class="btn sm dgr">撤销</button></td></tr>
+              <tr><td>CI 发布脚本</td><td><span class="tag">upload</span><span class="tag">read</span></td><td>3 天前</td><td>2026-12-31</td><td><button class="btn sm dgr">撤销</button></td></tr>
+            </tbody>
+          </table>
+          <div class="tip" style="margin-top:10px">Token 只在生成时完整显示一次，之后库里只存哈希，服务端也拿不到明文。</div>
+        </div>
+        <div class="row">
+          <div class="card">
+            <h4>新建 Token</h4>
+            <div class="fld"><label class="f">名称</label><input class="f" placeholder="例如：家里的笔记本"></div>
+            <div class="fld"><label class="f">权限范围</label>
+              <div class="flexline"><span class="chip on">upload</span><span class="chip on">read</span><span class="chip">write</span></div>
+            </div>
+            <div class="fld"><label class="f">过期时间</label><select class="f"><option>永不过期</option><option>30 天</option><option>90 天</option><option>1 年</option></select></div>
+            <button class="btn pri">生成 Token</button>
+          </div>
+          <div class="card">
+            <h4>PicGo / PicList 配置</h4>
+            <table>
+              <tbody>
+                <tr><td style="width:132px;color:var(--muted)">API 地址</td><td class="mono">https://img.example.com/api/v1/upload</td></tr>
+                <tr><td style="color:var(--muted)">文件字段名</td><td class="mono">file</td></tr>
+                <tr><td style="color:var(--muted)">请求头</td><td class="mono">Authorization: Bearer &lt;token&gt;</td></tr>
+                <tr><td style="color:var(--muted)">返回 URL 路径</td><td class="mono">data.url</td></tr>
+              </tbody>
+            </table>
+            <button class="btn pri sm" style="margin-top:10px">一键复制全部配置</button>
+            <div class="tip" style="margin-top:8px">完整端点与参数说明见「API 文档」。</div>
+          </div>
+        </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 用户管理 ===== -->
+<section class="screen" id="s-admin-users">
+  <div class="head"><h2>用户管理</h2><p>配额度、改邮箱密码、暂停或封禁违规账号，以及进入某个用户的相册视图。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/admin/users</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora <span style="font-weight:400;color:var(--muted);font-size:12px">管理后台</span></span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">图片管理</button><button class="btn gho sm">存储管理</button><button class="btn gho sm">配额与容量</button><button class="btn gho sm">系统设置</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#fecaca;color:#991b1b;font-size:11px">A</span>
+    </div>
+    <div class="pad">
+      <div class="stat" style="margin-bottom:14px">
+        <div class="card"><div class="k">用户总数</div><div class="v">38</div></div>
+        <div class="card"><div class="k">本月新增</div><div class="v">6</div></div>
+        <div class="card"><div class="k">已分配配额</div><div class="v" style="font-size:17px">420 GB</div></div>
+        <div class="card"><div class="k">实际占用</div><div class="v" style="font-size:17px">128.6 GB</div></div>
+      </div>
+      <div class="toolbar">
+        <input class="f" placeholder="搜索邮箱或 UID…" style="width:220px;padding:4px 10px;font-size:12.5px">
+        <select class="f" style="width:118px;padding:4px 10px;font-size:12.5px"><option>全部角色</option><option>管理员</option><option>普通用户</option></select>
+        <select class="f" style="width:118px;padding:4px 10px;font-size:12.5px"><option>全部状态</option><option>正常</option><option>待验证</option><option>已暂停</option><option>已封禁</option></select>
+        <span class="spacer"></span>
+        <button class="btn sm">批量设配额</button>
+        <button class="btn sm">批量暂停</button>
+      </div>
+      <table>
+        <thead><tr>
+          <th style="width:36px"><input type="checkbox"></th><th style="width:70px">UID</th><th>邮箱</th><th style="width:92px">角色</th>
+          <th style="width:92px">状态</th><th style="width:200px">用量 / 配额</th><th style="width:104px">注册时间</th><th style="width:196px">操作</th>
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td><input type="checkbox"></td><td class="mono">1001</td><td>chenyu@example.com</td>
+            <td><span class="badge info">普通用户</span></td><td><span class="badge ok">正常</span></td>
+            <td><div class="bar-l" style="margin-bottom:4px"><i style="width:24%"></i></div><span style="font-size:12px;color:var(--muted)">2.4 / 10 GB</span></td>
+            <td>2026-08-02</td>
+            <td><button class="btn sm">详情</button> <button class="btn sm">查看相册</button> <button class="btn sm wrn">暂停</button></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td><td class="mono">2044</td><td>design@studio.io</td>
+            <td><span class="badge info">普通用户</span></td><td><span class="badge ok">正常</span></td>
+            <td><div class="bar-l" style="margin-bottom:4px"><i class="w" style="width:68%"></i></div><span style="font-size:12px;color:var(--muted)">34.2 / 50 GB</span></td>
+            <td>2026-07-19</td>
+            <td><button class="btn sm">详情</button> <button class="btn sm">查看相册</button> <button class="btn sm wrn">暂停</button></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td><td class="mono">3087</td><td>photo@agency.cn</td>
+            <td><span class="badge info">普通用户</span></td><td><span class="badge warn">待验证</span></td>
+            <td><span style="font-size:12px;color:var(--faint)">—</span></td>
+            <td>2026-10-13</td>
+            <td><button class="btn sm">详情</button> <button class="btn sm">查看相册</button> <button class="btn sm wrn">暂停</button></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td><td class="mono">4120</td><td>spam@tempmail.xyz</td>
+            <td><span class="badge info">普通用户</span></td><td><span class="badge err">已封禁</span></td>
+            <td><div class="bar-l" style="margin-bottom:4px"><i class="d" style="width:92%"></i></div><span style="font-size:12px;color:var(--muted)">9.2 / 10 GB</span></td>
+            <td>2026-09-28</td>
+            <td><button class="btn sm">详情</button> <button class="btn sm">解封</button></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td><td class="mono">1000</td><td>admin@example.com</td>
+            <td><span class="badge pp">管理员</span></td><td><span class="badge ok">正常</span></td>
+            <td><div class="bar-l" style="margin-bottom:4px"><i style="width:11%"></i></div><span style="font-size:12px;color:var(--muted)">5.6 / 50 GB</span></td>
+            <td>2026-06-01</td>
+            <td><button class="btn sm">详情</button> <button class="btn sm">查看相册</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="note">「暂停」和「封禁」不是一回事，见下一页。两者都会让网页登录和 API 同时失效，点确认后由管理员邮箱自动发出通知邮件。管理员账号不能被暂停或封禁，避免把自己锁在外面。</div>
+</section>
+
+<!-- ===== 用户详情与处置 ===== -->
+<section class="screen" id="s-admin-user-detail">
+  <div class="head"><h2>用户详情与处置</h2><p>改邮箱密码、调配额、暂停或封禁。每一步都写进审计日志。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/admin/users/4120</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora <span style="font-weight:400;color:var(--muted);font-size:12px">管理后台</span></span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">用户管理</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#fecaca;color:#991b1b;font-size:11px">A</span>
+    </div>
+    <div class="pad">
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>基本信息 <small>可直接修改</small></h4>
+          <div class="row">
+            <div class="fld"><label class="f">UID</label><input class="f mono" value="4120" readonly></div>
+            <div class="fld"><label class="f">邮箱</label><input class="f" value="spam@tempmail.xyz"></div>
+          </div>
+          <div class="row">
+            <div class="fld"><label class="f">角色</label><select class="f"><option>普通用户</option><option>管理员</option></select></div>
+            <div class="fld"><label class="f">配额</label><input class="f" value="10 GB"></div>
+          </div>
+          <div class="tip">改邮箱会重置验证状态并给对方发确认邮件，避免管理员误改把账号弄废。</div>
+        </div>
+        <div class="card">
+          <h4>密码</h4>
+          <div class="fld"><label class="f">直接设置新密码</label><input class="f" type="password" placeholder="至少 10 位，含大小写与数字"></div>
+          <div class="fld"><label class="f">确认新密码</label><input class="f" type="password"></div>
+          <button class="btn">重置密码</button>
+          <div class="tip" style="margin-top:10px">或者不发新密码，点下面的按钮给他发一封重置邮件，由他自己设。</div>
+          <button class="btn" style="margin-top:6px">发送密码重置邮件</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>账号状态</h4>
+          <div class="flexline" style="margin-bottom:12px">
+            <span class="badge err" style="font-size:12.5px;padding:4px 10px">当前：已封禁</span>
+            <span class="tip" style="margin:0">封禁于 2026-10-02 14:20 · 操作人 admin</span>
+          </div>
+          <table>
+            <thead><tr><th style="width:96px">状态</th><th>效果</th></tr></thead>
+            <tbody>
+              <tr><td><span class="badge ok">正常</span></td><td>可以登录、上传、访问广场</td></tr>
+              <tr><td><span class="badge warn">暂停使用</span></td><td>网页登录和 API 调用同时失效，已上传内容保留但对外不可见。可随时恢复</td></tr>
+              <tr><td><span class="badge err">封禁</span></td><td>网页登录和 API 全部失效，隐藏其全部公开内容，同邮箱与常用 IP 无法重新注册。需要管理员解封</td></tr>
+            </tbody>
+          </table>
+          <div class="fld" style="margin-top:12px"><label class="f">处置原因（会展示给用户）</label>
+            <input class="f" value="上传违规内容，违反服务条款第 3 条">
+          </div>
+          <div class="flexline">
+            <button class="btn wrn">暂停使用</button>
+            <button class="btn dgr">封禁账号</button>
+            <button class="btn">恢复正常</button>
+          </div>
+        </div>
+        <div class="card">
+          <h4>处置记录</h4>
+          <table>
+            <thead><tr><th style="width:132px">时间</th><th style="width:82px">动作</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td>2026-10-02 14:20</td><td><span class="badge err">封禁</span></td><td>上传违规内容，违反服务条款第 3 条</td></tr>
+              <tr><td>2026-09-30 09:11</td><td><span class="badge warn">暂停</span></td><td>短时间内大量上传，触发风控</td></tr>
+              <tr><td>2026-09-28 16:40</td><td><span class="badge mute">注册</span></td><td>通过邮箱验证完成注册</td></tr>
+            </tbody>
+          </table>
+          <div class="dz" style="margin-top:14px">
+            <h4>危险操作</h4>
+            <p>删除账号会同时删除该用户的全部相册与图片引用。引用计数归零的物理文件才会真正释放。</p>
+            <button class="btn dgr sm">删除账号</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>频率限制 <small>单独设置后覆盖全局默认</small></h4>
+          <div class="flexline" style="margin-bottom:12px">
+            <span class="badge info">当前：自定义</span>
+            <span class="tip" style="margin:0">API 10 次/分 · 上传 2 张/分 · 单日流量 0.5 GB · 近 24 小时命中 27 次</span>
+            <span class="spacer"></span>
+            <button class="btn sm">恢复默认</button>
+            <button class="btn sm">查看超限日志</button>
+          </div>
+          <div class="row">
+            <div class="fld" style="margin:0"><label class="f">API 次 / 分钟</label><input class="f" value="10"></div>
+            <div class="fld" style="margin:0"><label class="f">上传 张 / 分钟</label><input class="f" value="2"></div>
+            <div class="fld" style="margin:0"><label class="f">上传 张 / 天</label><input class="f" value="50"></div>
+            <div class="fld" style="margin:0"><label class="f">单日流量</label><input class="f" value="0.5 GB"></div>
+          </div>
+          <div class="tip">全局默认和用户级覆盖的完整配置在左侧「频率限制」页。</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="card">
+          <h4>处置确认框 <small>点击「暂停使用」或「封禁账号」后弹出</small></h4>
+          <div class="fld">
+            <label class="f">处置类型</label>
+            <div class="flexline"><span class="chip on">暂停使用（禁用）</span><span class="chip">封禁账号</span></div>
+          </div>
+          <div class="row">
+            <div class="fld"><label class="f">生效时长</label><select class="f"><option>永久（手动解封）</option><option>7 天</option><option>30 天</option></select></div>
+            <div class="fld"><label class="f">申诉接收邮箱</label><input class="f mono" value="admin@example.com"><div class="tip">默认取注册发信邮箱，可改</div></div>
+          </div>
+          <div class="fld"><label class="f">处置原因（展示给用户，也写进邮件）</label><input class="f" value="上传违规内容，违反服务条款第 3 条"></div>
+          <div class="fld"><label class="f">解封要求（写进通知邮件的「如何解封」部分）</label>
+            <textarea class="f" rows="4" style="resize:vertical">请提供本人手持身份证的清晰照片，以及手写承诺书（写明账号邮箱与「承诺遵守服务条款、不再上传违规内容」），作为附件发送至管理员邮箱。</textarea>
+          </div>
+          <div class="swrow"><div class="txt"><b>发送通知邮件</b><small>由 noreply@example.com 发出，收件人 spam@tempmail.xyz</small></div><span class="sw on"></span></div>
+          <div class="qtip warn" style="margin-top:12px;background:var(--warning-soft);border:1px solid #fde68a;color:#92400e;display:flex;gap:10px;padding:10px 12px;border-radius:8px;font-size:12.5px"><span class="ic">!</span><div>确认后立即生效：该用户当前所有会话被踢下线，API Token 全部进入暂停状态。解封时自动恢复，不用重新签发。</div></div>
+          <div class="flexline" style="justify-content:flex-end;margin-top:12px">
+            <button class="btn">取消</button>
+            <button class="btn wrn">确认暂停</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note d">暂停和封禁的区别要写清楚，别让管理员随手点。两者都会让网页登录和 API 同时失效，区别在后续处理：暂停可申请解封、随时恢复；封禁会隐藏公开内容并阻断重新注册，需管理员手动解封。点确认后由管理员邮箱自动发出通知邮件，三端的具体表现见左侧「账号暂停 · 三端表现」。</div>
+</section>
+
+<!-- ===== 查看指定用户相册 ===== -->
+<section class="screen" id="s-admin-user-view">
+  <div class="head"><h2>查看指定用户相册（管理员）</h2><p>进入用户视图后，管理员自己的相册完全隐藏，界面上只有目标用户的空间。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/admin/users/2044/albums</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora <span style="font-weight:400;color:var(--muted);font-size:12px">管理后台</span></span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">用户管理</button><button class="btn gho sm">存储管理</button><button class="btn gho sm">配额与容量</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#fecaca;color:#991b1b;font-size:11px">A</span>
+    </div>
+    <div style="background:var(--purple-soft);border-bottom:1px solid #ddd6fe;padding:10px 18px;display:flex;align-items:center;gap:12px;font-size:13px;color:#5b21b6;flex-wrap:wrap">
+      <span style="font-weight:700">正在查看用户 u_2044（design@studio.io）的空间</span>
+      <span style="color:#7c3aed">管理员自身相册已隐藏 · 本次访问已记录审计日志</span>
+      <span class="spacer"></span>
+      <button class="btn sm">切换用户</button><button class="btn sm">退出用户视图</button>
+    </div>
+    <div class="split">
+      <div class="albumlist">
+        <div style="font-size:11px;color:var(--faint);padding:4px 9px 6px">u_2044 的相册</div>
+        <a><span>▤</span>全部图片<span class="c">1682</span></a>
+        <a class="on"><span>▤</span>品牌素材<span class="c">742</span></a>
+        <a><span>▤</span>产品图<span class="c">588</span></a>
+        <a><span>▤</span>活动记录<span class="c">352</span></a>
+        <a style="color:var(--primary)"><span>＋</span>新建相册</a>
+        <div style="font-size:11px;color:var(--faint);padding:14px 9px 6px">该用户用量</div>
+        <div style="padding:0 9px"><div class="bar-l"><i class="w" style="width:68%"></i></div><div class="tip" style="margin-top:6px">34.2 GB / 50 GB</div></div>
+      </div>
+      <div style="flex:1;min-width:0">
+        <div class="toolbar">
+          <span style="color:var(--muted)">品牌素材 · 742 张</span>
+          <span class="spacer"></span>
+          <button class="btn sm">打标签</button><button class="btn sm">移动到相册</button><button class="btn sm dgr">删除选中</button>
+        </div>
+        <div class="pad">
+          <div class="grid g5">
+            <div class="tile"><div class="ph c5"></div><div class="meta"><div class="n">logo_主色</div><div class="s">420 KB · 2048×2048</div></div></div>
+            <div class="tile"><div class="ph c3"></div><div class="meta"><div class="n">banner_秋季</div><div class="s">1.1 MB · 3840×1280</div></div></div>
+            <div class="tile"><div class="ph c4"></div><div class="meta"><div class="n">KV_发布会</div><div class="s">2.6 MB · 4096×2304</div></div></div>
+            <div class="tile"><div class="ph c2"></div><div class="meta"><div class="n">配色板</div><div class="s">180 KB · 1200×800</div></div></div>
+            <div class="tile"><div class="ph c6"></div><div class="meta"><div class="n">图标集</div><div class="s">96 KB · 512×512</div></div></div>
+            <div class="tile"><div class="ph c1"></div><div class="meta"><div class="n">海报_A</div><div class="s">3.2 MB · 3508×4961</div></div></div>
+            <div class="tile"><div class="ph c5"></div><div class="meta"><div class="n">海报_B</div><div class="s">3.0 MB · 3508×4961</div></div></div>
+            <div class="tile"><div class="ph c3"></div><div class="meta"><div class="n">社媒_方图</div><div class="s">740 KB · 1080×1080</div></div></div>
+            <div class="tile"><div class="ph c4"></div><div class="meta"><div class="n">社媒_竖版</div><div class="s">880 KB · 1080×1920</div></div></div>
+            <div class="tile"><div class="ph c2"></div><div class="meta"><div class="n">字体样张</div><div class="s">520 KB · 2000×1200</div></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note">左侧列表标题写死「u_2044 的相册」，管理员自己的相册不给任何入口。网格和列表视图在这里同样支持左键预览和 Shift 多选。</div>
+</section>
+
+<!-- ===== 存储管理 ===== -->
+<section class="screen" id="s-admin-storage">
+  <div class="head"><h2>存储管理</h2><p>默认存储类型、各后端配置、容量展示模式。存储路径由环境变量注入，界面上只做展示，不给改。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/admin/storage</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora <span style="font-weight:400;color:var(--muted);font-size:12px">管理后台</span></span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">用户管理</button><button class="btn gho sm">配额与容量</button><button class="btn gho sm">系统设置</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#fecaca;color:#991b1b;font-size:11px">A</span>
+    </div>
+    <div class="pad">
+      <div class="qtip info" style="margin-bottom:14px"><span class="ic">i</span><div><b>路径来自容器环境变量</b>数据目录由 <span class="mono">PIXORA_DATA_DIR</span> 注入，这里只读展示。要改路径请改 <span class="mono">docker-compose.yml</span> 的挂载与环境变量后重启容器。</div></div>
+
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>运行时路径（只读）</h4>
+          <div class="fld"><label class="f">数据目录</label><input class="f mono" value="/data" readonly><div class="tip">来自环境变量 <span class="mono">PIXORA_DATA_DIR</span></div></div>
+          <div class="fld"><label class="f">直链一级目录</label><input class="f mono" value="images"><div class="tip">这是 URL 前缀，可以在这里改，改完旧链依然有效</div></div>
+          <div class="fld"><label class="f">目录结构</label><input class="f mono" value="/data/{uid}/{相册}/{hash}.{ext}" readonly><div class="tip">实际字节存在 <span class="mono">/data/blobs/</span>，两层之间用硬链接关联，去重不重复占盘</div></div>
+        </div>
+        <div class="card">
+          <h4>默认存储类型</h4>
+          <div class="swrow"><div class="txt"><b>本地磁盘</b><small>存入 PIXORA_DATA_DIR，默认</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>数据库内</b><small>以 BLOB 形式存进元数据库</small></div><span class="sw off"></span></div>
+          <div class="swrow"><div class="txt"><b>GitHub 仓库</b><small>Contents API 推送</small></div><span class="sw off"></span></div>
+          <div class="swrow"><div class="txt"><b>WebDAV</b><small>PUT 上传，Basic Auth</small></div><span class="sw off"></span></div>
+          <div class="swrow"><div class="txt"><b>Telegram</b><small>Bot API 发到频道</small></div><span class="sw off"></span></div>
+          <div class="swrow"><div class="txt"><b>S3 / 阿里云 OSS</b><small>对象存储，兼容 S3 协议</small></div><span class="sw off"></span></div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>存储分布</h4>
+          <div style="font-size:13px;line-height:2.2">
+            <div class="flexline"><span class="dot" style="background:#2563eb"></span>本地磁盘<span class="spacer"></span><span style="color:var(--muted)">1,284 张 · 128.6 GB</span></div>
+            <div class="flexline"><span class="dot" style="background:#7c3aed"></span>数据库内<span class="spacer"></span><span style="color:var(--muted)">0 张 · 0 B</span></div>
+            <div class="flexline"><span class="dot" style="background:#16a34a"></span>GitHub<span class="spacer"></span><span style="color:var(--muted)">216 张 · 2.1 GB</span></div>
+            <div class="flexline"><span class="dot" style="background:#d97706"></span>WebDAV<span class="spacer"></span><span style="color:var(--muted)">0 张 · 0 B</span></div>
+            <div class="flexline"><span class="dot" style="background:#dc2626"></span>Telegram<span class="spacer"></span><span style="color:var(--muted)">48 张 · 0.4 GB</span></div>
+          </div>
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f3f4f6;font-size:12.5px;color:var(--muted)">总计 1,548 张 · 131.1 GB · 去重省下 42.7 GB</div>
+        </div>
+        <div class="card">
+          <h4>容量展示模式</h4>
+          <div class="fld"><select class="f"><option>自动探测</option><option>手动填写总量</option><option>不显示磁盘容量</option></select></div>
+          <div class="qtip"><span class="ic">!</span><div><b>已降级为「手动填写总量」</b>数据目录挂载在 ossfs，statfs 返回 16 EB 的伪值。已在「配额与容量」里配置 500 GB 作为系统总额。</div></div>
+          <div class="tip" style="margin-top:10px">具体总额与分配在「配额与容量」页配置，这里只切换展示方式。</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>后端配置</h4>
+        <div class="row">
+          <div class="fld"><label class="f">GitHub Token</label><input class="f" type="password" value="ghp_····················"><div class="tip">AES-256-GCM 加密存储</div></div>
+          <div class="fld"><label class="f">仓库所有者</label><input class="f" value="example-org"><div class="tip">&nbsp;</div></div>
+          <div class="fld"><label class="f">仓库名称</label><input class="f" value="img-bed"><div class="tip">&nbsp;</div></div>
+          <div class="fld"><label class="f">存储路径</label><input class="f" value="images"><div class="tip">仓库内路径，跟本地路径无关</div></div>
+        </div>
+        <div class="flexline">
+          <button class="btn sm">测试连接</button><span class="badge ok">连通</span>
+          <span class="tip" style="margin:0">远端后端失败时会自动回退本地，并在上传结果里提示。</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 配额与容量 ===== -->
+<section class="screen" id="s-admin-quota">
+  <div class="head"><h2>配额与容量</h2><p>系统总额、默认注册配额、已分配合计的联动校验，以及容量触顶自动关闭注册。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/admin/quota</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora <span style="font-weight:400;color:var(--muted);font-size:12px">管理后台</span></span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">用户管理</button><button class="btn gho sm">存储管理</button><button class="btn gho sm">系统设置</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#fecaca;color:#991b1b;font-size:11px">A</span>
+    </div>
+    <div class="pad">
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>系统总额</h4>
+          <div class="fld">
+            <label class="f">总额来源</label>
+            <select class="f"><option>自动探测磁盘（本地盘 / 云盘）</option><option>管理员手动配置（OSS 等网络挂载）</option></select>
+          </div>
+          <div class="fld">
+            <label class="f">系统总额</label>
+            <div class="row"><input class="f" value="500" style="flex:0 0 140px"><span style="flex:0 0 40px;line-height:34px;color:var(--muted)">GB</span></div>
+          </div>
+          <div class="qtip"><span class="ic">!</span><div><b>检测到 ossfs 挂载</b>statfs 读到的是 16 EB，这是挂载伪值。所以总额必须由管理员手动配置，已按 500 GB 计入系统总额。</div></div>
+          <div class="tip" style="margin-top:10px">如果是本地磁盘，选「自动探测」即可，总额取 statfs 的真实值。</div>
+        </div>
+        <div class="card">
+          <h4>配额分配</h4>
+          <div style="font-size:13px;line-height:2.4">
+            <div class="flexline">系统总额<span class="spacer"></span><b>500 GB</b></div>
+            <div class="flexline">已注册用户配额合计（38 人）<span class="spacer"></span><b>420 GB</b></div>
+            <div class="flexline">管理员账户配额<span class="spacer"></span><b>50 GB</b></div>
+            <div class="flexline" style="border-top:1px solid #f3f4f6;padding-top:6px">剩余可分配<span class="spacer"></span><b style="color:var(--success)">30 GB</b></div>
+          </div>
+          <div class="bar-l" style="margin-top:12px"><i style="width:94%"></i></div>
+          <div class="tip">已分配 470 GB / 500 GB，占 94%。</div>
+          <div class="qtip err" style="margin-top:12px"><span class="ic">×</span><div><b>校验规则</b>所有用户配额合计 + 管理员账户配额 ≤ 系统总额。超出的分配会被拒绝保存，并提示还差多少。</div></div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>注册默认配额</h4>
+          <div class="row">
+            <div class="fld"><label class="f">新用户默认配额</label><input class="f" value="10 GB"></div>
+            <div class="fld"><label class="f">单用户配额上限</label><input class="f" value="100 GB"><div class="tip">单个用户能分配到的最大值</div></div>
+          </div>
+          <div class="tip">注册时自动套用默认值，管理员可以事后单独调整。剩余可分配不足时，新用户会拿到剩余额度并提示管理员。</div>
+        </div>
+        <div class="card">
+          <h4>容量触顶自动关闭注册</h4>
+          <div class="swrow"><div class="txt"><b>启用自动关闭</b><small>系统占用超过阈值时，自动停掉注册入口</small></div><span class="sw on"></span></div>
+          <div class="row">
+            <div class="fld"><label class="f">触发阈值</label><input class="f" value="90 %"></div>
+            <div class="fld"><label class="f">恢复阈值</label><input class="f" value="80 %"><div class="tip">降到这个值以下自动重新开放注册</div></div>
+          </div>
+          <div class="qtip ok"><span class="ic">✓</span><div><b>当前状态：注册开放</b>系统实际占用 131.1 GB / 500 GB，约 26%，未触及 90% 阈值。<br><b>已注册用户完全不受影响</b>，照常上传。</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>分配明细（前 5 名占用）</h4>
+        <table>
+          <thead><tr><th style="width:70px">UID</th><th>邮箱</th><th style="width:110px">角色</th><th style="width:110px">配额</th><th style="width:110px">已用</th><th style="width:180px">占比</th><th style="width:120px">操作</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">2044</td><td>design@studio.io</td><td><span class="badge info">普通用户</span></td><td>50 GB</td><td>34.2 GB</td><td><div class="bar-l"><i class="w" style="width:68%"></i></div></td><td><button class="btn sm">调配额</button></td></tr>
+            <tr><td class="mono">1001</td><td>chenyu@example.com</td><td><span class="badge info">普通用户</span></td><td>10 GB</td><td>2.4 GB</td><td><div class="bar-l"><i style="width:24%"></i></div></td><td><button class="btn sm">调配额</button></td></tr>
+            <tr><td class="mono">4120</td><td>spam@tempmail.xyz</td><td><span class="badge err">已封禁</span></td><td>10 GB</td><td>9.2 GB</td><td><div class="bar-l"><i class="d" style="width:92%"></i></div></td><td><button class="btn sm">调配额</button></td></tr>
+            <tr><td class="mono">1000</td><td>admin@example.com</td><td><span class="badge pp">管理员</span></td><td>50 GB</td><td>5.6 GB</td><td><div class="bar-l"><i style="width:11%"></i></div></td><td><button class="btn sm">调配额</button></td></tr>
+            <tr><td class="mono">3087</td><td>photo@agency.cn</td><td><span class="badge warn">待验证</span></td><td>10 GB</td><td>0 B</td><td><div class="bar-l"><i style="width:0%"></i></div></td><td><button class="btn sm">调配额</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="note w">这条校验是硬约束：改任何一个人的配额，都要先算一遍「所有用户配额合计 + 管理员配额」有没有超系统总额。超额时保存按钮置灰并给出还差多少 GB，不要让管理员改完才发现。</div>
+</section>
+
+<!-- ===== 频率限制 ===== -->
+<section class="screen" id="s-admin-ratelimit">
+  <div class="head"><h2>频率限制</h2><p>全局默认策略加用户级覆盖。API 调用和图片上传分开限，超限返回 429 并带 Retry-After。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/admin/ratelimit</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora <span style="font-weight:400;color:var(--muted);font-size:12px">管理后台</span></span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">用户管理</button><button class="btn gho sm">配额与容量</button><button class="btn gho sm">IP 黑名单</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#fecaca;color:#991b1b;font-size:11px">A</span>
+    </div>
+    <div class="pad">
+
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>API 调用频率 <small>全局默认，用户未单独设置时继承这套值</small></h4>
+          <div class="row">
+            <div class="fld"><label class="f">次 / 分钟</label><input class="f" value="120"></div>
+            <div class="fld"><label class="f">次 / 小时</label><input class="f" value="2000"></div>
+          </div>
+          <div class="row">
+            <div class="fld"><label class="f">瞬时并发上限</label><input class="f" value="20"><div class="tip">同一秒内允许的在途请求数</div></div>
+            <div class="fld"><label class="f">读接口单独限额</label><input class="f" value="600 次 / 分钟"><div class="tip">列表、搜索这类读操作可以放宽</div></div>
+          </div>
+          <div class="tip">按 Token 维度计数，同一用户多个 Token 共享额度。</div>
+        </div>
+        <div class="card">
+          <h4>图片上传频率 <small>全局默认</small></h4>
+          <div class="row">
+            <div class="fld"><label class="f">张 / 分钟</label><input class="f" value="30"></div>
+            <div class="fld"><label class="f">张 / 小时</label><input class="f" value="500"></div>
+          </div>
+          <div class="row">
+            <div class="fld"><label class="f">张 / 天</label><input class="f" value="2000"></div>
+            <div class="fld"><label class="f">单日上传流量</label><input class="f" value="5 GB"></div>
+          </div>
+          <div class="tip">上传限额按「实际落盘的新文件」计数，被去重跳过的文件不占额度。</div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>并发与批次</h4>
+          <div class="row">
+            <div class="fld"><label class="f">单用户并发上传数</label><input class="f" value="4"><div class="tip">客户端队列的并发上限，服务端也会校验</div></div>
+            <div class="fld"><label class="f">单批次最大张数</label><input class="f" value="1000"></div>
+          </div>
+          <div class="row">
+            <div class="fld"><label class="f">单文件大小上限</label><input class="f" value="20 MB"></div>
+            <div class="fld"><label class="f">队列深度阈值</label><input class="f" value="500"><div class="tip">超出后新请求直接 429</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <h4>超限处理</h4>
+          <div class="swrow"><div class="txt"><b>返回 429 + Retry-After</b><small>告诉客户端多久后可以重试，客户端据此退避</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>记录并通知管理员</b><small>超限事件写入审计日志，可配置邮件提醒</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>连续超限自动临时封禁</b><small>同一用户在窗口内反复触发则临时禁用 API</small></div><span class="sw on"></span></div>
+          <div class="row" style="margin-top:10px">
+            <div class="fld"><label class="f">触发次数阈值</label><input class="f" value="10 次 / 10 分钟"></div>
+            <div class="fld"><label class="f">封禁时长</label><input class="f" value="30 分钟"></div>
+          </div>
+          <div class="qtip" style="margin-top:6px"><span class="ic">!</span><div>临时封禁只针对 API，不影响该用户网页登录。和「账号暂停」不是一回事，别混用。</div></div>
+        </div>
+      </div>
+
+      <div class="card" style="padding:0;overflow:hidden;margin-bottom:14px">
+        <div class="flexline" style="padding:12px 14px;border-bottom:1px solid var(--border)">
+          <b style="font-size:13.5px">用户级覆盖</b>
+          <span class="badge mute">3 个用户已自定义</span>
+          <span class="spacer"></span>
+          <input class="f" placeholder="按 UID 或邮箱搜索…" style="width:190px;padding:4px 10px;font-size:12.5px">
+        </div>
+        <table>
+          <thead><tr>
+            <th style="width:70px">UID</th><th>邮箱</th><th style="width:112px">API 次/分</th><th style="width:112px">上传 张/分</th>
+            <th style="width:118px">单日流量</th><th style="width:118px">来源</th><th style="width:132px">操作</th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono">1000</td><td>admin@example.com</td>
+              <td><span class="badge mute">不限</span></td><td><span class="badge mute">不限</span></td><td><span class="badge mute">不限</span></td>
+              <td><span class="badge pp">管理员豁免</span></td>
+              <td><button class="btn sm">编辑</button></td>
+            </tr>
+            <tr>
+              <td class="mono">2044</td><td>design@studio.io</td>
+              <td>300</td><td>60</td><td>10 GB</td>
+              <td><span class="badge info">自定义</span></td>
+              <td><button class="btn sm">编辑</button> <button class="btn sm">恢复默认</button></td>
+            </tr>
+            <tr>
+              <td class="mono">1001</td><td>chenyu@example.com</td>
+              <td>120</td><td>30</td><td>5 GB</td>
+              <td><span class="badge mute">继承默认</span></td>
+              <td><button class="btn sm">编辑</button></td>
+            </tr>
+            <tr>
+              <td class="mono">4120</td><td>spam@tempmail.xyz</td>
+              <td>10</td><td>2</td><td>0.5 GB</td>
+              <td><span class="badge info">自定义</span></td>
+              <td><button class="btn sm">编辑</button> <button class="btn sm">恢复默认</button></td>
+            </tr>
+            <tr>
+              <td class="mono">3087</td><td>photo@agency.cn</td>
+              <td>120</td><td>30</td><td>5 GB</td>
+              <td><span class="badge mute">继承默认</span></td>
+              <td><button class="btn sm">编辑</button></td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="padding:12px 14px;border-top:1px solid var(--border);background:#fafafa">
+          <div class="tip" style="margin:0">改「全局默认」时，所有「继承默认」的用户立刻跟着变；标了「自定义」的用户不受影响。</div>
+        </div>
+      </div>
+
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="flexline" style="padding:12px 14px;border-bottom:1px solid var(--border)">
+          <b style="font-size:13.5px">实时用量</b>
+          <span class="badge ok">5 秒自动刷新</span>
+          <span class="spacer"></span>
+          <span class="tip" style="margin:0">窗口：本分钟 / 今日 00:00 起</span>
+        </div>
+        <table>
+          <thead><tr>
+            <th style="width:70px">UID</th><th style="width:180px">邮箱</th><th style="width:170px">API 本分钟</th>
+            <th style="width:170px">上传 本分钟</th><th style="width:160px">上传 今日</th><th>近 24 小时命中限制</th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono">2044</td><td>design@studio.io</td>
+              <td><div class="bar-l" style="margin-bottom:4px"><i class="w" style="width:86%"></i></div><span style="font-size:12px;color:var(--muted)">258 / 300</span></td>
+              <td><div class="bar-l" style="margin-bottom:4px"><i style="width:20%"></i></div><span style="font-size:12px;color:var(--muted)">12 / 60</span></td>
+              <td><div class="bar-l" style="margin-bottom:4px"><i style="width:17%"></i></div><span style="font-size:12px;color:var(--muted)">348 / 2,000</span></td>
+              <td><span class="badge warn">3 次</span></td>
+            </tr>
+            <tr>
+              <td class="mono">1001</td><td>chenyu@example.com</td>
+              <td><div class="bar-l" style="margin-bottom:4px"><i style="width:4%"></i></div><span style="font-size:12px;color:var(--muted)">5 / 120</span></td>
+              <td><div class="bar-l" style="margin-bottom:4px"><i style="width:0%"></i></div><span style="font-size:12px;color:var(--muted)">0 / 30</span></td>
+              <td><div class="bar-l" style="margin-bottom:4px"><i style="width:5%"></i></div><span style="font-size:12px;color:var(--muted)">96 / 2,000</span></td>
+              <td><span class="badge mute">0 次</span></td>
+            </tr>
+            <tr>
+              <td class="mono">4120</td><td>spam@tempmail.xyz</td>
+              <td><span style="font-size:12px;color:var(--faint)">账号已封禁</span></td>
+              <td><span style="font-size:12px;color:var(--faint)">账号已封禁</span></td>
+              <td><span style="font-size:12px;color:var(--faint)">—</span></td>
+              <td><span class="badge err">27 次</span></td>
+            </tr>
+            <tr>
+              <td class="mono">3087</td><td>photo@agency.cn</td>
+              <td><span style="font-size:12px;color:var(--faint)">未激活</span></td>
+              <td><span style="font-size:12px;color:var(--faint)">未激活</span></td>
+              <td><span style="font-size:12px;color:var(--faint)">—</span></td>
+              <td><span class="badge mute">0 次</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="flexline" style="justify-content:flex-end;margin-top:16px">
+        <button class="btn">查看超限日志</button>
+        <button class="btn pri">保存设置</button>
+      </div>
+    </div>
+  </div>
+  <div class="note w">计数实现要提前定：单实例用进程内令牌桶加滑动窗口，够快也够省内存。多实例部署时计数必须共享，走数据库计数表或可选接 Redis，否则每个实例各算各的，实际额度会被放大成 N 倍。</div>
+</section>
+
+<!-- ===== IP 黑名单 ===== -->
+<section class="screen" id="s-admin-ip">
+  <div class="head"><h2>IP 黑名单</h2><p>封掉恶意来源。支持单个 IP 和 CIDR 网段，命中后按配置的范围拦截。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/admin/security/ip</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora <span style="font-weight:400;color:var(--muted);font-size:12px">管理后台</span></span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">用户管理</button><button class="btn gho sm">配额与容量</button><button class="btn gho sm">系统设置</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#fecaca;color:#991b1b;font-size:11px">A</span>
+    </div>
+    <div class="pad">
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>添加规则</h4>
+          <div class="row">
+            <div class="fld"><label class="f">IP 或 CIDR 网段</label><input class="f mono" placeholder="203.0.113.42 或 203.0.113.0/24"></div>
+            <div class="fld"><label class="f">拦截范围</label><select class="f"><option>全站拦截</option><option>仅拦截注册</option><option>仅拦截登录</option><option>仅拦截上传</option></select></div>
+          </div>
+          <div class="fld"><label class="f">备注</label><input class="f" placeholder="为什么拉黑，方便以后判断要不要解封"></div>
+          <div class="row">
+            <div class="fld"><label class="f">生效时间</label><input class="f" value="2026-10-14 15:30"></div>
+            <div class="fld"><label class="f">到期时间</label><input class="f" placeholder="留空表示永久"></div>
+          </div>
+          <button class="btn pri">加入黑名单</button>
+          <div class="tip" style="margin-top:10px">网段写法支持 IPv4 与 IPv6。全站拦截时命中即返回 403，不进入业务逻辑。</div>
+        </div>
+        <div class="card">
+          <h4>策略设置</h4>
+          <div class="swrow"><div class="txt"><b>启用黑名单</b><small>总开关，关掉后所有规则都不生效</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>信任反向代理头</b><small>读取 X-Forwarded-For 判断真实 IP，容器部署必须开</small></div><span class="sw on"></span></div>
+          <div class="fld" style="margin-top:12px"><label class="f">可信代理层数</label><input class="f" value="1"><div class="tip">只信任最靠近服务端的一层，防止客户端伪造 X-Forwarded-For 绕过黑名单</div></div>
+          <div class="swrow"><div class="txt"><b>自动临时封禁</b><small>同 IP 短时间内登录失败或上传失败过多，自动封 30 分钟</small></div><span class="sw on"></span></div>
+          <div class="row"><div class="fld"><label class="f">失败次数阈值</label><input class="f" value="20 次 / 10 分钟"></div><div class="fld"><label class="f">封禁时长</label><input class="f" value="30 分钟"></div></div>
+        </div>
+      </div>
+
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="flexline" style="padding:12px 14px;border-bottom:1px solid var(--border)">
+          <b style="font-size:13.5px">已生效规则</b>
+          <span class="badge mute">7 条</span>
+          <span class="spacer"></span>
+          <input class="f" placeholder="搜索 IP 或备注…" style="width:190px;padding:4px 10px;font-size:12.5px">
+        </div>
+        <table>
+          <thead><tr><th style="width:170px">IP / 网段</th><th style="width:110px">范围</th><th>备注</th><th style="width:96px">命中次数</th><th style="width:140px">添加时间</th><th style="width:132px">操作</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">203.0.113.0/24</td><td><span class="badge err">全站</span></td><td>批量爬取图片</td><td>1,842</td><td>2026-09-12</td><td><button class="btn sm">编辑</button> <button class="btn sm dgr">移除</button></td></tr>
+            <tr><td class="mono">198.51.100.77</td><td><span class="badge warn">仅注册</span></td><td>一次性邮箱批量注册</td><td>36</td><td>2026-10-02</td><td><button class="btn sm">编辑</button> <button class="btn sm dgr">移除</button></td></tr>
+            <tr><td class="mono">192.0.2.155</td><td><span class="badge warn">仅登录</span></td><td>撞库尝试</td><td>218</td><td>2026-10-08</td><td><button class="btn sm">编辑</button> <button class="btn sm dgr">移除</button></td></tr>
+            <tr><td class="mono">2001:db8::/32</td><td><span class="badge err">全站</span></td><td>恶意上传</td><td>94</td><td>2026-10-11</td><td><button class="btn sm">编辑</button> <button class="btn sm dgr">移除</button></td></tr>
+            <tr><td class="mono">45.155.204.11</td><td><span class="badge warn">仅上传</span></td><td>触发队列阈值刷接口</td><td>512</td><td>2026-10-13</td><td><button class="btn sm">编辑</button> <button class="btn sm dgr">移除</button></td></tr>
+            <tr><td class="mono">103.21.244.9</td><td><span class="badge mute">自动临时</span></td><td>登录失败 20 次，自动封 30 分钟</td><td>20</td><td>2026-10-14 15:02</td><td><button class="btn sm dgr">提前解除</button></td></tr>
+            <tr><td class="mono">185.220.101.5</td><td><span class="badge mute">自动临时</span></td><td>上传失败 25 次，自动封 30 分钟</td><td>25</td><td>2026-10-14 14:48</td><td><button class="btn sm dgr">提前解除</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="qtip info" style="margin-top:14px"><span class="ic">i</span><div>建议同时提供白名单：管理员自己的固定 IP 或公司出口 IP 加白后，即使被自动风控误伤也能进去处理。白名单与黑名单冲突时白名单优先。</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 系统设置 ===== -->
+<section class="screen" id="s-admin-settings">
+  <div class="head"><h2>系统设置</h2><p>站点、上传策略、格式白名单、缩略图策略、邮件与反临时邮箱。路径类配置已移出，改由环境变量注入。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/admin/settings</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora <span style="font-weight:400;color:var(--muted);font-size:12px">管理后台</span></span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">用户管理</button><button class="btn gho sm">存储管理</button><button class="btn gho sm">IP 黑名单</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#fecaca;color:#991b1b;font-size:11px">A</span>
+    </div>
+    <div class="pad">
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>站点</h4>
+          <div class="fld"><label class="f">基础 URL</label><input class="f mono" value="https://img.example.com"></div>
+          <div class="fld"><label class="f">站点名称</label><input class="f" value="Pixora"></div>
+          <div class="swrow"><div class="txt"><b>广场开放浏览</b><small>未登录用户可以看到公开图片</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>拒绝游客上传</b><small>上传必须登录</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>允许用户注册</b><small>关闭后只能由管理员创建账号</small></div><span class="sw on"></span></div>
+          <div class="tip">注册相关的默认配额和容量阈值在「配额与容量」里配。</div>
+        </div>
+        <div class="card">
+          <h4>上传策略</h4>
+          <div class="row">
+            <div class="fld"><label class="f">单文件大小上限</label><input class="f" value="20 MB"></div>
+            <div class="fld"><label class="f">单批最大张数</label><input class="f" value="1000"></div>
+          </div>
+          <div class="row">
+            <div class="fld"><label class="f">像素上限</label><input class="f" value="8000 万"></div>
+            <div class="fld"><label class="f">队列深度阈值</label><input class="f" value="500"><div class="tip">超出返回 429</div></div>
+          </div>
+          <div class="fld">
+            <label class="f">支持的图片格式</label>
+            <div class="flexline">
+              <span class="chip on">JPG</span><span class="chip on">PNG</span><span class="chip on">GIF</span><span class="chip on">WebP</span>
+              <span class="chip on">AVIF</span><span class="chip on">HEIC</span><span class="chip on">TIFF</span><span class="chip on">BMP</span>
+              <span class="chip on">SVG</span><span class="chip">JXL</span><span class="chip">ICO</span>
+            </div>
+            <div class="tip">SVG 入库前剥离脚本与外部引用，响应加沙箱头。勾选即生效，无需重启。</div>
+          </div>
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:14px">
+        <div class="card">
+          <h4>缩略图策略</h4>
+          <div class="swrow"><div class="txt"><b>客户端生成缩略图</b><small>浏览器用 OffscreenCanvas 生成，随原图一起上传</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>服务端兜底生成</b><small>仅对 API 上传等没有缩略图的场景，异步补生成</small></div><span class="sw off"></span></div>
+          <div class="qtip ok" style="margin-top:10px"><span class="ic">✓</span><div>当前服务端不承担任何图像缩放，CPU 与内存压力接近零。</div></div>
+        </div>
+        <div class="card">
+          <h4>邮件与注册验证</h4>
+          <div class="row">
+            <div class="fld"><label class="f">SMTP 服务器</label><input class="f mono" value="smtp.qiye.aliyun.com"></div>
+            <div class="fld"><label class="f">端口</label><input class="f mono" value="465 (SSL)"></div>
+          </div>
+          <div class="row">
+            <div class="fld"><label class="f">发信账号</label><input class="f mono" value="noreply@example.com"></div>
+            <div class="fld"><label class="f">密码</label><input class="f" type="password" value="············"></div>
+          </div>
+          <div class="swrow"><div class="txt"><b>反临时邮箱 · 内置域名清单</b><small>随镜像打包，可在线更新</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>反临时邮箱 · MX 记录校验</b><small>域名解析不出邮件服务器则拒绝</small></div><span class="sw on"></span></div>
+          <div class="swrow"><div class="txt"><b>反临时邮箱 · 第三方校验 API</b><small>需填写密钥，命中即拒</small></div><span class="sw off"></span></div>
+          <div class="flexline" style="margin-top:10px">
+            <button class="btn sm">测试发信</button><button class="btn sm">管理域名清单</button><span class="badge ok">已验证</span>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h4>外观</h4>
+        <div class="row" style="align-items:flex-end">
+          <div class="fld"><label class="f">上传新背景图</label><input class="f" type="file"></div>
+          <div style="flex:0 0 200px"><div class="ph c2" style="height:64px">当前背景图 bg_custom.jpg</div></div>
+          <div style="flex:0 0 auto"><button class="btn sm dgr">移除背景图</button></div>
+        </div>
+      </div>
+      <div class="flexline" style="justify-content:flex-end;margin-top:16px">
+        <button class="btn">重新生成缩略图</button><button class="btn pri">保存设置</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 服务调整 · 服务条款（用户端） ===== -->
+<section class="screen" id="s-account-terms">
+  <div class="head"><h2>服务调整 · 服务条款</h2><p>用户首次登录时强制弹出通告，必须同意才能用。之后从「服务调整」里随时翻阅，条款存在数据库，管理员改完即时生效。</p></div>
+
+  <div style="font-size:12.5px;color:var(--muted);margin:0 0 6px">① 首次登录时的通告弹窗 · 遮罩不可点穿，没有关闭按钮</div>
+  <div class="frame" style="margin-bottom:20px;position:relative">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/albums</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span><span class="spacer"></span>
+      <button class="btn gho sm">我的相册</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:11px">C</span>
+    </div>
+    <div class="pad" style="opacity:.4;filter:blur(.6px)">
+      <div class="grid g4">
+        <div class="tile"><div class="ph c1"></div><div class="meta"><div class="n">雪山日出</div><div class="s">2.4 MB</div></div></div>
+        <div class="tile"><div class="ph c2"></div><div class="meta"><div class="n">老城街角</div><div class="s">1.8 MB</div></div></div>
+        <div class="tile"><div class="ph c3"></div><div class="meta"><div class="n">苔原</div><div class="s">3.1 MB</div></div></div>
+        <div class="tile"><div class="ph c4"></div><div class="meta"><div class="n">霓虹夜</div><div class="s">1.2 MB</div></div></div>
+      </div>
+    </div>
+    <div style="position:absolute;inset:0;background:rgba(15,23,42,.55);display:flex;align-items:center;justify-content:center;padding:22px">
+      <div style="background:#fff;border-radius:14px;width:100%;max-width:580px;overflow:hidden;display:flex;flex-direction:column;max-height:100%">
+        <div style="padding:15px 22px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:12px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:16px;font-weight:700">服务条款</div>
+            <div class="tip" style="margin-top:2px">版本 v2.1 · 生效日期 2026-10-01 · 共 6 条</div>
+          </div>
+          <button class="btn sm">⤢ 全屏阅读</button>
+        </div>
+        <div style="padding:16px 22px;overflow:auto;font-size:12.5px;line-height:1.95;color:#4b5563">
+          <b style="color:#1f2328">一、服务说明</b><br>
+          Pixora 提供图片托管、相册管理与直链访问服务。你上传的内容归你所有，我们只做存储与分发。<br><br>
+          <b style="color:#1f2328">二、账号与验证</b><br>
+          注册需通过邮箱验证。账号仅限本人使用，不得转让。请妥善保管密码与二次验证设备。<br><br>
+          <b style="color:#1f2328">三、上传限制</b><br>
+          单个文件不超过 20 MB，总用量不超过管理员分配的配额。禁止上传违法、侵权、含恶意代码的内容。<br><br>
+          <b style="color:#1f2328">四、内容合规</b><br>
+          上传者需对所传内容负责。发现违规内容，管理员可暂停或封禁账号，已上传内容保留但对外不可见。<br><br>
+          <b style="color:#1f2328">五、数据与删除</b><br>
+          相同文件在服务端只存一份。你删除自己的图片只影响你的引用，不影响其他用户。<br><br>
+          <b style="color:#1f2328">六、条款变更</b><br>
+          条款更新后会在下次登录时重新提示，你可以在「服务调整」中随时查阅当前版本与历史版本。
+        </div>
+        <div style="padding:14px 22px;border-top:1px solid var(--border);background:#fafafa">
+          <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;color:#374151">
+            <input type="checkbox" checked style="margin-top:3px">
+            <span>我已阅读并同意《服务条款》（v2.1）</span>
+          </label>
+          <div class="flexline" style="justify-content:flex-end;margin-top:12px">
+            <button class="btn">不同意，退出登录</button>
+            <button class="btn pri">同意并继续</button>
+          </div>
+          <div class="tip" style="margin-top:8px">不同意将无法使用本服务。已上传的内容不会因此被删除。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="font-size:12.5px;color:var(--muted);margin:0 0 6px">② 点「全屏阅读」后 · 铺满视口，正文一屏看更多，同意区固定在底部</div>
+  <div class="frame" style="margin-bottom:20px">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/albums</span></div>
+    <div style="background:#eef0f3;padding:16px;height:330px;display:flex">
+      <div style="background:#fff;border:1px solid var(--border);border-radius:12px;flex:1;display:flex;flex-direction:column;overflow:hidden">
+        <div style="padding:13px 20px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:12px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:15px;font-weight:700">服务条款</div>
+            <div class="tip" style="margin-top:1px">版本 v2.1 · 生效日期 2026-10-01 · 共 6 条</div>
+          </div>
+          <button class="btn sm">⤡ 退出全屏</button>
+        </div>
+        <div style="flex:1;overflow:auto;padding:16px 22px;font-size:12.5px;line-height:2;color:#4b5563">
+          <b style="color:#1f2328">一、服务说明</b><br>
+          Pixora 提供图片托管、相册管理与直链访问服务。你上传的内容归你所有，我们只做存储与分发。<br><br>
+          <b style="color:#1f2328">二、账号与验证</b><br>
+          注册需通过邮箱验证。账号仅限本人使用，不得转让。请妥善保管密码与二次验证设备。<br><br>
+          <b style="color:#1f2328">三、上传限制</b><br>
+          单个文件不超过 20 MB，总用量不超过管理员分配的配额。禁止上传违法、侵权、含恶意代码的内容。<br><br>
+          <b style="color:#1f2328">四、内容合规</b><br>
+          上传者需对所传内容负责。发现违规内容，管理员可暂停或封禁账号，已上传内容保留但对外不可见。<br><br>
+          <b style="color:#1f2328">五、数据与删除</b><br>
+          相同文件在服务端只存一份。你删除自己的图片只影响你的引用，不影响其他用户。
+        </div>
+        <div style="padding:12px 20px;border-top:1px solid var(--border);background:#fafafa;display:flex;align-items:center;gap:12px">
+          <label style="flex:1;display:flex;align-items:center;gap:8px;font-size:12.5px;color:#374151"><input type="checkbox" checked> 我已阅读并同意《服务条款》（v2.1）</label>
+          <button class="btn">不同意，退出登录</button>
+          <button class="btn pri">同意并继续</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="font-size:12.5px;color:var(--muted);margin:0 0 6px">③ 移动端 · 本来就铺满整屏，全屏按钮自动隐藏，同意区沉到底部</div>
+  <div class="pgrid" style="margin-bottom:20px">
+    <div class="pcell">
+      <div class="phone">
+        <div class="pstat"><span>9:41</span><span>▮▮▮ 5G</span></div>
+        <div class="pnav"><span>服务条款</span><span class="spacer"></span><span style="font-weight:400;color:var(--muted);font-size:12px">收起</span></div>
+        <div class="pbody" style="padding:14px 16px">
+          <div style="font-size:11.5px;color:var(--muted);margin-bottom:12px">版本 v2.1 · 生效日期 2026-10-01 · 共 6 条</div>
+          <div style="font-size:12px;line-height:1.95;color:#4b5563">
+            <b style="color:#1f2328">一、服务说明</b><br>
+            Pixora 提供图片托管、相册管理与直链访问服务。你上传的内容归你所有，我们只做存储与分发。<br><br>
+            <b style="color:#1f2328">二、账号与验证</b><br>
+            注册需通过邮箱验证。账号仅限本人使用，不得转让。<br><br>
+            <b style="color:#1f2328">三、上传限制</b><br>
+            单个文件不超过 20 MB，总用量不超过管理员分配的配额。
+          </div>
+        </div>
+        <div style="border-top:1px solid var(--border);padding:12px 14px 14px;background:#fafafa">
+          <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:#374151;margin-bottom:11px"><input type="checkbox" checked style="margin-top:3px"> 我已阅读并同意《服务条款》（v2.1）</label>
+          <button class="btn pri" style="width:100%;padding:10px;margin-bottom:8px">同意并继续</button>
+          <button class="btn" style="width:100%;padding:10px">不同意，退出登录</button>
+          <div style="font-size:11px;color:var(--muted);text-align:center;margin-top:9px">不同意将无法使用本服务</div>
+        </div>
+      </div>
+    </div>
+    <div class="pcell" style="width:auto;flex:1;min-width:290px">
+      <div class="plabel">三种形态的切换规则</div>
+      <div class="card">
+        <table>
+          <thead><tr><th style="width:118px">形态</th><th style="width:132px">触发条件</th><th>表现</th></tr></thead>
+          <tbody>
+            <tr><td>标准弹窗</td><td>视口 ≥ 768px</td><td>居中，最大宽 580px，正文区高度取视口的 55%，超出滚动</td></tr>
+            <tr><td>全屏阅读</td><td>点标题栏「全屏阅读」</td><td>铺满视口留 16px 边距，正文区吃满剩余高度，同意区固定在底部</td></tr>
+            <tr><td>移动全屏</td><td>视口 &lt; 768px</td><td>自动铺满整屏，全屏按钮隐藏，按钮改纵向堆叠占满宽度</td></tr>
+          </tbody>
+        </table>
+        <div class="tip" style="margin-top:10px">三种形态共用同一份正文，切换只改容器尺寸，不重新加载内容，阅读位置会保留。</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="font-size:12.5px;color:var(--muted);margin:0 0 6px">④ 之后从「服务调整」选项卡随时翻阅 · 位置在用户中心的菜单里</div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/settings/terms</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora</span><span class="spacer"></span>
+      <button class="btn gho sm">我的相册</button><button class="btn gho sm">广场</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:11px">C</span>
+    </div>
+    <div class="split">
+      <div class="albumlist">
+        <div class="par">服务调整</div>
+        <a class="sub on" onclick="go('account-terms')">服务条款</a>
+      </div>
+      <div style="flex:1;min-width:0;padding:18px">
+        <div class="card" style="margin-bottom:14px">
+          <div class="flexline" style="justify-content:space-between">
+            <div>
+              <div style="font-size:14px;font-weight:700">当前生效版本 v2.1</div>
+              <div class="tip" style="margin-top:3px">生效日期 2026-10-01 · 更新于 2026-10-01 09:00 · 共 6 条</div>
+            </div>
+            <span class="badge ok">你已同意</span>
+          </div>
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f3f4f6;font-size:12.5px;color:var(--muted)">
+            你的同意记录：2026-10-01 14:22 · IP 203.0.113.18
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+          <h4>本次更新摘要</h4>
+          <ul style="margin:0;padding-left:20px;font-size:12.5px;line-height:2;color:#4b5563">
+            <li>新增第四条「内容合规」，明确违规处置方式</li>
+            <li>修订第三条，单文件上限从 10 MB 调整为 20 MB</li>
+            <li>补充第五条，说明去重机制下的删除行为</li>
+          </ul>
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+          <h4>条款正文</h4>
+          <div style="font-size:12.5px;line-height:1.95;color:#4b5563;max-height:170px;overflow:auto;padding-right:6px">
+            <b style="color:#1f2328">一、服务说明</b><br>
+            Pixora 提供图片托管、相册管理与直链访问服务。你上传的内容归你所有，我们只做存储与分发。<br><br>
+            <b style="color:#1f2328">二、账号与验证</b><br>
+            注册需通过邮箱验证。账号仅限本人使用，不得转让。请妥善保管密码与二次验证设备。<br><br>
+            <b style="color:#1f2328">三、上传限制</b><br>
+            单个文件不超过 20 MB，总用量不超过管理员分配的配额。禁止上传违法、侵权、含恶意代码的内容。<br><br>
+            <b style="color:#1f2328">四、内容合规</b><br>
+            上传者需对所传内容负责。发现违规内容，管理员可暂停或封禁账号，已上传内容保留但对外不可见。
+          </div>
+        </div>
+
+        <div class="card">
+          <h4>历史版本</h4>
+          <table>
+            <thead><tr><th style="width:96px">版本</th><th style="width:120px">生效日期</th><th>更新摘要</th><th style="width:104px">我的同意</th><th style="width:78px"></th></tr></thead>
+            <tbody>
+              <tr><td><b>v2.1</b></td><td>2026-10-01</td><td>新增内容合规条款，调整上传上限</td><td><span class="badge ok">已同意</span></td><td><button class="btn sm">查看</button></td></tr>
+              <tr><td>v2.0</td><td>2026-07-01</td><td>增加数据与删除说明</td><td><span class="badge ok">已同意</span></td><td><button class="btn sm">查看</button></td></tr>
+              <tr><td>v1.0</td><td>2026-06-01</td><td>初始版本</td><td><span class="badge ok">已同意</span></td><td><button class="btn sm">查看</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">管理员发布新版本并勾选「要求重新同意」后，用户下次登录会再弹一次通告。没勾选就只是更新内容，不打扰用户。旧版本不删除，只归档，用户随时能翻回去看自己当初同意的是什么。</div>
+</section>
+
+<!-- ===== 服务条款管理（后台） ===== -->
+<section class="screen" id="s-admin-terms">
+  <div class="head"><h2>服务条款管理</h2><p>新增、修改、删除条款，存在数据库里，改完即时生效。发布新版本时可选择是否要求用户重新同意。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/admin/terms</span></div>
+    <div class="navbar">
+      <span class="logo">Pi<em>x</em>ora <span style="font-weight:400;color:var(--muted);font-size:12px">管理后台</span></span>
+      <span class="spacer"></span>
+      <button class="btn gho sm">用户管理</button><button class="btn gho sm">系统设置</button><button class="btn gho sm">服务条款</button>
+      <span class="ph" style="width:28px;height:28px;border-radius:50%;background:#fecaca;color:#991b1b;font-size:11px">A</span>
+    </div>
+    <div class="pad">
+      <div class="card" style="padding:0;overflow:hidden;margin-bottom:14px">
+        <div class="flexline" style="padding:12px 14px;border-bottom:1px solid var(--border)">
+          <b style="font-size:13.5px">条款版本</b>
+          <span class="badge mute">3 个版本</span>
+          <span class="spacer"></span>
+          <input class="f" placeholder="搜索版本或摘要…" style="width:190px;padding:4px 10px;font-size:12.5px">
+          <button class="btn pri sm">＋ 新增条款</button>
+        </div>
+        <table>
+          <thead><tr><th style="width:82px">版本</th><th>更新摘要</th><th style="width:120px">生效日期</th><th style="width:104px">状态</th><th style="width:110px">同意人数</th><th style="width:128px">更新时间</th><th style="width:180px">操作</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><b>v2.1</b></td><td>新增内容合规条款，调整上传上限</td><td>2026-10-01</td>
+              <td><span class="badge ok">生效中</span></td><td>38 / 38</td><td>2026-10-01 09:00</td>
+              <td><button class="btn sm">编辑</button> <button class="btn sm">预览</button> <button class="btn sm dgr">删除</button></td>
+            </tr>
+            <tr>
+              <td>v2.0</td><td>增加数据与删除说明</td><td>2026-07-01</td>
+              <td><span class="badge mute">已归档</span></td><td>35 / 38</td><td>2026-07-01 10:12</td>
+              <td><button class="btn sm">查看</button> <button class="btn sm">设为生效</button> <button class="btn sm dgr">删除</button></td>
+            </tr>
+            <tr>
+              <td>v1.0</td><td>初始版本</td><td>2026-06-01</td>
+              <td><span class="badge mute">已归档</span></td><td>33 / 38</td><td>2026-06-01 08:30</td>
+              <td><button class="btn sm">查看</button> <button class="btn sm">设为生效</button> <button class="btn sm dgr">删除</button></td>
+            </tr>
+            <tr>
+              <td>v2.2</td><td>拟增加账号申诉流程说明</td><td>—</td>
+              <td><span class="badge warn">草稿</span></td><td>—</td><td>2026-10-14 15:40</td>
+              <td><button class="btn sm">继续编辑</button> <button class="btn sm pri">发布</button> <button class="btn sm dgr">删除</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h4>编辑条款 <small>正在编辑 v2.2（草稿）</small></h4>
+        <div class="row">
+          <div class="fld"><label class="f">版本号</label><input class="f mono" value="v2.2"></div>
+          <div class="fld"><label class="f">生效日期</label><input class="f" value="2026-10-15 00:00"></div>
+          <div class="fld"><label class="f">状态</label><select class="f"><option>草稿</option><option>立即生效</option><option>定时生效</option></select></div>
+        </div>
+        <div class="fld"><label class="f">更新摘要（展示给用户，写进更新说明）</label><input class="f" value="新增第七条：账号申诉流程说明"></div>
+        <div class="fld">
+          <label class="f">条款正文</label>
+          <textarea class="f" rows="9" style="resize:vertical;font-family:inherit;line-height:1.85">一、服务说明
+Pixora 提供图片托管、相册管理与直链访问服务。你上传的内容归你所有，我们只做存储与分发。
+
+二、账号与验证
+注册需通过邮箱验证。账号仅限本人使用，不得转让。请妥善保管密码与二次验证设备。
+
+三、上传限制
+单个文件不超过 20 MB，总用量不超过管理员分配的配额。禁止上传违法、侵权、含恶意代码的内容。
+
+四、内容合规
+上传者需对所传内容负责。发现违规内容，管理员可暂停或封禁账号，已上传内容保留但对外不可见。
+
+五、数据与删除
+相同文件在服务端只存一份。你删除自己的图片只影响你的引用，不影响其他用户。
+
+六、条款变更
+条款更新后会在下次登录时重新提示，你可以在「服务调整」中随时查阅当前版本与历史版本。
+
+七、账号申诉
+账号被暂停后可提交材料申请解封，具体方式见暂停通知邮件。</textarea>
+          <div class="tip">支持纯文本与 Markdown。正文存数据库，不落文件，改完不用重启。</div>
+        </div>
+        <div class="swrow"><div class="txt"><b>要求所有用户重新同意</b><small>勾选后，用户下次登录会再次弹出通告，必须同意才能继续使用</small></div><span class="sw on"></span></div>
+        <div class="swrow"><div class="txt"><b>首次注册用户强制同意</b><small>新注册用户在首次登录时看到此版本</small></div><span class="sw on"></span></div>
+        <div class="flexline" style="justify-content:flex-end;margin-top:14px">
+          <button class="btn">保存草稿</button>
+          <button class="btn">预览用户视角</button>
+          <button class="btn pri">发布并生效</button>
+        </div>
+      </div>
+
+      <div class="qtip err" style="margin-top:14px"><span class="ic">×</span><div><b>删除限制</b>当前生效中的版本不能直接删除，必须先把另一个版本设为生效。删除只是归档隐藏，用户已有的同意记录会保留，便于日后追溯。</div></div>
+    </div>
+  </div>
+  <div class="note">条款存数据库这张表里：版本号、生效日期、正文、状态、更新摘要，外加一张同意记录表存「谁在什么时候同意了哪个版本、来自哪个 IP」。同意记录不随条款删除而消失。</div>
+</section>
+
+<!-- ===== 移动端适配 ===== -->
+<section class="screen" id="s-mobile">
+  <div class="head"><h2>移动端适配</h2><p>同一套界面在手机上的形态。宽度按 375px 基准设计，下面按 296px 缩放显示。</p></div>
+
+  <div class="pgrid">
+
+    <div class="pcell">
+      <div class="plabel">广场（未登录）<small>底部只留两个 tab，右上角是登录入口</small></div>
+      <div class="phone">
+        <div class="pstat"><span>9:41</span><span>▮▮▮ 5G</span></div>
+        <div class="pnav"><span class="logo" style="font-size:14px">Pi<em>x</em>ora</span><span class="spacer"></span><button class="btn pri sm">登录</button></div>
+        <div class="pbody">
+          <div class="pchips"><span class="chip on">全部</span><span class="chip">风景</span><span class="chip">建筑</span><span class="chip">摄影</span></div>
+          <div class="pgrid2">
+            <div class="pcard"><div class="ph c1"></div><div class="pm"><b>雪山日出</b>u_1001 · 2 小时前</div></div>
+            <div class="pcard"><div class="ph c2"></div><div class="pm"><b>老城街角</b>u_2044 · 5 小时前</div></div>
+            <div class="pcard"><div class="ph c3"></div><div class="pm"><b>苔原</b>u_1001 · 昨天</div></div>
+            <div class="pcard"><div class="ph c4"></div><div class="pm"><b>霓虹夜</b>u_3087 · 昨天</div></div>
+            <div class="pcard"><div class="ph c5"></div><div class="pm"><b>线稿练习</b>u_2044 · 2 天前</div></div>
+            <div class="pcard"><div class="ph c6"></div><div class="pm"><b>午后窗台</b>u_1001 · 2 天前</div></div>
+          </div>
+          <div class="pnote i">登录后可以上传图片、收藏和下载原图。</div>
+        </div>
+        <div class="ptab">
+          <div class="it on"><span class="ic">◍</span>广场</div>
+          <div class="it"><span class="ic">◇</span>我的</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pcell">
+      <div class="plabel">广场（已登录）<small>上传区折叠在顶部，右下角悬浮上传按钮</small></div>
+      <div class="phone">
+        <div class="pstat"><span>9:41</span><span>▮▮▮ 5G</span></div>
+        <div class="pnav"><span class="logo" style="font-size:14px">Pi<em>x</em>ora</span><span class="spacer"></span><span class="ph" style="width:26px;height:26px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:10px">C</span></div>
+        <div class="pbody">
+          <div style="margin:10px;padding:11px 13px;border:1px dashed var(--border2);border-radius:10px;background:#fafafa">
+            <div style="font-size:12.5px;font-weight:600">＋ 上传图片</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">从相册、拍照或文件选择</div>
+          </div>
+          <div class="pchips"><span class="chip on">全部</span><span class="chip">风景</span><span class="chip">建筑</span></div>
+          <div class="pgrid2">
+            <div class="pcard"><div class="ph c1"></div><div class="pm"><b>雪山日出</b>u_1001 · 2 小时前</div></div>
+            <div class="pcard"><div class="ph c2"></div><div class="pm"><b>老城街角</b>u_2044 · 5 小时前</div></div>
+            <div class="pcard"><div class="ph c3"></div><div class="pm"><b>苔原</b>u_1001 · 昨天</div></div>
+            <div class="pcard"><div class="ph c4"></div><div class="pm"><b>霓虹夜</b>u_3087 · 昨天</div></div>
+          </div>
+          <div class="fab">＋</div>
+        </div>
+        <div class="ptab">
+          <div class="it on"><span class="ic">◍</span>广场</div>
+          <div class="it"><span class="ic">▤</span>相册</div>
+          <div class="it"><span class="ic">＋</span>上传</div>
+          <div class="it"><span class="ic">◇</span>我的</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pcell">
+      <div class="plabel">登录<small>和 PC 同一套表单，宽度自适应</small></div>
+      <div class="phone">
+        <div class="pstat"><span>9:41</span><span>▮▮▮ 5G</span></div>
+        <div class="pnav"><span style="font-weight:400;color:var(--muted)">‹ 返回</span></div>
+        <div class="pbody" style="padding:34px 20px">
+          <div style="text-align:center;margin-bottom:24px">
+            <div class="logo" style="font-size:19px">Pi<em>x</em>ora</div>
+            <div style="font-size:11.5px;color:var(--muted);margin-top:3px">登录后管理你的相册</div>
+          </div>
+          <div class="fld"><label class="f">邮箱</label><input class="f" value="chenyu@example.com" style="font-size:12.5px;padding:9px 11px"></div>
+          <div class="fld"><label class="f">密码</label><input class="f" type="password" value="············" style="font-size:12.5px;padding:9px 11px"></div>
+          <div class="flexline" style="justify-content:space-between;margin-bottom:16px;font-size:11.5px">
+            <label style="display:flex;align-items:center;gap:5px;color:#4b5563"><input type="checkbox" checked> 记住我</label>
+            <a style="color:var(--primary);text-decoration:none">忘记密码？</a>
+          </div>
+          <button class="btn pri" style="width:100%;padding:10px">登录</button>
+          <div style="text-align:center;font-size:11.5px;color:var(--muted);margin-top:14px">还没有账号？<a style="color:var(--primary);text-decoration:none">注册</a></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pcell">
+      <div class="plabel">我的相册 · 多选<small>长按图片进入多选，代替 PC 的 Shift 框选</small></div>
+      <div class="phone">
+        <div class="pstat"><span>9:41</span><span>▮▮▮ 5G</span></div>
+        <div class="pnav"><span>旅行</span><span class="spacer"></span><span style="font-weight:400;color:var(--muted)">⌕</span><span style="font-weight:400;color:var(--muted)">⋯</span></div>
+        <div style="background:var(--primary-soft);border-bottom:1px solid #bfdbfe;padding:9px 12px;display:flex;align-items:center;gap:9px;font-size:12px">
+          <span style="color:var(--primary);font-weight:600">已选 3 张</span>
+          <span class="spacer"></span>
+          <span style="color:var(--primary)">打标签</span>
+          <span style="color:var(--primary)">移动</span>
+          <span style="color:var(--danger)">删除</span>
+          <span style="color:var(--muted)">取消</span>
+        </div>
+        <div class="pbody">
+          <div class="pchips"><span class="chip on">旅行</span><span class="chip">工作</span><span class="chip">头像</span></div>
+          <div class="pgrid2">
+            <div class="pcard sel"><div class="ph c1"></div><div class="pm"><b>雪山日出</b>2.4 MB · 4032×3024</div></div>
+            <div class="pcard sel"><div class="ph c2"></div><div class="pm"><b>老城街角</b>1.8 MB · 3840×2560</div></div>
+            <div class="pcard sel"><div class="ph c3"></div><div class="pm"><b>苔原</b>3.1 MB · 4096×2731</div></div>
+            <div class="pcard"><div class="ph c4"></div><div class="pm"><b>霓虹夜</b>1.2 MB · 3024×4032</div></div>
+            <div class="pcard"><div class="ph c5"></div><div class="pm"><b>线稿练习</b>680 KB · 2048×2048</div></div>
+            <div class="pcard"><div class="ph c6"></div><div class="pm"><b>午后窗台</b>2.0 MB · 3600×2400</div></div>
+          </div>
+        </div>
+        <div class="ptab">
+          <div class="it"><span class="ic">◍</span>广场</div>
+          <div class="it on"><span class="ic">▤</span>相册</div>
+          <div class="it"><span class="ic">＋</span>上传</div>
+          <div class="it"><span class="ic">◇</span>我的</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pcell">
+      <div class="plabel">图片预览<small>左右滑切换，双指缩放，下拉关闭</small></div>
+      <div class="phone">
+        <div class="pstat" style="background:#111827;color:#9ca3af"><span>9:41</span><span>▮▮▮ 5G</span></div>
+        <div class="pnav" style="background:#111827;color:#e2e8f0;border-bottom-color:#1f2937"><span>‹</span><span style="font-weight:400;font-size:12px">2 / 236</span><span class="spacer"></span><span style="font-weight:400">⋯</span></div>
+        <div class="pbody" style="background:#111827;display:flex;align-items:center;justify-content:center;padding:16px">
+          <div class="ph c1" style="width:100%;height:250px;font-size:12px;color:#5b6675">雪山日出 · 4032×3024</div>
+        </div>
+        <div style="background:#1f2937;padding:10px 12px">
+          <div style="display:flex;gap:6px;margin-bottom:10px;overflow:auto">
+            <div class="ph c3" style="width:44px;height:32px;flex:0 0 44px;border-radius:5px"></div>
+            <div class="ph c1" style="width:44px;height:32px;flex:0 0 44px;border-radius:5px;outline:2px solid #2563eb"></div>
+            <div class="ph c5" style="width:44px;height:32px;flex:0 0 44px;border-radius:5px"></div>
+            <div class="ph c2" style="width:44px;height:32px;flex:0 0 44px;border-radius:5px"></div>
+            <div class="ph c6" style="width:44px;height:32px;flex:0 0 44px;border-radius:5px"></div>
+          </div>
+          <div style="display:flex;gap:8px;font-size:11.5px;color:#e2e8f0">
+            <span style="flex:1;text-align:center;background:rgba(255,255,255,.12);border-radius:7px;padding:7px 0">复制直链</span>
+            <span style="flex:1;text-align:center;background:rgba(255,255,255,.12);border-radius:7px;padding:7px 0">下载</span>
+            <span style="flex:1;text-align:center;background:rgba(255,255,255,.12);border-radius:7px;padding:7px 0">信息</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pcell">
+      <div class="plabel">上传面板<small>触屏没有拖拽，改成三个入口</small></div>
+      <div class="phone">
+        <div class="pstat"><span>9:41</span><span>▮▮▮ 5G</span></div>
+        <div class="pnav"><span>上传</span><span class="spacer"></span><span style="font-weight:400;color:var(--muted)">取消</span></div>
+        <div class="pbody">
+          <div style="padding:10px;display:flex;gap:8px">
+            <div style="flex:1;border:1px solid var(--border);border-radius:10px;padding:12px 6px;text-align:center;background:#fff">
+              <div style="font-size:17px;color:var(--primary);line-height:1">▤</div>
+              <div style="font-size:11.5px;font-weight:600;margin-top:5px">从相册</div>
+              <div style="font-size:10.5px;color:var(--muted);margin-top:1px">可多选</div>
+            </div>
+            <div style="flex:1;border:1px solid var(--border);border-radius:10px;padding:12px 6px;text-align:center;background:#fff">
+              <div style="font-size:17px;color:var(--primary);line-height:1">◉</div>
+              <div style="font-size:11.5px;font-weight:600;margin-top:5px">拍照</div>
+              <div style="font-size:10.5px;color:var(--muted);margin-top:1px">直接调用相机</div>
+            </div>
+            <div style="flex:1;border:1px solid var(--border);border-radius:10px;padding:12px 6px;text-align:center;background:#fff">
+              <div style="font-size:17px;color:var(--primary);line-height:1">▧</div>
+              <div style="font-size:11.5px;font-weight:600;margin-top:5px">从文件</div>
+              <div style="font-size:10.5px;color:var(--muted);margin-top:1px">其他 App 里的图</div>
+            </div>
+          </div>
+          <div class="pnote w">触屏没有拖拽。系统剪贴板里的图片走「从相册」入口，iOS 和 Android 都会把刚截的图排在相册最前面。</div>
+          <div style="padding:0 10px 6px;font-size:11.5px;font-weight:600">待上传 8 张 · 合计 18.6 MB</div>
+          <div style="padding:0 10px;display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+            <div class="ph c1" style="height:52px"></div>
+            <div class="ph c3" style="height:52px"></div>
+            <div class="ph c5" style="height:52px"></div>
+            <div class="ph c2" style="height:52px"></div>
+            <div class="ph c4" style="height:52px"></div>
+            <div class="ph c6" style="height:52px"></div>
+            <div class="ph c1" style="height:52px"></div>
+            <div class="ph c3" style="height:52px"></div>
+          </div>
+          <div class="pnote i">预检后 3 张已存在，上传时自动跳过。</div>
+          <div style="padding:0 10px 12px">
+            <div class="fld" style="margin-bottom:9px"><label class="f">目标相册</label><select class="f" style="font-size:12.5px;padding:8px 10px"><option>旅行</option></select></div>
+            <div class="fld" style="margin-bottom:9px"><label class="f">标签</label><input class="f" value="风景,旅行" style="font-size:12.5px;padding:8px 10px"></div>
+            <button class="btn pri" style="width:100%;padding:10px">上传 8 张</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pcell">
+      <div class="plabel">用户中心<small>PC 的左侧菜单在这里变成纵向列表</small></div>
+      <div class="phone">
+        <div class="pstat"><span>9:41</span><span>▮▮▮ 5G</span></div>
+        <div class="pnav"><span>我的</span></div>
+        <div class="pbody">
+          <div style="padding:16px 14px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #f3f4f6">
+            <span class="ph" style="width:48px;height:48px;border-radius:50%;background:#c7d2fe;color:#3730a3;font-size:18px;flex:0 0 48px">C</span>
+            <div style="min-width:0">
+              <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">chenyu@example.com</div>
+              <div style="font-size:11.5px;color:var(--muted);margin-top:2px">UID 1001 · <span style="color:var(--success)">正常</span></div>
+            </div>
+          </div>
+          <div style="padding:12px 14px;border-bottom:1px solid #f3f4f6">
+            <div style="display:flex;justify-content:space-between;font-size:11.5px;margin-bottom:6px"><span style="color:var(--muted)">存储用量</span><span>2.4 GB / 10 GB</span></div>
+            <div class="bar-l"><i style="width:24%"></i></div>
+          </div>
+          <div class="prow"><span>账号信息</span><span class="rt">›</span></div>
+          <div class="prow"><span>安全</span><span class="rt">›</span></div>
+          <div class="prow"><span>API Token</span><span class="rt">2 个 ›</span></div>
+          <div class="prow"><span>服务调整 · 服务条款</span><span class="rt">v2.1 ›</span></div>
+          <div class="prow"><span>我的相册</span><span class="rt">3 个 ›</span></div>
+          <div class="prow" style="color:var(--danger)"><span>退出登录</span></div>
+        </div>
+        <div class="ptab">
+          <div class="it"><span class="ic">◍</span>广场</div>
+          <div class="it"><span class="ic">▤</span>相册</div>
+          <div class="it"><span class="ic">＋</span>上传</div>
+          <div class="it on"><span class="ic">◇</span>我的</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pcell">
+      <div class="plabel">管理后台 · 用户管理<small>表格拆成卡片，侧边栏收进抽屉</small></div>
+      <div class="phone">
+        <div class="pstat"><span>9:41</span><span>▮▮▮ 5G</span></div>
+        <div class="pnav"><span style="font-weight:400">☰</span><span>用户管理</span><span class="spacer"></span><span style="font-weight:400;color:var(--muted)">⌕</span></div>
+        <div class="pbody" style="background:#fafafa">
+          <div style="padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px 12px"><div style="font-size:10.5px;color:var(--muted)">用户总数</div><div style="font-size:17px;font-weight:700">38</div></div>
+            <div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px 12px"><div style="font-size:10.5px;color:var(--muted)">本月新增</div><div style="font-size:17px;font-weight:700">6</div></div>
+            <div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px 12px"><div style="font-size:10.5px;color:var(--muted)">已分配配额</div><div style="font-size:14px;font-weight:700">420 GB</div></div>
+            <div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px 12px"><div style="font-size:10.5px;color:var(--muted)">实际占用</div><div style="font-size:14px;font-weight:700">128.6 GB</div></div>
+          </div>
+          <div style="padding:0 10px 10px;display:flex;flex-direction:column;gap:8px">
+            <div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:11px 12px">
+              <div style="display:flex;align-items:center;gap:7px;margin-bottom:7px">
+                <span style="font-size:12.5px;font-weight:600">chenyu@example.com</span>
+                <span class="badge ok" style="font-size:10px">正常</span>
+              </div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:7px">UID 1001 · 普通用户 · 2026-08-02 注册</div>
+              <div class="bar-l" style="margin-bottom:5px"><i style="width:24%"></i></div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:9px">2.4 GB / 10 GB</div>
+              <div style="display:flex;gap:6px">
+                <span class="btn sm" style="flex:1;text-align:center">详情</span>
+                <span class="btn sm" style="flex:1;text-align:center">相册</span>
+                <span class="btn sm wrn" style="flex:1;text-align:center">暂停</span>
+              </div>
+            </div>
+            <div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:11px 12px">
+              <div style="display:flex;align-items:center;gap:7px;margin-bottom:7px">
+                <span style="font-size:12.5px;font-weight:600">design@studio.io</span>
+                <span class="badge ok" style="font-size:10px">正常</span>
+              </div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:7px">UID 2044 · 普通用户 · 2026-07-19 注册</div>
+              <div class="bar-l" style="margin-bottom:5px"><i class="w" style="width:68%"></i></div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:9px">34.2 GB / 50 GB</div>
+              <div style="display:flex;gap:6px">
+                <span class="btn sm" style="flex:1;text-align:center">详情</span>
+                <span class="btn sm" style="flex:1;text-align:center">相册</span>
+                <span class="btn sm wrn" style="flex:1;text-align:center">暂停</span>
+              </div>
+            </div>
+            <div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:11px 12px">
+              <div style="display:flex;align-items:center;gap:7px;margin-bottom:7px">
+                <span style="font-size:12.5px;font-weight:600">spam@tempmail.xyz</span>
+                <span class="badge err" style="font-size:10px">已封禁</span>
+              </div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:7px">UID 4120 · 普通用户 · 2026-09-28 注册</div>
+              <div class="bar-l" style="margin-bottom:5px"><i class="d" style="width:92%"></i></div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:9px">9.2 GB / 10 GB</div>
+              <div style="display:flex;gap:6px">
+                <span class="btn sm" style="flex:1;text-align:center">详情</span>
+                <span class="btn sm" style="flex:1;text-align:center">解封</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="card" style="margin-top:20px">
+    <h4>移动端的交互替换 <small>布局之外，这些交互方式本身要换</small></h4>
+    <table>
+      <thead><tr><th style="width:150px">元素</th><th style="width:250px">PC</th><th>移动端</th></tr></thead>
+      <tbody>
+        <tr><td>主导航</td><td>左侧固定侧边栏，9 个入口平铺</td><td>底部 4 个 tab，其余收进「我的」页的列表</td></tr>
+        <tr><td>管理后台导航</td><td>左侧侧边栏</td><td>收进汉堡抽屉，标题栏显示当前位置</td></tr>
+        <tr><td>图片网格</td><td>3 到 5 列，随窗口变化</td><td>固定 2 列，卡片间距缩到 8px</td></tr>
+        <tr><td>数据表格</td><td>完整表格，多列并排</td><td>拆成卡片，每张卡片一列纵向排关键字段</td></tr>
+        <tr><td>多选</td><td>Shift + 左键按网格范围连选，Ctrl 离散多选</td><td>长按进入多选模式，之后逐张点选；提供「全选本页」</td></tr>
+        <tr><td>图片预览</td><td>浮层，← → 切换，滚轮缩放，Esc 关闭</td><td>全屏，左右滑切换，双指缩放，下拉关闭</td></tr>
+        <tr><td>上传入口</td><td>拖拽、选文件、选文件夹、Ctrl+V 粘贴</td><td>从相册、拍照、从文件三个入口，剪贴板图片走相册入口</td></tr>
+        <tr><td>批量操作</td><td>顶部工具栏</td><td>顶部工具栏加底部安全区留白，操作按钮至少 44px 高</td></tr>
+        <tr><td>表单</td><td>两到四列并排</td><td>单列纵向，输入框高度放大到 40px 以上</td></tr>
+        <tr><td>浮层与弹窗</td><td>居中模态</td><td>底部抽屉式弹出，可下拉关闭</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">移动端不只是把 PC 布局压窄。表格拆卡片、多选换成长按、拖拽换成相册入口，这几处是交互方式本身要换。另外底部 tab 和操作按钮都要留出手机安全区，否则全面屏上会被手势条挡住。</div>
+</section>
+
+<!-- ===== 响应式规范 ===== -->
+<section class="screen" id="s-responsive">
+  <div class="head"><h2>响应式规范</h2><p>全站统一的断点、布局矩阵和组件规则。所有页面按这套走，不各写各的。</p></div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h4>断点定义 <small>移动优先，统一用 min-width，避免 max-width 互相覆盖</small></h4>
+    <div style="display:flex;gap:4px;margin:12px 0 14px;font-size:11.5px">
+      <div style="flex:0 0 15%;background:var(--danger-soft);border:1px solid #fecaca;border-radius:8px;padding:9px 6px;text-align:center">
+        <b style="display:block;font-size:12.5px">XS</b><span style="color:var(--muted)">&lt; 480px</span>
+      </div>
+      <div style="flex:0 0 18%;background:var(--warning-soft);border:1px solid #fde68a;border-radius:8px;padding:9px 6px;text-align:center">
+        <b style="display:block;font-size:12.5px">SM</b><span style="color:var(--muted)">480–767</span>
+      </div>
+      <div style="flex:0 0 22%;background:var(--primary-soft);border:1px solid #bfdbfe;border-radius:8px;padding:9px 6px;text-align:center">
+        <b style="display:block;font-size:12.5px">MD</b><span style="color:var(--muted)">768–1023</span>
+      </div>
+      <div style="flex:1;background:var(--success-soft);border:1px solid #bbf7d0;border-radius:8px;padding:9px 6px;text-align:center">
+        <b style="display:block;font-size:12.5px">LG</b><span style="color:var(--muted)">1024–1439</span>
+      </div>
+      <div style="flex:1;background:var(--purple-soft);border:1px solid #ddd6fe;border-radius:8px;padding:9px 6px;text-align:center">
+        <b style="display:block;font-size:12.5px">XL</b><span style="color:var(--muted)">≥ 1440px</span>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th style="width:74px">代号</th><th style="width:120px">宽度</th><th style="width:190px">典型设备</th><th>布局策略</th></tr></thead>
+      <tbody>
+        <tr><td><b>XS</b></td><td class="mono">&lt; 480px</td><td>小屏手机</td><td>单列，底部 tab，卡片内边距收紧到 10px</td></tr>
+        <tr><td><b>SM</b></td><td class="mono">480–767px</td><td>大屏手机、横屏手机</td><td>单列，底部 tab，网格可放两列</td></tr>
+        <tr><td><b>MD</b></td><td class="mono">768–1023px</td><td>平板竖屏、小笔记本</td><td>两到三列，侧边栏可折叠，表格转精简列</td></tr>
+        <tr><td><b>LG</b></td><td class="mono">1024–1439px</td><td>笔记本、桌面显示器</td><td>三到四列，侧边栏常驻，内容区限宽 1200px</td></tr>
+        <tr><td><b>XL</b></td><td class="mono">≥ 1440px</td><td>宽屏桌面</td><td>五列，内容区限宽 1400px 居中，两侧留白</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h4>各区域布局矩阵</h4>
+    <table>
+      <thead><tr><th style="width:150px">区域</th><th style="width:90px">XS</th><th style="width:90px">SM</th><th style="width:120px">MD</th><th style="width:120px">LG</th><th>XL</th></tr></thead>
+      <tbody>
+        <tr><td>图片网格列数</td><td>2</td><td>2</td><td>3</td><td>4</td><td>5</td></tr>
+        <tr><td>主导航</td><td>底部 tab</td><td>底部 tab</td><td>左侧可折叠</td><td>左侧常驻</td><td>左侧常驻</td></tr>
+        <tr><td>管理后台导航</td><td>抽屉</td><td>抽屉</td><td>抽屉</td><td>侧边栏</td><td>侧边栏</td></tr>
+        <tr><td>数据表格</td><td>卡片</td><td>卡片</td><td>精简列</td><td>完整表格</td><td>完整表格</td></tr>
+        <tr><td>表单列数</td><td>1</td><td>1</td><td>2</td><td>2–4</td><td>2–4</td></tr>
+        <tr><td>弹窗形态</td><td>全屏</td><td>全屏</td><td>居中弹窗</td><td>居中弹窗</td><td>居中弹窗</td></tr>
+        <tr><td>手机框稿区</td><td>1 列</td><td>1 列</td><td>2 列</td><td>3 列</td><td>4 列</td></tr>
+        <tr><td>内容区最大宽</td><td>100%</td><td>100%</td><td>100%</td><td>1200px</td><td>1400px</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="row" style="margin-bottom:16px">
+    <div class="card">
+      <h4>组件级规则</h4>
+      <table>
+        <thead><tr><th style="width:110px">组件</th><th>适配方式</th></tr></thead>
+        <tbody>
+          <tr><td>数据表格</td><td>&lt; 768px 转卡片列表；768–1023px 隐藏次要列（尺寸、哈希、注册时间），保留名称、标签、大小、操作</td></tr>
+          <tr><td>弹窗</td><td>&lt; 768px 全屏铺满；≥ 768px 居中，表单类最大宽 580px，阅读类最大宽 720px</td></tr>
+          <tr><td>抽屉</td><td>从底部弹出，可下拉关闭，高度不超过 85vh，顶部留圆角</td></tr>
+          <tr><td>工具栏</td><td>按钮超过 3 个时横向滚动，不换行；当前选中数固定在最左</td></tr>
+          <tr><td>图片</td><td>宽 100%、高自适应，加 <span class="mono">loading="lazy"</span> 与 <span class="mono">decoding="async"</span></td></tr>
+          <tr><td>哈希长串</td><td><span class="mono">overflow-wrap:anywhere</span>，否则 64 位哈希会把布局撑破</td></tr>
+          <tr><td>侧边栏</td><td>≥ 1024px 常驻；&lt; 1024px 收进抽屉，用遮罩层关闭</td></tr>
+          <tr><td>悬浮按钮</td><td>仅 &lt; 1024px 显示，避开底部 tab 与安全区</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h4>字号与触控尺寸</h4>
+      <table>
+        <thead><tr><th style="width:130px">元素</th><th style="width:96px">移动端</th><th>桌面端</th></tr></thead>
+        <tbody>
+          <tr><td>正文</td><td>14px</td><td>14px</td></tr>
+          <tr><td>辅助文字</td><td>12px</td><td>12px</td></tr>
+          <tr><td>页面标题</td><td>17px</td><td>16px</td></tr>
+          <tr><td>输入框高度</td><td>≥ 40px</td><td>34px</td></tr>
+          <tr><td>按钮高度</td><td>≥ 44px</td><td>32px</td></tr>
+          <tr><td>图标点击区</td><td>≥ 44×44px</td><td>≥ 32×32px</td></tr>
+          <tr><td>卡片内边距</td><td>10–12px</td><td>14–18px</td></tr>
+        </tbody>
+      </table>
+      <div class="tip">字号不随断点缩放，只调间距和触控区。字太小比留白多更难受。</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h4>全局约束</h4>
+    <div class="row">
+      <div>
+        <div class="swrow"><div class="txt"><b>横向不出现滚动条</b><small>任何断点下 body 都不该横向滚动，这是最基础的验收项</small></div><span class="sw on"></span></div>
+        <div class="swrow"><div class="txt"><b>移动优先写样式</b><small>基础样式面向窄屏，宽屏用 min-width 逐步增强</small></div><span class="sw on"></span></div>
+        <div class="swrow"><div class="txt"><b>安全区留白</b><small>底部 tab 与操作条加 env(safe-area-inset-bottom)</small></div><span class="sw on"></span></div>
+      </div>
+      <div>
+        <div class="swrow"><div class="txt"><b>横屏可用</b><small>手机横屏时底部 tab 转为左侧窄栏，避免挤压内容高度</small></div><span class="sw on"></span></div>
+        <div class="swrow"><div class="txt"><b>触控与鼠标区分</b><small>用 hover 媒体查询，触屏不依赖悬停才显示的操作</small></div><span class="sw on"></span></div>
+        <div class="swrow"><div class="txt"><b>打印与导出</b><small>条款页提供打印样式，去掉导航只留正文</small></div><span class="sw off"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">断点不要写太多。五个已经够用，再多就是给自己找麻烦。真正决定体验的是「表格什么时候转卡片」「多选怎么换成长按」这类规则，不是断点的数量。</div>
+</section>
+
+<!-- ===== 安装向导 ===== -->
+<section class="screen" id="s-install">
+  <div class="head"><h2>安装向导</h2><p>五步走完就能用。数据库可选 PostgreSQL、MySQL 或 SQLite。</p></div>
+  <div class="frame">
+    <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url">https://img.example.com/install</span></div>
+    <div class="steps">
+      <div class="step done"><span class="n">✓</span>环境检查</div>
+      <div class="step on"><span class="n">2</span>数据库</div>
+      <div class="step"><span class="n">3</span>管理员</div>
+      <div class="step"><span class="n">4</span>站点与邮件</div>
+      <div class="step"><span class="n">5</span>完成</div>
+    </div>
+    <div class="pad" style="max-width:600px;margin:0 auto">
+      <div class="card">
+        <div class="fld">
+          <label class="f">数据库类型</label>
+          <select class="f"><option>PostgreSQL（默认）</option><option>MySQL / MariaDB</option><option>SQLite（单文件，最省内存）</option></select>
+        </div>
+        <div class="row">
+          <div class="fld"><label class="f">主机</label><input class="f mono" value="127.0.0.1"></div>
+          <div class="fld"><label class="f">端口</label><input class="f mono" value="5432"></div>
+        </div>
+        <div class="row">
+          <div class="fld"><label class="f">数据库名</label><input class="f mono" value="pixora"></div>
+          <div class="fld"><label class="f">用户名</label><input class="f mono" value="pixora"></div>
+        </div>
+        <div class="fld"><label class="f">密码</label><input class="f" type="password" value="············"></div>
+        <div class="qtip ok"><span class="ic">✓</span><div><b>连接成功</b>PostgreSQL 16.4 · 字符集 UTF8 · 已检测到 0 张表，将执行建表</div></div>
+        <div class="qtip info" style="margin-top:10px"><span class="ic">i</span><div>存储路径不在这里填，由容器环境变量 <span class="mono">PIXORA_DATA_DIR</span> 注入。本地直跑时默认取当前目录下的 <span class="mono">./data</span>。</div></div>
+        <div class="flexline" style="justify-content:space-between;margin-top:16px">
+          <button class="btn">上一步</button><button class="btn pri">下一步</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+</div>
+
+<script>
+(function(){
+  var nav = document.getElementById('nav');
+  var screens = document.querySelectorAll('.screen');
+  function show(id){
+    screens.forEach(function(s){ s.classList.toggle('on', s.id === 's-' + id); });
+    nav.querySelectorAll('button').forEach(function(b){ b.classList.toggle('on', b.dataset.s === id); });
+    window.scrollTo({top:0, behavior:'instant'});
+  }
+  nav.addEventListener('click', function(e){
+    var b = e.target.closest('button[data-s]');
+    if (b) show(b.dataset.s);
+  });
+  window.go = show;
+  show('account-terms');
+  window.lb = function(k){
+    var el = document.getElementById('lb-' + k);
+    if (el) el.classList.toggle('on');
+  };
+})();
+</script>
+</body>
+</html>
