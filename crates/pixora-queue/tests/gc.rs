@@ -93,7 +93,7 @@ async fn unreferenced_blob_past_grace_period_is_reclaimed() {
     age_blob(&state, blob_id, 3).await;
     assert!(path.exists(), "准备阶段文件应当存在");
 
-    let removed = gc::collect_blobs(&state, 60, 10).await.expect("回收");
+    let removed = gc::collect_blobs(&state, 60, 10).await.expect("回收").removed;
     assert_eq!(removed, 1, "无引用且过期的实体应当被回收");
     assert!(!path.exists(), "物理文件必须被删掉");
     assert!(
@@ -112,7 +112,7 @@ async fn referenced_blob_is_never_deleted() {
     // 加一个引用：这张图还被某个人用着
     state.repo.inc_blob_ref(blob_id).await.unwrap();
 
-    let removed = gc::collect_blobs(&state, 60, 10).await.expect("回收");
+    let removed = gc::collect_blobs(&state, 60, 10).await.expect("回收").removed;
     assert_eq!(removed, 0, "还有引用的实体绝不能被回收");
     assert!(path.exists(), "别人的图不能消失");
     assert_eq!(
@@ -135,7 +135,7 @@ async fn fresh_blob_within_grace_period_is_left_alone() {
     // 刚登记、引用还没建起来：这正是宽限期要保护的时间窗
     let (blob_id, path) = seed_blob(&state, 'c').await;
 
-    let removed = gc::collect_blobs(&state, 60, 10).await.expect("回收");
+    let removed = gc::collect_blobs(&state, 60, 10).await.expect("回收").removed;
     assert_eq!(removed, 0, "宽限期内的实体不动");
     assert!(path.exists());
     assert!(state.repo.find_blob_by_id(blob_id).await.unwrap().is_some());
@@ -152,9 +152,9 @@ async fn batch_limit_is_respected() {
     }
 
     // 单轮只处理 2 个：剩下的留给下一轮，避免一次 GC 把 IO 打满
-    let first = gc::collect_blobs(&state, 60, 2).await.expect("回收");
+    let first = gc::collect_blobs(&state, 60, 2).await.expect("回收").removed;
     assert_eq!(first, 2, "单轮上限要生效");
-    let second = gc::collect_blobs(&state, 60, 2).await.expect("回收");
+    let second = gc::collect_blobs(&state, 60, 2).await.expect("回收").removed;
     assert_eq!(second, 1, "下一轮把剩下的收掉");
     assert_eq!(state.repo.count_blobs().await.unwrap(), 0);
 }
@@ -281,7 +281,7 @@ async fn deleting_a_user_does_not_strand_physical_files() {
 
     // 归零 + 过期 → 回收，物理文件不再滞留
     age_blob(&state, blob_id, 3).await;
-    let removed = gc::collect_blobs(&state, 60, 10).await.unwrap();
+    let removed = gc::collect_blobs(&state, 60, 10).await.unwrap().removed;
     assert_eq!(removed, 1);
     assert!(!path.exists(), "删账号不该把物理文件永久留在盘上");
 }
@@ -510,7 +510,7 @@ async fn soft_deleted_rows_do_not_pin_physical_files() {
     );
 
     age_blob(&state, blob_id, 3).await;
-    let removed = gc::collect_blobs(&state, 10, 10).await.unwrap();
+    let removed = gc::collect_blobs(&state, 10, 10).await.unwrap().removed;
     assert_eq!(removed, 1, "过宽限期后应当回收");
     assert!(!path.exists(), "物理文件要真删掉");
     assert!(

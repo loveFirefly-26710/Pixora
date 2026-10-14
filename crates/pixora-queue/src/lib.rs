@@ -49,7 +49,7 @@ impl Default for QueueConfig {
             // 宽限期是「登记实体 → 建引用」那道时间窗的余量，不是「文件该留多久」。
             // 拿它当留存期是个误会：上传请求里这两步相隔毫秒，10 分钟已经非常宽裕，
             // 而 60 分钟会让「删完图文件还在」看着像没删掉。
-            gc_grace_minutes: 10,
+            gc_grace_minutes: 5,
             gc_batch: 200,
             mail_poll_seconds: 30,
             reconcile_seconds: 3600,
@@ -104,16 +104,25 @@ pub fn spawn(state: Arc<AppState>, config: QueueConfig) -> Vec<tokio::task::Join
             // 启动后先等一会儿再跑第一轮，避开启动瞬间的请求高峰
             tokio::time::sleep(Duration::from_secs(60)).await;
             loop {
+                // 有「引用已归零、还在宽限期」的，下一轮提前到 60 秒后：
+                // 让「刚传完就删」的文件在宽限期一到就被收走，而不是再等整个扫描周期
+                let mut wait = Duration::from_secs(300);
                 match gc::collect_blobs(&state, grace, batch).await {
-                    Ok(0) => {}
-                    Ok(removed) => tracing::info!(removed, "回收无引用的物理文件"),
+                    Ok(outcome) => {
+                        if outcome.removed > 0 {
+                            tracing::info!(removed = outcome.removed, "回收无引用的物理文件");
+                        }
+                        if outcome.pending_grace > 0 {
+                            wait = Duration::from_secs(60);
+                        }
+                    }
                     Err(err) => tracing::warn!(error = %err, "Blob 回收失败"),
                 }
                 // 定时扫描保证「没人催也会回收」；删除类操作会踢一下通知，
                 // 让刚失去引用的文件当场就走一轮，而不是等下一个整点窗口。
                 // 回收本身仍然是「只在这里删物理文件」这一条不变量。
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+                    _ = tokio::time::sleep(wait) => {}
                     _ = state.wait_gc_kick() => {}
                 }
             }
