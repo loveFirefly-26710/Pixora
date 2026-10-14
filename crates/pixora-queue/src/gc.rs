@@ -63,10 +63,13 @@ pub async fn collect_blobs(state: &Arc<AppState>, grace_minutes: i64, batch: i64
 pub async fn reconcile(state: &Arc<AppState>) -> pixora_core::Result<u64> {
     let users = state.repo.reconcile_all_used_bytes().await?;
     let albums = state.repo.recount_all_album_images().await?;
-    if users > 0 || albums > 0 {
-        tracing::info!(users, albums, "对账修正了用量与相册计数");
+    // 引用计数也要对账。删除账号走的是外键级联，少了「递减计数」那一步，
+    // 计数虚高的实体永远等不到归零，物理文件也就永远不被回收。
+    let blobs = state.repo.recompute_blob_ref_counts().await?;
+    if users > 0 || albums > 0 || blobs > 0 {
+        tracing::info!(users, albums, blobs, "对账修正了用量、相册计数与引用计数");
     }
-    Ok(users + albums)
+    Ok(users + albums + blobs)
 }
 
 /// 清理过期数据。都是「有明确保质期」的行，删了不影响业务。

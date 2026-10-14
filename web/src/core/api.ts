@@ -118,6 +118,11 @@ function absorbCsrf(data: unknown): void {
   }
 }
 
+/** 用户主动取消（暂停/取消队列）不应该触发回退重试。 */
+function isCancelled(err: ApiError): boolean {
+  return err.message.includes("取消") || err.message.includes("abort");
+}
+
 export interface RequestOptions {
   method?: string;
   /** JSON 体；与 form 二选一 */
@@ -278,8 +283,32 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   }
 
   if (options.form && options.onProgress) {
-    const response = await xhrSend(url, { ...options, method, headers }, options.onProgress);
-    return (await parseResponse(response.status, response.text, response.headers)) as T;
+    try {
+      const response = await xhrSend(url, { ...options, method, headers }, options.onProgress);
+      return (await parseResponse(response.status, response.text, response.headers)) as T;
+    } catch (err) {
+      // XHR 在建连层就失败（status=0）时，用 fetch 再试一次同一份 FormData。
+      //
+      // 这一条是照着实测加的：应用里只有上传走 XHR（为了拿进度），其它请求走 fetch。
+      // 浏览器扩展与部分安全软件会挂钩 XMLHttpRequest 但不挂钩 fetch，
+      // 症状是「页面一切正常，一上传就 status=0，服务端连请求痕迹都没有」。
+      // fetch 通得过就继续用，通不过再把原始错误抛出去——不掩盖真正的问题。
+      const isTransportFailure =
+        err instanceof ApiError && err.code === "NETWORK" && !isCancelled(err);
+      if (!isTransportFailure) throw err;
+      try {
+        const response = await fetch(url, {
+          method,
+          headers,
+          body,
+          credentials: "same-origin",
+          signal: options.signal,
+        });
+        return (await parseResponse(response.status, await response.text(), response.headers)) as T;
+      } catch {
+        throw err;
+      }
+    }
   }
 
   let response: Response;

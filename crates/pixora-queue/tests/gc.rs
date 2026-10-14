@@ -37,6 +37,7 @@ async fn test_state(dir: &tempfile::TempDir) -> Arc<AppState> {
         web_dir: None,
         accel_prefix: None,
         secure_cookies: false,
+        dev_return_codes: false,
         log_level: "warn".to_string(),
     };
     AppState::bootstrap(config).await.expect("装配测试实例")
@@ -217,4 +218,70 @@ fn timestamps_use_the_same_rfc3339_shape_as_the_rest_of_the_system() {
     let stamp = now_ts();
     assert!(stamp.ends_with('Z'), "{stamp}");
     assert_eq!(stamp.len(), 27, "{stamp}");
+}
+
+#[tokio::test]
+async fn deleting_a_user_does_not_strand_physical_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+
+    // 一个用户、一张图：引用计数为 1
+    let user = state
+        .repo
+        .create_user(&pixora_repo::repo::users::NewUser {
+            uid: "2002".to_string(),
+            email: "cascade@example.com".to_string(),
+            password_hash: "$argon2id$placeholder".to_string(),
+            role: "user".to_string(),
+            status: "active".to_string(),
+            quota_bytes: 1024 * 1024,
+            email_verified: true,
+        })
+        .await
+        .unwrap();
+    let (blob_id, path) = seed_blob(&state, 'e').await;
+    state
+        .repo
+        .create_image_reference(
+            &pixora_repo::repo::images::NewImage {
+                owner_id: user.id,
+                album_id: None,
+                blob_id,
+                thumb_blob_id: None,
+                original_name: "a.png".to_string(),
+                title: None,
+                visibility: "private".to_string(),
+            },
+            21,
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
+        1
+    );
+
+    // 删除账号：images 随外键级联消失，但没人递减 ref_count——这是真实存在的路径
+    state.repo.delete_user(user.id).await.unwrap();
+    assert_eq!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
+        1,
+        "级联删除不会动计数，这正是不对账就会漏盘的原因"
+    );
+
+    // 对账把计数拉回事实
+    let fixed = gc::reconcile(&state).await.unwrap();
+    assert!(fixed >= 1);
+    assert_eq!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
+        0,
+        "对账之后计数归零"
+    );
+
+    // 归零 + 过期 → 回收，物理文件不再滞留
+    age_blob(&state, blob_id, 3).await;
+    let removed = gc::collect_blobs(&state, 60, 10).await.unwrap();
+    assert_eq!(removed, 1);
+    assert!(!path.exists(), "删账号不该把物理文件永久留在盘上");
 }

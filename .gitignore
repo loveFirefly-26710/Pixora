@@ -31,3 +31,8 @@ Thumbs.db
 /web/node_modules/
 # web/dist 是构建产物，但故意提交：单二进制的编译依赖它存在（rust-embed 在编译期读它），
 # 留一份在仓库里能让 `cargo build` 在全新克隆上直接可用。改了前端记得 `npm run build`。
+
+# 排查用的大图（scripts 与冒烟测试自己生成，不入库）
+/probe.png
+/tiny.png
+/big.png
