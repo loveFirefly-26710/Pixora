@@ -314,6 +314,16 @@ API 客户端：
   "ids": [1,2,3], "album_id": 7, "tags": ["风景"], "visibility": "public" }
 ```
 
+`ids` 最多 1000 个。也可以换成按范围操作（「整相册一键操作」走这条）：
+
+```json
+{ "action": "delete", "filter": { "album_id": 7 } }
+```
+
+`filter.album_id` 省略或为 `null` 表示不限相册（该账号的全部图片）；范围一次最多 10000 张，
+超出只作用于前 10000 张（响应里的 `affected` 是实际处理数）。范围与 `ids` 不能同时给，
+同时给时以 `filter` 为准。
+
 响应：`{ "data": { "affected": 3 } }`。
 
 ### `GET /api/v1/tags` — read

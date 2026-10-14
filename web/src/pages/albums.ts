@@ -76,6 +76,14 @@ export async function render(ctx: PageContext): Promise<void> {
     selected: new Set<number>(),
     anchor: null as number | null,
     lightboxOpen: false,
+    /**
+     * 「整相册/整库全选」模式。
+     *
+     * 打开之后选中的不是当前页那 24 张，而是这个范围里的全部图片：
+     * 批量操作走 `filter` 让服务端自己去匹配，不必把几千个 id 拉到浏览器再发回去。
+     * 一旦手动勾选/取消某一张，就退回普通的多选（用户想挑具体的那些）。
+     */
+    allMatching: false,
   };
 
   /** 长按抬起时会补发一次 click，这个标记让 capture 处理器吞掉它，避免刚选中又被切掉。 */
@@ -88,7 +96,9 @@ export async function render(ctx: PageContext): Promise<void> {
 
   const headHost = h("div");
   const sideHost = h("div.albumlist");
-  const toolbarHost = h("div");
+  // 工具栏容器：sticky 挂在它身上（挂工具栏自己不行——sticky 只能在父容器
+  // 的高度范围内移动，而父容器就只有这一条工具栏那么高，等于没粘住）
+  const toolbarHost = h("div.albums-toolbar");
   const listHost = h("div");
   const pagerHost = h("div");
   const selbar = h("div.selbar");
@@ -153,6 +163,16 @@ export async function render(ctx: PageContext): Promise<void> {
     text: "列表",
     on: { click: () => setView("list") },
   });
+  // 整范围全选：一次点完整个相册（或全部图片），批量操作交给服务端按条件匹配
+  const allMatchingBtn = h("button.btn.sm", { type: "button", text: "全选" });
+  allMatchingBtn.addEventListener("click", () => {
+    if (state.allMatching) {
+      cancelSelection();
+      return;
+    }
+    enterAllMatching();
+  });
+
   const normalToolbar = h(
     "div.toolbar",
     null,
@@ -161,6 +181,7 @@ export async function render(ctx: PageContext): Promise<void> {
     h("span.spacer"),
     searchInput,
     sortSelect,
+    allMatchingBtn,
   );
 
   // ---------- 批量操作条：宽屏完整版，窄屏紧凑版 + 底部固定条 ----------
@@ -568,6 +589,8 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   function toggleSelect(id: number, options: { anchor?: boolean } = {}): void {
+    // 手动点选就意味着「我要的是这几个」，退出整范围模式
+    state.allMatching = false;
     if (state.selected.has(id)) state.selected.delete(id);
     else state.selected.add(id);
     if (options.anchor) state.anchor = id;
@@ -577,15 +600,18 @@ export async function render(ctx: PageContext): Promise<void> {
   function cancelSelection(): void {
     state.selected.clear();
     state.anchor = null;
+    state.allMatching = false;
     syncSelectionUI();
   }
 
   function selectPage(): void {
+    state.allMatching = false;
     for (const item of pageItems()) state.selected.add(item.id);
     syncSelectionUI();
   }
 
   function clearPageSelection(): void {
+    state.allMatching = false;
     for (const item of pageItems()) state.selected.delete(item.id);
     syncSelectionUI();
   }
@@ -598,6 +624,7 @@ export async function render(ctx: PageContext): Promise<void> {
    * 列表：行就是项，直接取连续区间。
    */
   function selectRange(targetId: number): void {
+    state.allMatching = false;
     const anchorId = state.anchor;
     if (anchorId === null) {
       toggleSelect(targetId, { anchor: true });
@@ -692,12 +719,12 @@ export async function render(ctx: PageContext): Promise<void> {
 
   /** 选择变化后只改受影响的 DOM：切 class、同步勾选框与工具栏。 */
   function syncSelectionUI(): void {
-    const count = state.selected.size;
+    const count = selectedCount();
     const has = count > 0;
 
     for (const tile of listHost.querySelectorAll<HTMLElement>(".tile[data-image-id]")) {
       const id = Number(tile.dataset.imageId);
-      const on = state.selected.has(id);
+      const on = state.allMatching || state.selected.has(id);
       tile.classList.toggle("sel", on);
       // 勾选框也要跟着走：Shift 连选、全选本页这些路径没经过勾选框本身，
       // 只切 .sel 的话框还是空的，看起来像没选中
@@ -706,7 +733,7 @@ export async function render(ctx: PageContext): Promise<void> {
     }
     for (const row of listHost.querySelectorAll<HTMLElement>("tr[data-image-id]")) {
       const id = Number(row.dataset.imageId);
-      const on = state.selected.has(id);
+      const on = state.allMatching || state.selected.has(id);
       row.classList.toggle("pick", on);
       const box = row.querySelector<HTMLInputElement>("input[type=checkbox]");
       if (box) box.checked = on;
@@ -723,26 +750,55 @@ export async function render(ctx: PageContext): Promise<void> {
     wideBatch.classList.toggle("on", has);
     narrowBatch.classList.toggle("on", has);
     selbar.classList.toggle("on", has && isNarrow());
+    const prefix = state.allMatching ? "已选全部 " : "已选 ";
     wideCount.replaceChildren(
-      document.createTextNode("已选 "),
+      document.createTextNode(prefix),
       h("b", { text: String(count) }),
       document.createTextNode(" 张"),
     );
-    narrowCount.textContent = `已选 ${count} 张`;
+    narrowCount.textContent = `${prefix}${count} 张`;
+    if (allMatchingBtn) {
+      allMatchingBtn.textContent = state.allMatching ? "取消全选" : `全选 ${state.total} 张`;
+    }
   }
 
   // ---------- 批量操作 ----------
 
+  /** 当前算多少张：整范围模式下是总数，否则是勾选数。 */
+  function selectedCount(): number {
+    return state.allMatching ? state.total : state.selected.size;
+  }
+
+  /** 整范围模式对应的筛选条件：看的是哪个相册（全部图片则不限相册）。 */
+  function scopeFilter(): Record<string, unknown> {
+    return { album_id: state.albumId };
+  }
+
   async function runBatch(
-    action: "delete" | "move" | "tag",
+    action: "delete" | "move" | "tag" | "visibility",
     extra: Record<string, unknown>,
   ): Promise<number> {
-    const ids = [...state.selected];
+    const body: Record<string, unknown> = { action, ...extra };
+    if (state.allMatching) {
+      // 交给服务端按范围匹配：几千张图不必先发 id 列表上来
+      body.filter = scopeFilter();
+    } else {
+      body.ids = [...state.selected];
+    }
     const result = await request<{ affected: number }>("/images/batch", {
-      json: { action, ids, ...extra },
+      json: body,
       query: { uid: viewingUid ?? undefined },
     });
-    return result.affected ?? ids.length;
+    return result.affected ?? selectedCount();
+  }
+
+  /** 进入整范围全选：先把当前页勾上（视觉上立刻有反馈），计数用总数。 */
+  function enterAllMatching(): void {
+    if (state.total === 0) return;
+    state.allMatching = true;
+    state.selected = new Set(state.items.map((item) => item.id));
+    state.anchor = null;
+    syncSelectionUI();
   }
 
   async function afterBatch(message: string): Promise<void> {
@@ -752,11 +808,11 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   async function batchTag(): Promise<void> {
-    const count = state.selected.size;
+    const count = selectedCount();
     if (count === 0) return;
     const input = await promptDialog({
       title: "批量打标签",
-      label: `给选中的 ${count} 张图片追加标签（逗号分隔）`,
+      label: `给${state.allMatching ? `全部 ${count} 张` : `选中的 ${count} 张`}图片追加标签（逗号分隔）`,
       placeholder: "风景,旅行",
       confirmText: "追加标签",
     });
@@ -775,7 +831,7 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   async function batchMove(): Promise<void> {
-    const count = state.selected.size;
+    const count = selectedCount();
     if (count === 0) return;
     const albums = state.albums?.albums ?? [];
     const selectEl = h(
@@ -820,11 +876,16 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   async function batchDelete(): Promise<void> {
-    const count = state.selected.size;
+    const count = selectedCount();
     if (count === 0) return;
+    const scope = state.allMatching
+      ? state.albumId === null
+        ? "全部图片"
+        : "这个相册里的全部图片"
+      : `选中的 ${count} 张图片`;
     const ok = await confirmDanger(
-      `删除选中的 ${count} 张图片？`,
-      "图片会从列表移除；物理文件在引用计数归零后由后台回收，删除不可撤销。",
+      `删除${scope}？`,
+      `${state.allMatching ? `一共 ${count} 张。` : ""}图片会从列表移除；物理文件在引用计数归零后由后台回收，删除不可撤销。`,
       `删除 ${count} 张`,
     );
     if (!ok) return;
@@ -1216,6 +1277,11 @@ export async function render(ctx: PageContext): Promise<void> {
   // ---------- 启动 ----------
 
   await Promise.all([loadAlbums(), loadImages(1)]);
+
+  // 相册管理页的「选中全部图片」会带 select=all 过来：加载完直接进整范围模式
+  if (ctx.query.get("select") === "all") {
+    enterAllMatching();
+  }
 }
 
 /** 用户视图横幅：先显示 uid，拿到邮箱后再补全文案（不阻塞页面渲染）。 */

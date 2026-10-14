@@ -363,10 +363,15 @@ pub async fn images_batch(
     let album_id = field_opt_i64(&body, "album_id");
     let tags = field_string_list(&body, "tags");
     let visibility = field_opt_str(&body, "visibility");
+    // `filter` 是「按范围操作」：`{"filter":{"album_id":7}}` 作用于该相册，
+    // `{"filter":{}}`（或 album_id 为 null）作用于全部图片
+    let scope = body.get("filter").map(|value| pixora_core::images::BatchScope {
+        album_id: value.get("album_id").and_then(|item| item.as_i64()),
+    });
 
     let viewer = viewer_for(Some(&auth), false);
     match state
-        .batch_images(&viewer, action, &ids, album_id, tags, visibility)
+        .batch_images(&viewer, action, &ids, scope, album_id, tags, visibility)
         .await
     {
         Ok(affected) => finish::<serde_json::Value>(Ok(serde_json::json!({

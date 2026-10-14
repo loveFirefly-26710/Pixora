@@ -80,6 +80,12 @@ kbd {
   min-width: 0;
 }
 
+/* 顶栏高度：由脚本按实际渲染结果写进来（见 shell.ts 的 syncNavHeight）。
+   粘性定位的元素（侧边栏、相册工具栏）靠它对齐，不再猜 49px 还是 59px。 */
+:root {
+  --nav-h: 49px;
+}
+
 /* 内容区限宽：LG 1200px、XL 1400px 居中 */
 .pad {
   padding: 14px;

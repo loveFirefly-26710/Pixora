@@ -270,6 +270,32 @@ impl Repo {
     }
 
     /// 相册维度的文件数与字节数，`fs/tree` 与容量展示都要。
+    /// 按范围取还活着的图片 id：`album_id` 为 `None` 表示不限相册（全部图片）。
+    ///
+    /// 给「整相册批量操作」用：前端不必先把几千个 id 拉到浏览器再发回来，
+    /// 服务端自己按条件取。上限由调用方给，避免一次把整库拖进内存。
+    pub async fn image_ids_in_scope(
+        &self,
+        owner_id: i64,
+        album_id: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<i64>> {
+        let (sql, args) = match album_id {
+            Some(album_id) => (
+                "SELECT id FROM images WHERE owner_id = ? AND album_id = ? AND deleted_at IS NULL                  ORDER BY id LIMIT ?"
+                    .to_string(),
+                Args::new().int(owner_id).int(album_id).int(limit.clamp(1, 20_000)),
+            ),
+            None => (
+                "SELECT id FROM images WHERE owner_id = ? AND deleted_at IS NULL ORDER BY id LIMIT ?"
+                    .to_string(),
+                Args::new().int(owner_id).int(limit.clamp(1, 20_000)),
+            ),
+        };
+        let rows = self.db.fetch_all(&sql, args).await?;
+        rows.iter().map(|row| get_i64(row, "id")).collect()
+    }
+
     /// 相册里还活着的图片引用的实体（删除相册时用来清镜像树）。
     ///
     /// 列名统一加 `b.` 前缀并 `AS` 回裸名：JOIN 之后 `id` 会撞名，
