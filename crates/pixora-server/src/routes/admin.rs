@@ -903,6 +903,13 @@ pub async fn ratelimit_get(
     let mut realtime = Vec::with_capacity(rows.items.len());
     for row in &rows.items {
         let effective = row.policy.clone().unwrap_or_else(|| global.clone());
+        // 上传策略的生效值（单用户覆盖 → 全局默认 → 系统设置）：弹窗拿它做基线，
+        // 界面展示的是解析后的数字，不会让人看到「0 = 跟随」这种内部约定
+        let upload = pixora_core::uploads::EffectiveUploadLimits::resolve(
+            &upload_settings,
+            &global,
+            row.policy.as_ref(),
+        );
         let counters = state.limits.counters_for(row.user.id).await.unwrap_or_default();
         users.push(serde_json::json!({
             "uid": row.user.uid,
@@ -915,6 +922,13 @@ pub async fn ratelimit_get(
             "upload_per_minute": effective.upload_per_minute,
             "upload_per_day": effective.upload_per_day,
             "upload_bytes_per_day": effective.upload_bytes_per_day,
+            "upload": {
+                "max_file_size": upload.max_file_bytes,
+                "max_batch_size": upload.max_batch,
+                "max_pixels": upload.max_pixels,
+                "formats": upload.formats,
+                "max_concurrent_uploads": upload.max_concurrent_uploads,
+            },
             "hits_24h": row.hits_24h,
         }));
         realtime.push(serde_json::json!({
@@ -933,6 +947,15 @@ pub async fn ratelimit_get(
 
     finish::<serde_json::Value>(Ok(serde_json::json!({
         "global": policy_json(&global),
+        // 站点级上传策略（系统设置里那份）：界面上的「单文件上限 / 单批张数 /
+        // 队列深度 / 格式白名单」全局值就是它——按用户覆盖时以它为底线
+        "upload_policy": {
+            "max_file_bytes": upload_settings.max_file_bytes,
+            "max_batch_size": upload_settings.max_batch,
+            "max_pixels": upload_settings.max_pixels,
+            "queue_depth": upload_settings.queue_depth,
+            "formats": upload_settings.formats,
+        },
         "on_breach": read_on_breach(&state).await,
         "queue_depth": { "threshold": upload_settings.queue_depth, "current": depth.total() },
         "users": users,
@@ -951,8 +974,16 @@ fn policy_json(policy: &RateLimitPolicy) -> serde_json::Value {
         "upload_per_day": policy.upload_per_day,
         "upload_bytes_per_day": policy.upload_bytes_per_day,
         "max_concurrent_uploads": policy.max_concurrent_uploads,
+        // 上传策略的三项：0 / null 表示「跟随上一层」（系统设置），
+        // 界面上的全局输入直接写系统设置，这几列留给单用户覆盖用
         "max_batch_size": policy.max_batch_size,
         "max_file_size": policy.max_file_size,
+        "max_pixels": policy.max_pixels,
+        "formats": policy
+            .formats
+            .as_deref()
+            .map(pixora_core::settings::parse_format_list)
+            .unwrap_or_default(),
         "unlimited": policy.unlimited,
     })
 }
@@ -1020,9 +1051,34 @@ fn policy_with(base: Option<&RateLimitPolicy>, body: &serde_json::Value) -> Rate
             .unwrap_or(fallback.max_concurrent_uploads),
         max_batch_size: field_opt_i64(body, "max_batch_size").unwrap_or(fallback.max_batch_size),
         max_file_size: field_opt_i64(body, "max_file_size").unwrap_or(fallback.max_file_size),
+        max_pixels: field_opt_i64(body, "max_pixels").unwrap_or(fallback.max_pixels),
+        formats: field_opt_formats(body, "formats").or(fallback.formats),
         unlimited: field_opt_bool(body, "unlimited").unwrap_or(fallback.unlimited),
         note: field_opt_str(body, "note").or(fallback.note),
         updated_at: now(),
+    }
+}
+
+/// 请求体里的格式白名单：接受字符串数组（界面发这个）或逗号分隔的字符串
+/// （手写 curl 常见）。空数组按「不覆盖」处理——空串表示跟随上一层，
+/// 想清空覆盖得用 DELETE 恢复默认，不该靠传空数组把它变成「谁都不能传」。
+fn field_opt_formats(body: &serde_json::Value, key: &str) -> Option<String> {
+    match body.get(key) {
+        Some(serde_json::Value::Array(items)) => {
+            let list: Vec<String> = items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect();
+            (!list.is_empty()).then(|| list.join(","))
+        }
+        Some(serde_json::Value::String(text)) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        _ => None,
     }
 }
 

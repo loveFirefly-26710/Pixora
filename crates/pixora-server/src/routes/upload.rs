@@ -348,11 +348,13 @@ async fn collect_upload(
                 file_name = field.file_name().unwrap_or_default().to_string();
                 content_type = field.content_type().map(str::to_string);
 
+                // 单文件上限按「生效的上传策略」取（单用户覆盖 → 全局默认 → 系统设置）：
+                // 这是收流时的截断阈值，比全局值更紧的用户覆盖必须在这一步就拦住，
+                // 否则超限的字节已经落到临时文件里了
                 let limit = state
-                    .settings
-                    .upload()
+                    .effective_upload_limits(user)
                     .await
-                    .map(|settings| settings.max_file_bytes)
+                    .map(|limits| limits.max_file_bytes)
                     .unwrap_or_default();
                 received = Some(ReceiveFile::write(state, field, limit, "图片文件").await?);
             }

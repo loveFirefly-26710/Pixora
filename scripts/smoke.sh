@@ -255,6 +255,27 @@ VIEW_LINKS="$(find "${DATA_DIR}/users" -type f 2>/dev/null | wc -l | tr -d ' ')"
 [[ "${VIEW_LINKS}" -ge 1 ]] || fail "镜像目录树里没有链接"
 ok "镜像目录树里建了 ${VIEW_LINKS} 个链接"
 
+step "上传策略按用户生效"
+ADMIN_UID="$(api GET /api/v1/me | python -c "import json,sys;print(json.load(sys.stdin)['data']['user']['uid'])")"
+# 给这个账号挂一份「只允许 jpg」的覆盖：png 立刻被拦，覆盖真的进了解析链
+api PUT "/api/v1/admin/ratelimit/users/${ADMIN_UID}" -H 'Content-Type: application/json' \
+    -d '{"formats":["jpg"]}' >/dev/null
+BLOCKED="$(api POST /api/v1/upload -F "file=@${PNG}" -F "original_name=blocked.png")"
+expect_json "${BLOCKED}" "d['error']['code']" "UNSUPPORTED_FORMAT" "按用户收紧格式白名单后 png 被拦"
+ME_LIMITS="$(api GET /api/v1/me)"
+expect_json "${ME_LIMITS}" "d['data']['user']['limits']['formats']" "['jpg']" "/me 的 limits 带生效格式"
+expect_json "${ME_LIMITS}" "d['data']['user']['limits']['max_file_size'] > 0" "True" "/me 的 limits 带生效单文件上限"
+# 更紧的单文件上限在收流那一步就拦（不是收完再判）
+api PUT "/api/v1/admin/ratelimit/users/${ADMIN_UID}" -H 'Content-Type: application/json' \
+    -d '{"max_file_size":10,"formats":["png"]}' >/dev/null
+TOO_BIG="$(api POST /api/v1/upload -F "file=@${PNG}" -F "original_name=big.png")"
+expect_json "${TOO_BIG}" "d['error']['code']" "FILE_TOO_LARGE" "按用户收紧单文件上限后收流即拦"
+# 恢复默认：重新跟随站点白名单（这里不再传一张，否则会多出一条图片记录）
+SITE_FORMATS="$(api GET /api/v1/site | python -c "import json,sys;print(json.dumps(json.load(sys.stdin)['data']['formats']))")"
+api DELETE "/api/v1/admin/ratelimit/users/${ADMIN_UID}" >/dev/null
+RESTORED="$(api GET /api/v1/me)"
+expect_json "${RESTORED}" "json.dumps(d['data']['user']['limits']['formats'])" "${SITE_FORMATS}" "恢复默认后重新跟随站点白名单"
+
 step "直链"
 URL_PATH="$(printf '%s' "${URL}" | sed -e "s|^${BASE}||")"
 DIRECT_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}${URL_PATH}")"

@@ -45,8 +45,10 @@ interface DetailUser extends AdminUserRow {
 interface UserDetailPayload {
   user: DetailUser;
   actions: UserActionRow[];
-  /** 用户级限流覆盖：为 null 表示继承全局默认 */
+  /** 生效的三层解析结果，展示用（含继承来的值） */
   policy: PolicyFields | null;
+  /** 该用户自己的覆盖行（未解析，0 / 空 = 跟随）；编辑回传时用它 */
+  policy_override?: PolicyFields | null;
   /** 当前生效的限流参数（含继承结果） */
   limits: PolicyFields | null;
 }
@@ -584,11 +586,13 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
     }
     save.disabled = true;
     try {
-      // PUT 是整体覆盖：只传这几个字段会把 api_per_hour、并发数等其它项清零，
-      // 所以先带上现有生效值再覆盖要改的四项
-      await request(`/admin/ratelimit/users/${user.id}`, {
+      // PUT 是整体覆盖：body 里没给的字段会继承全局默认，而这个人可能还有
+      // 别的自定义项（比如单文件上限）。所以先把他自己的覆盖行原样带上——
+      // 注意用 policy_override（未解析的原始值）而不是 policy（解析结果），
+      // 后者会把「跟随全局」悄悄固化成当前值。路径里的标识是 uid，不是自增 id
+      await request(`/admin/ratelimit/users/${encodeURIComponent(user.uid)}`, {
         method: "PUT",
-        json: { ...(effective ?? {}), unlimited: false, ...values },
+        json: { ...(detail.policy_override ?? {}), unlimited: false, ...values },
       });
       toastOk("该账号的频率限制已更新");
       reload();

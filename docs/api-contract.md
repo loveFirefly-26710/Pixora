@@ -169,7 +169,9 @@ API 客户端：
     "stats": { "album_count": 3, "image_count": 1284, "public_count": 216, "tag_count": 42 },
     "limits": { "api_per_minute": 120, "upload_per_minute": 30, "upload_per_day": 2000,
                 "upload_bytes_per_day": 5368709120, "max_file_size": 20971520,
-                "max_batch_size": 1000, "unlimited": false }
+                "max_batch_size": 1000, "max_pixels": 80000000,
+                "formats": ["jpg", "png", "webp"], "max_concurrent_uploads": 4,
+                "unlimited": false }
   },
   "csrf_token": "…"
 } }
@@ -554,14 +556,21 @@ API 客户端：
   "global": { "api_per_minute": 120, "api_per_hour": 2000, "api_read_per_minute": 600,
               "api_burst": 20, "upload_per_minute": 30, "upload_per_hour": 500,
               "upload_per_day": 2000, "upload_bytes_per_day": 5368709120,
-              "max_concurrent_uploads": 4, "max_batch_size": 1000, "max_file_size": 20971520 },
+              "max_concurrent_uploads": 4, "max_batch_size": 0, "max_file_size": 0,
+              "max_pixels": 0, "formats": [] },
+  "upload_policy": { "max_file_bytes": 20971520, "max_batch_size": 1000,
+                     "max_pixels": 80000000, "queue_depth": 500,
+                     "formats": ["jpg", "png", "gif", "webp", "avif", "heic", "tiff", "bmp", "apng", "svg"] },
   "on_breach": { "respond": true, "audit": true, "temp_ban": true,
                  "threshold": 10, "threshold_minutes": 10, "ban_minutes": 30 },
   "queue_depth": { "threshold": 500, "current": 12 },
   "users": [ { "uid": "2044", "email": "design@studio.io", "role": "user", "status": "active",
                "custom": true, "unlimited": false,
                "api_per_minute": 300, "upload_per_minute": 60, "upload_per_day": 5000,
-               "upload_bytes_per_day": 10737418240, "hits_24h": 3 } ],
+               "upload_bytes_per_day": 10737418240, "hits_24h": 3,
+               "upload": { "max_file_size": 52428800, "max_batch_size": 1000,
+                           "max_pixels": 40000000, "formats": ["jpg", "webp"],
+                           "max_concurrent_uploads": 2 } } ],
   "realtime": [ { "uid": "2044", "email": "design@studio.io", "status": "active",
                   "api_minute": 258, "api_minute_limit": 300,
                   "upload_minute": 12, "upload_minute_limit": 60,
@@ -570,12 +579,23 @@ API 客户端：
 ```
 
 - `PUT /api/v1/admin/ratelimit/global` ← `global` 对象
-- `PUT /api/v1/admin/ratelimit/users/{id}` ← `{ "unlimited": false, "api_per_minute": 300, "upload_per_minute": 60,
+- `PUT /api/v1/admin/ratelimit/users/{uid}` ← `{ "unlimited": false, "api_per_minute": 300, "upload_per_minute": 60,
   "upload_per_day": 5000, "upload_bytes_per_day": …, "api_per_hour": …, "api_read_per_minute": …,
-  "api_burst": …, "upload_per_hour": …, "max_concurrent_uploads": …, "max_batch_size": …, "max_file_size": …, "note": "…" }`
-- `DELETE /api/v1/admin/ratelimit/users/{id}` → 恢复继承默认
+  "api_burst": …, "upload_per_hour": …, "max_concurrent_uploads": …, "max_batch_size": …, "max_file_size": …,
+  "max_pixels": …, "formats": ["jpg", "webp"], "note": "…" }`
+- `DELETE /api/v1/admin/ratelimit/users/{uid}` → 恢复继承默认
 - `PUT /api/v1/admin/ratelimit/on_breach` ← `on_breach` 对象
 - `GET /api/v1/admin/ratelimit/logs?uid=&page=` → 限流事件分页（来自审计日志）
+
+**上传策略的按用户覆盖**：`max_file_size`、`max_batch_size`、`max_pixels` 与 `formats`
+四项走同一张策略表，`0`（数值）与空数组（格式）表示「跟随上一层」，
+解析顺序是 **单用户覆盖 → 全局策略行 → `upload_policy`（系统设置里的站点默认）**。
+`upload_policy` 就是「系统设置 → 上传策略」那一份；界面上的全局输入直接写它，
+所以正常使用下全局策略行的这四列是空的。`users[].upload` 给的是解析后的生效值，
+界面与客户端队列都按它展示与限流；`/me` 的 `limits` 同样带这份生效值。
+生效范围：单文件上限在收 multipart 流时截断（`FILE_TOO_LARGE`），像素上限
+（`INVALID_IMAGE`）与格式白名单（`UNSUPPORTED_FORMAT`）在上传校验里判；
+单批张数与并发数是客户端队列的上限，服务端按策略值下发。
 
 ### 8.5 IP 规则
 

@@ -149,8 +149,10 @@ function view(reload: () => void, root: HTMLElement, data: RateLimitAdmin): Node
     uploadPerDay: textInput({ value: String(global.upload_per_day), type: "number", mono: true }),
     uploadBytesPerDay: textInput({ value: `${toGigabytes(global.upload_bytes_per_day)} GB`, mono: true }),
     maxConcurrent: textInput({ value: String(global.max_concurrent_uploads), type: "number", mono: true }),
-    maxBatch: textInput({ value: String(global.max_batch_size), type: "number", mono: true }),
-    maxFileSize: textInput({ value: toMegabytes(global.max_file_size), mono: true }),
+    // 单文件上限与单批张数属于站点级上传策略（系统设置），这里只是同屏编辑；
+    // 按用户的覆盖在下面的用户表里，弹窗中的「上传策略」一节
+    maxBatch: textInput({ value: String(data.upload_policy.max_batch_size), type: "number", mono: true }),
+    maxFileSize: textInput({ value: toMegabytes(data.upload_policy.max_file_bytes), mono: true }),
     queueDepth: textInput({ value: String(data.queue_depth.threshold), type: "number", mono: true }),
     onBreach: {
       respond: data.on_breach.respond,
@@ -232,21 +234,24 @@ function uploadCard(draft: RateDraft): HTMLElement {
 /** 并发与批次 + 队列深度阈值。 */
 function concurrencyCard(draft: RateDraft, data: RateLimitAdmin): HTMLElement {
   return cardNode(
-    cardHead("并发与批次"),
+    cardHead("并发与批次", badge("全局默认", "mute")),
     h(
       "div.row",
       null,
       field("单用户并发上传数", draft.maxConcurrent, "客户端队列的并发上限，服务端也会校验"),
-      field("单批次最大张数", draft.maxBatch),
+      field("单批次最大张数", draft.maxBatch, "写入系统设置的上传策略"),
     ),
     h(
       "div.row",
       null,
-      field("单文件大小上限", draft.maxFileSize),
+      field("单文件大小上限", draft.maxFileSize, "写入系统设置的上传策略"),
       field("队列深度阈值", draft.queueDepth, "超出后新请求直接 429"),
     ),
     h("div.tip", {
       text: `当前队列深度 ${formatNumber(data.queue_depth.current)}，阈值 ${formatNumber(data.queue_depth.threshold)}。`,
+    }),
+    h("div.tip", {
+      text: "单文件上限、单批张数与队列深度是站点级上传策略（这里改会同步写入系统设置）；像素上限与格式白名单在「系统设置 → 上传策略」。要按人放宽或收紧，用下面用户表里的「调配额」，弹窗里有「上传策略」一节。",
     }),
   );
 }
@@ -399,11 +404,19 @@ function overrideRow(reload: () => void, data: RateLimitAdmin, row: UserRow): HT
   );
 }
 
-/** 用户覆盖的基线：有覆盖读覆盖，没有覆盖用行内数值补齐全局默认。 */
+/** 用户覆盖的基线：有覆盖读覆盖，没有覆盖用行内数值补齐全局默认。
+ *  上传策略四项优先取后端解析好的生效值——它就是这个人当下真正被允许的量。 */
 function baselineOf(data: RateLimitAdmin, row: UserRow): PolicyFields {
   const own = row.policy ?? null;
-  if (own) return { ...own };
+  const upload = row.upload ?? null;
   const global = data.global;
+  const uploadFields = {
+    max_batch_size: upload?.max_batch_size ?? own?.max_batch_size ?? global.max_batch_size,
+    max_file_size: upload?.max_file_size ?? own?.max_file_size ?? global.max_file_size,
+    max_pixels: upload?.max_pixels ?? own?.max_pixels ?? global.max_pixels,
+    formats: upload?.formats ?? own?.formats ?? global.formats ?? [],
+  };
+  if (own) return { ...own, ...uploadFields };
   return {
     api_per_minute: row.api_per_minute,
     api_per_hour: global.api_per_hour,
@@ -413,9 +426,8 @@ function baselineOf(data: RateLimitAdmin, row: UserRow): PolicyFields {
     upload_per_hour: global.upload_per_hour,
     upload_per_day: row.upload_per_day,
     upload_bytes_per_day: row.upload_bytes_per_day,
-    max_concurrent_uploads: global.max_concurrent_uploads,
-    max_batch_size: global.max_batch_size,
-    max_file_size: global.max_file_size,
+    max_concurrent_uploads: upload?.max_concurrent_uploads ?? global.max_concurrent_uploads,
+    ...uploadFields,
     unlimited: row.unlimited,
     note: null,
   };
@@ -436,6 +448,16 @@ function editOverride(reload: () => void, data: RateLimitAdmin, row: UserRow): v
     maxConcurrent: textInput({ value: String(base.max_concurrent_uploads), type: "number", mono: true }),
     maxBatch: textInput({ value: String(base.max_batch_size), type: "number", mono: true }),
     maxFileSize: textInput({ value: toMegabytes(base.max_file_size), mono: true }),
+    maxPixels: textInput({
+      value: String(Math.round(base.max_pixels / 10000)),
+      type: "number",
+      mono: true,
+    }),
+    formats: textInput({
+      value: (base.formats ?? []).join(", "),
+      mono: true,
+      placeholder: "jpg, png, webp（留空 = 跟随全局）",
+    }),
     note: textInput({ value: base.note ?? "", placeholder: "为什么给这个人单独放额度" }),
   };
   let unlimited = Boolean(base.unlimited);
@@ -445,7 +467,7 @@ function editOverride(reload: () => void, data: RateLimitAdmin, row: UserRow): v
     title: `调整 u_${row.uid} 的额度`,
     body: [
       h("div.tip", { text: row.email }),
-      switchRow("不限额度", "该用户不受全局默认限制（管理员默认豁免）", unlimited, (next) => {
+      switchRow("不限额度", "该用户的频率与流量不受限制（上传大小、格式仍按下面的策略走）", unlimited, (next) => {
         unlimited = next;
       }),
       cardHead("API 调用"),
@@ -464,20 +486,32 @@ function editOverride(reload: () => void, data: RateLimitAdmin, row: UserRow): v
         field("张 / 天", inputs.uploadPerDay),
         field("单日流量", inputs.uploadBytesPerDay, "不带单位按 GB 计算"),
       ),
-      cardHead("并发与批次"),
+      cardHead("上传策略", badge("按用户覆盖", "info")),
       h(
         "div.row",
         null,
-        field("并发上传数", inputs.maxConcurrent),
-        field("单批次最大张数", inputs.maxBatch),
-        field("单文件上限", inputs.maxFileSize),
+        field("单文件大小上限", inputs.maxFileSize, "可以写 20 MB、2 GB；0 表示跟随全局默认"),
+        field("单批次最大张数", inputs.maxBatch, "0 表示跟随全局默认"),
       ),
+      h(
+        "div.row",
+        null,
+        field("像素上限", unitInput(inputs.maxPixels, "万"), "超出的图片直接拒绝，防止解压炸弹"),
+        field("并发上传数", inputs.maxConcurrent, "客户端队列的并发上限"),
+      ),
+      field("允许的图片格式", inputs.formats, "逗号分隔；留空表示跟随全局默认"),
       field("备注", inputs.note, "只给后台看"),
     ],
     footer: [h("button.btn", { type: "button", text: "取消", on: { click: () => handle.close() } }), submit],
   });
 
   submit.addEventListener("click", async () => {
+    // 像素上限按「万」输入，0 与空格式串都表示跟随上一层
+    const pixelsInWan = Number(inputs.maxPixels.value.trim());
+    const formats = inputs.formats.value
+      .split(",")
+      .map((item) => item.trim().toLowerCase().replace(/^\./, ""))
+      .filter((item) => item.length > 0);
     const body = {
       unlimited,
       api_per_minute: intOf(inputs.apiPerMinute),
@@ -491,6 +525,8 @@ function editOverride(reload: () => void, data: RateLimitAdmin, row: UserRow): v
       max_concurrent_uploads: intOf(inputs.maxConcurrent),
       max_batch_size: intOf(inputs.maxBatch),
       max_file_size: sizeOf(inputs.maxFileSize, "MB"),
+      max_pixels: Number.isFinite(pixelsInWan) ? Math.max(0, Math.round(pixelsInWan)) * 10000 : 0,
+      formats,
       note: inputs.note.value.trim(),
     };
     submit.disabled = true;
@@ -730,8 +766,6 @@ async function save(reload: () => void, draft: RateDraft, button: HTMLButtonElem
     upload_per_day: intOf(draft.uploadPerDay),
     upload_bytes_per_day: sizeOf(draft.uploadBytesPerDay, "GB"),
     max_concurrent_uploads: intOf(draft.maxConcurrent),
-    max_batch_size: intOf(draft.maxBatch),
-    max_file_size: sizeOf(draft.maxFileSize, "MB"),
   };
   const onBreach = {
     respond: draft.onBreach.respond,
@@ -742,8 +776,12 @@ async function save(reload: () => void, draft: RateDraft, button: HTMLButtonElem
     ban_minutes: intOf(draft.banMinutes),
   };
   const queueDepth = intOf(draft.queueDepth);
+  // 单文件上限与单批张数是站点级上传策略，按契约走系统设置接口；
+  // 放在这里只是为了跟频率项同屏编辑。按用户的覆盖在下面用户表的弹窗里
+  const maxFileBytes = sizeOf(draft.maxFileSize, "MB");
+  const maxBatch = intOf(draft.maxBatch);
 
-  if (global.max_file_size <= 0) {
+  if (maxFileBytes <= 0) {
     toastError("单文件大小上限填不对：可以写 20 MB、2 GB");
     return;
   }
@@ -757,9 +795,10 @@ async function save(reload: () => void, draft: RateDraft, button: HTMLButtonElem
   try {
     await request("/admin/ratelimit/global", { method: "PUT", json: global });
     await request("/admin/ratelimit/on_breach", { method: "PUT", json: onBreach });
-    // 队列深度阈值是上传策略的一部分，按契约走系统设置接口；
-    // 放在这里只是为了跟「并发与批次」同屏编辑，值只写 upload 一个键。
-    await request("/admin/settings", { method: "PUT", json: { upload: { queue_depth: queueDepth } } });
+    await request("/admin/settings", {
+      method: "PUT",
+      json: { upload: { max_file_bytes: maxFileBytes, max_batch: maxBatch, queue_depth: queueDepth } },
+    });
     toastOk("频率限制设置已保存");
     reload();
   } catch (err) {

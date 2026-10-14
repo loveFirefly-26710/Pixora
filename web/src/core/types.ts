@@ -28,8 +28,12 @@ export interface UserLimits {
   upload_per_minute: number;
   upload_per_day: number;
   upload_bytes_per_day: number;
+  /** 生效的上传策略（可能被管理员按用户覆盖过，不等于 /site 里的全局值） */
   max_file_size: number;
   max_batch_size: number;
+  max_pixels: number;
+  formats: string[];
+  max_concurrent_uploads: number;
   unlimited: boolean;
 }
 
@@ -231,10 +235,22 @@ export interface PolicyFields {
   upload_per_day: number;
   upload_bytes_per_day: number;
   max_concurrent_uploads: number;
+  /** 上传策略四项：0 / 空数组表示「跟随上一层」（全局默认，再往上才是系统设置） */
   max_batch_size: number;
   max_file_size: number;
+  max_pixels: number;
+  formats: string[];
   unlimited: boolean;
   note?: string | null;
+}
+
+/** 某个用户生效的上传策略（已解析过三层，拿到的就是实际数字）。 */
+export interface EffectiveUploadLimits {
+  max_file_size: number;
+  max_batch_size: number;
+  max_pixels: number;
+  formats: string[];
+  max_concurrent_uploads: number;
 }
 
 export interface BackendRow {
@@ -319,6 +335,14 @@ export interface QuotaAdmin {
 
 export interface RateLimitAdmin {
   global: PolicyFields;
+  /** 站点级上传策略（系统设置里那份）：全局输入改的就是它 */
+  upload_policy: {
+    max_file_bytes: number;
+    max_batch_size: number;
+    max_pixels: number;
+    queue_depth: number;
+    formats: string[];
+  };
   on_breach: {
     respond: boolean;
     audit: boolean;
@@ -339,6 +363,8 @@ export interface RateLimitAdmin {
     upload_per_minute: number;
     upload_per_day: number;
     upload_bytes_per_day: number;
+    /** 该用户生效的上传策略（三层解析后的结果） */
+    upload?: EffectiveUploadLimits | null;
     hits_24h: number;
     policy?: PolicyFields | null;
   }>;
