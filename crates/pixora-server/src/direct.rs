@@ -99,10 +99,12 @@ async fn direct_inner(
         return Err(AppError::not_found("图片"));
     }
 
-    // 私有图片不允许直接访问：直链是不可枚举的，但拿到链接的人不该因此看到私有内容。
-    // 所有者与管理员的访问也不给直链——他们用带鉴权的详情接口。
-    let private = is_private(&state, blob.id).await?;
-    if private {
+    // 私有图片：直链本身不可枚举，但拿到链接的人不该因此看到私有内容。
+    // 这里按「谁在请求」放行——相册页里那些 <img> 用的正是这条直链，
+    // 一律拒绝会让私有相册的缩略图全变成碎图标（实测就是这样）。
+    // 放行条件：这个实体还挂着公开引用，或者请求者本人（含管理员）就引用着它。
+    let private = !is_publicly_referenced(&state, blob.id).await?;
+    if private && !owner_is_requesting(&state, &headers, blob.id).await? {
         return Err(AppError::not_found("图片"));
     }
 
@@ -138,7 +140,7 @@ async fn direct_inner(
                         .headers_mut()
                         .insert("X-Accel-Redirect", value);
                 }
-                apply_headers(&mut response, &blob.mime_type, &blob.sha256, is_svg, want_download, blob.size);
+                apply_headers(&mut response, &blob.mime_type, &blob.sha256, is_svg, want_download, blob.size, !private);
                 return Ok(response);
             }
         }
@@ -153,19 +155,19 @@ async fn direct_inner(
         .status(StatusCode::OK)
         .body(Body::from_stream(stream))
         .map_err(|err| AppError::internal(err.to_string()))?;
-    apply_headers(&mut response, &blob.mime_type, &blob.sha256, is_svg, want_download, blob.size);
+    apply_headers(&mut response, &blob.mime_type, &blob.sha256, is_svg, want_download, blob.size, !private);
     let _ = is_thumb;
     Ok(response)
 }
 
-/// 判断这个实体是否只被私有图片引用。
+/// 这个实体有没有公开引用。
 ///
 /// 一张物理文件可能被多人引用：只要有一处是公开的，直链就应当放行；
 /// 全都被私有引用时才算私有。这正是「删一份不误伤另一份」的另一面。
 ///
 /// 缩略图要单独看：它自己的 id 不在 `images.blob_id` 上，而在 `thumb_blob_id` 上。
 /// 只查 `blob_id` 的话缩略图的引用集永远为空，会被当成私有——所有缩略图都会 404。
-async fn is_private(state: &AppState, blob_id: i64) -> pixora_core::Result<bool> {
+async fn is_publicly_referenced(state: &AppState, blob_id: i64) -> pixora_core::Result<bool> {
     let rows = state
         .repo
         .db()
@@ -174,19 +176,42 @@ async fn is_private(state: &AppState, blob_id: i64) -> pixora_core::Result<bool>
             pixora_repo::Args::new().int(blob_id).int(blob_id),
         )
         .await?;
-    if rows.is_empty() {
-        // 没有任何引用：可能是刚上传还没建引用，按私有处理更安全
-        return Ok(true);
-    }
-    let mut any_public = false;
     for row in rows {
-        let visibility = pixora_repo::model::get_str(&row, "visibility")?;
-        if visibility == pixora_repo::model::visibility::PUBLIC {
-            any_public = true;
-            break;
+        if pixora_repo::model::get_str(&row, "visibility")? == pixora_repo::model::visibility::PUBLIC {
+            return Ok(true);
         }
     }
-    Ok(!any_public)
+    // 没有任何公开引用（包括「一条引用都没有」）都算私有：直链不发。
+    Ok(false)
+}
+
+/// 请求者本人是否引用着这个实体（管理员一并放行）。
+///
+/// 只看会话 Cookie：`<img>` 标签带不了 Authorization 头，所以这里是浏览器会话的
+/// 判断。Token 访问图片走的是带鉴权的详情接口，不经过直链。
+async fn owner_is_requesting(
+    state: &AppState,
+    headers: &HeaderMap,
+    blob_id: i64,
+) -> pixora_core::Result<bool> {
+    let Some(token) = crate::http::session_cookie(headers) else {
+        return Ok(false);
+    };
+    let Ok((user, _)) = state.authenticate_session(&token, None).await else {
+        return Ok(false);
+    };
+    if user.is_admin() {
+        return Ok(true);
+    }
+    let hit = state
+        .repo
+        .db()
+        .fetch_optional(
+            "SELECT 1 AS hit FROM images WHERE owner_id = ? AND (blob_id = ? OR thumb_blob_id = ?)              AND deleted_at IS NULL",
+            pixora_repo::Args::new().int(user.id).int(blob_id).int(blob_id),
+        )
+        .await?;
+    Ok(hit.is_some())
 }
 
 fn apply_headers(
@@ -196,14 +221,21 @@ fn apply_headers(
     is_svg: bool,
     download: bool,
     size: i64,
+    public: bool,
 ) {
     let headers = response.headers_mut();
     if let Ok(value) = HeaderValue::from_str(mime) {
         headers.insert(header::CONTENT_TYPE, value);
     }
+    // 公开图片可以放心长缓存（内容寻址，同一路径内容永不变）；私有图片只能
+    // private 缓存——写 public 会让共享代理把它缓存下来发给别人。
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=31536000, immutable"),
+        HeaderValue::from_static(if public {
+            "public, max-age=31536000, immutable"
+        } else {
+            "private, max-age=300"
+        }),
     );
     headers.insert(header::ETAG, etag_header(sha256));
     headers.insert(

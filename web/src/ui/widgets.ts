@@ -18,15 +18,19 @@ import {
 import { toastWithCode } from "../core/toast";
 import type { ImageItem } from "../core/types";
 
-/** 页面标题区：`<h2>` + 说明文字。 */
+/**
+ * 页面标题。
+ *
+ * UI 原型里每屏顶部那段「标题 + 说明」是**给评审者看的批注**，不在浏览器窗口（`.frame`）
+ * 之内，所以应用界面里不该出现。这里改成只读屏可见：排版与原型一致，屏幕阅读器
+ * 仍然能拿到页面标题，不为了视觉还原把可访问性丢掉。
+ */
 export function pageHead(title: string, description?: string): HTMLElement {
   return h(
-    "div",
-    { style: { marginBottom: "12px" } },
-    h("h2", { text: title, style: { fontSize: "17px", margin: "0 0 3px" } }),
-    description
-      ? h("p", { text: description, style: { margin: "0", fontSize: "13px", color: "var(--muted)" } })
-      : null,
+    "h2.sr-only",
+    null,
+    h("span", { text: title }),
+    description ? h("span", { text: `：${description}` }) : null,
   );
 }
 
@@ -353,6 +357,8 @@ export function imageTile(
     onOpen?: (item: ImageItem, event: MouseEvent) => void;
     onSelect?: (item: ImageItem, event: MouseEvent) => void;
     subtitle?: string;
+    /** 方格上是否带标签 chip（相册页不显示，广场显示，跟原型一致） */
+    showTags?: boolean;
   } = {},
 ): HTMLElement {
   const thumb = h("div.ph", { class: `c${(item.id % 6) + 1}` });
@@ -389,7 +395,14 @@ export function imageTile(
       h("div.n", { text: item.title ?? item.original_name ?? shortHash(item.sha256, item.ext) }),
       h(
         "div.s",
-        { text: options.subtitle ?? `${formatBytes(item.size)} · ${formatDimensions(item.width, item.height)}` },
+        null,
+        // 原型里这一行是「标签 · 作者 · 时间」，标签用主色 chip 显示
+        item.tags.length > 0 && options.showTags !== false
+          ? h("span.tag.b", { text: item.tags[0] })
+          : null,
+        h("span", {
+          text: options.subtitle ?? `${formatBytes(item.size)} · ${formatDimensions(item.width, item.height)}`,
+        }),
       ),
     ),
   );

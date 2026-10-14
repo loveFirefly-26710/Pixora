@@ -124,10 +124,9 @@ export function renderNavbar(): HTMLElement {
       }),
     );
   } else {
-    navbar.append(
-      h("a.btn", { href: "#/login", text: "登录" }),
-      h("a.btn.pri", { href: "#/register", text: "注册" }),
-    );
+    // 未登录只留一个入口，注册挪进登录页（右下角）。
+    // 游客看到两个按钮会先纠结「我该点哪个」，而这两步的落点本来就是同一个表单。
+    navbar.append(h("a.btn.pri", { href: "#/login", text: "登录" }));
   }
 
   return navbar;
@@ -143,7 +142,6 @@ export function renderSidebar(): HTMLElement {
   } else {
     sidebar.append(h("div.grp", { text: "浏览" }));
     sidebar.append(navLink(PLAZA));
-    sidebar.append(navLink(ALBUMS));
   }
 
   if (isAdmin()) {

@@ -394,6 +394,17 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   const statHost = h("div.stat", { style: { marginTop: "14px" } });
   const tableHost = h("div", { style: { padding: "0", overflow: "hidden" } });
   const retryAllBtn = h("button.btn", { type: "button", text: "重试全部失败项" });
+  // 一个按钮把上一轮失败清干净，省得一张张点叉
+  const clearFailedBtn = h("button.btn", { type: "button", text: "清空失败项" });
+  clearFailedBtn.addEventListener("click", () => {
+    const removed = queue.clearFailed();
+    if (removed > 0) {
+      clearFailedBtn.textContent = `已清空 ${removed} 项`;
+      window.setTimeout(() => {
+        clearFailedBtn.textContent = "清空失败项";
+      }, 1500);
+    }
+  });
   const exportBtn = h("button.btn", { type: "button", text: "导出成功清单" });
   const queueCard = h(
     "div.card",
@@ -413,7 +424,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     ),
     statHost,
     h("div", { style: { marginTop: "14px" } }, tableHost),
-    h("div.flexline", { style: { marginTop: "14px" } }, retryAllBtn, exportBtn),
+    h("div.flexline", { style: { marginTop: "14px" } }, retryAllBtn, clearFailedBtn, exportBtn),
   );
 
   const uploadBar = h("div.upload-bar");
@@ -704,6 +715,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     barStartBtn.textContent = running && paused ? "继续上传" : label;
     barStartBtn.disabled = startDisabled;
     retryAllBtn.disabled = queue.failedItems().length === 0;
+    clearFailedBtn.disabled = retryAllBtn.disabled;
     exportBtn.disabled = queue.successLinks().length === 0;
     clearBtn.disabled = items.length === 0;
 

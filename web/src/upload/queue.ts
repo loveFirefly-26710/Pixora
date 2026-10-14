@@ -694,6 +694,19 @@ class UploadQueue {
   }
 
   /** 从 IndexedDB 恢复：只有面板挂载时调一次。 */
+  /** 一键移除所有失败项（上一轮的失败留在面板上只会碍事）。 */
+  clearFailed(): number {
+    const before = this.items.length;
+    this.items = this.items.filter((item) => item.status !== "failed");
+    this.networkFailures = 0;
+    const removed = before - this.items.length;
+    if (removed > 0) {
+      this.emit({ kind: "items" });
+      this.scheduleSave();
+    }
+    return removed;
+  }
+
   async hydrate(): Promise<void> {
     if (this.hydrated) return;
     this.hydrated = true;
@@ -709,6 +722,10 @@ class UploadQueue {
     const restored: QueueItem[] = [];
     for (const record of saved) {
       if (this.items.some((item) => item.id === record.id)) continue;
+      // 上次会话留下的失败项不再带回来：那些错误是当时那一轮的结论（多半是服务端
+      // 停过、网络断过），重启服务后已经不再成立，留着只会让用户一张张叉掉。
+      // 本次会话内新产生的失败照常保留，用户可重试或点「清空失败项」。
+      if (record.status === "failed") continue;
       restored.push(fromPersisted(record));
     }
     if (restored.length === 0) return;
