@@ -9,6 +9,9 @@
 # ServiceExt 是绕过了这些的。
 #
 # 用法：bash scripts/smoke.sh [端口]
+#
+# Windows 上用 cmd 时请改用 scripts\smoke.ps1（同一套断言，依赖更少：
+# 只需要系统自带的 curl.exe 与 PowerShell，不需要 Git Bash 和 python）。
 
 set -euo pipefail
 
