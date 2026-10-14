@@ -160,7 +160,7 @@ function renderDrawer(): HTMLElement {
   const user = getState().user;
   const groups: Array<[string, NavItem[]]> = user
     ? [["用户中心", USER_NAV], ["管理后台", isAdmin() ? ADMIN_NAV : []], ["关于", [{ path: "/docs/api", label: "API 文档", icon: "📘" }]]]
-    : [["浏览", [PLAZA, ALBUMS]], ["关于", [{ path: "/docs/api", label: "API 文档", icon: "📘" }]]];
+    : [["浏览", [PLAZA]], ["关于", [{ path: "/docs/api", label: "API 文档", icon: "📘" }]]];
 
   for (const [title, items] of groups) {
     if (items.length === 0) continue;
