@@ -297,14 +297,17 @@ async function moveAlbum(
 }
 
 async function deleteAlbum(album: Album, reload: Reload): Promise<void> {
+  const retention = getState().site?.recycle_retention_days ?? 0;
   const detail =
     album.image_count > 0
-      ? `相册里的 ${album.image_count} 张图片会回到「未分类」，图片本身不会被删除。`
-      : "相册是空的，删除没有任何影响。";
+      ? `相册里的 ${album.image_count} 张图片会跟着一起进去。`
+      : "相册是空的，只有相册本身进去。";
   const ok = await confirmDanger(
-    "删除相册",
-    `确定删除「${album.name}」？${detail}`,
-    "删除相册",
+    "移到回收站",
+    retention > 0
+      ? `把「${album.name}」移到回收站？${detail}${retention} 天内可以整份恢复。`
+      : `回收站已关闭，这一步会彻底删除「${album.name}」。${detail}`,
+    "移到回收站",
   );
   if (!ok) return;
   try {

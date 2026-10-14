@@ -1492,6 +1492,11 @@ pub async fn settings_get(
             "require_login_to_upload": site.require_login_to_upload,
             "register_enabled": site.register_enabled,
             "plaza_grid_columns": site.plaza_grid_columns,
+            "recycle_retention_days": state
+                .settings
+                .retention_days()
+                .await
+                .unwrap_or(0),
         },
         "upload": {
             "max_file_bytes": upload.max_file_bytes,
@@ -1553,7 +1558,7 @@ pub async fn settings_put(
 
     if let Some(site) = body.get("site").and_then(|value| value.as_object()) {
         let site = serde_json::Value::Object(site.clone());
-        let writes: [(&str, Option<String>); 6] = [
+        let writes: [(&str, Option<String>); 7] = [
             (keys::SITE_NAME, field_opt_str(&site, "name")),
             (keys::SITE_BASE_URL, field_opt_str(&site, "base_url")),
             (
@@ -1576,6 +1581,14 @@ pub async fn settings_put(
                             settings_defaults::GRID_COLUMNS_MIN,
                             settings_defaults::GRID_COLUMNS_MAX,
                         )
+                        .to_string()
+                }),
+            ),
+            (
+                keys::RECYCLE_RETENTION_DAYS,
+                field_opt_i64(&site, "recycle_retention_days").map(|value| {
+                    value
+                        .clamp(0, settings_defaults::RECYCLE_RETENTION_MAX)
                         .to_string()
                 }),
             ),

@@ -107,7 +107,8 @@ pub fn spawn(state: Arc<AppState>, config: QueueConfig) -> Vec<tokio::task::Join
                 // 有「引用已归零、还在宽限期」的，下一轮提前到 60 秒后：
                 // 让「刚传完就删」的文件在宽限期一到就被收走，而不是再等整个扫描周期
                 let mut wait = Duration::from_secs(300);
-                match gc::collect_blobs(&state, grace, batch).await {
+                let retention = state.settings.retention_days().await.unwrap_or(0);
+                match gc::collect_blobs(&state, grace, batch, retention).await {
                     Ok(outcome) => {
                         if outcome.removed > 0 {
                             tracing::info!(removed = outcome.removed, "回收无引用的物理文件");

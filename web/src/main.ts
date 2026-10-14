@@ -30,6 +30,7 @@ import { render as accountInfoPage } from "./pages/account-info";
 import { render as accountSecurityPage } from "./pages/account-security";
 import { render as accountApiPage } from "./pages/account-api";
 import { render as accountTermsPage } from "./pages/account-terms";
+import { render as recyclePage } from "./pages/recycle";
 import { render as adminUsersPage } from "./pages/admin-users";
 import { render as adminUserDetailPage } from "./pages/admin-user-detail";
 import { render as adminStoragePage } from "./pages/admin-storage";
@@ -63,6 +64,7 @@ function registerRoutes(): void {
   route("/account/security", accountSecurityPage, { auth: true });
   route("/account/api", accountApiPage, { auth: true });
   route("/account/terms", accountTermsPage, { auth: true });
+  route("/recycle", recyclePage, { auth: true });
 
   route("/admin/users", adminUsersPage, { auth: true, admin: true });
   route("/admin/users/:id", adminUserDetailPage, { auth: true, admin: true });

@@ -340,12 +340,35 @@ expect_json "${BATCH}" "d['data']['affected']" "2" "批量改标签"
 api DELETE "/api/v1/images/${IMAGE_ID2}" >/dev/null
 FILES_AFTER_ONE="$(find "${DATA_DIR}/blobs" -type f | wc -l | tr -d ' ')"
 [[ "${FILES_AFTER_ONE}" == "1" ]] || fail "删掉一条引用后物理文件不该消失（实际 ${FILES_AFTER_ONE}）"
-ok "删掉一条引用后物理文件保留（还有另一条引用）"
+ok "删掉一条引用后物理文件保留（还有另一条引用，回收站也留着它）"
 
 api DELETE "/api/v1/images/${IMAGE_ID}" >/dev/null
 DEAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}${URL_PATH}")"
 [[ "${DEAD_CODE}" == "404" ]] || fail "全部引用删除后直链仍可用（${DEAD_CODE}）"
 ok "全部引用删除后直链返回 404"
+
+# 回收站：删掉的图先到这里；恢复之后回到相册；彻底删除之后才真没了
+BIN="$(api GET /api/v1/recycle/images)"
+expect_json "${BIN}" "d['meta']['total']" "2" "两张删掉的图都在回收站里"
+expect_json "${BIN}" "d['data'][0]['size'] > 0" "True" "回收站列表带完整字段"
+
+RESTORED="$(api POST /api/v1/recycle/images/restore -H 'Content-Type: application/json' \
+    -d "{\"ids\":[${IMAGE_ID}]}")"
+expect_json "${RESTORED}" "d['data']['restored']" "1" "从回收站恢复 1 张"
+ALIVE="$(api GET "/api/v1/images?album_id=${ALBUM_ID}")"
+expect_json "${ALIVE}" "d['meta']['total']" "1" "恢复之后图片回到相册里"
+RESTORE_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}${URL_PATH}")"
+[[ "${RESTORE_CODE}" == "200" ]] || fail "恢复之后直链应当又能用（${RESTORE_CODE}）"
+ok "恢复之后直链又能访问"
+
+api DELETE "/api/v1/images/${IMAGE_ID}" >/dev/null
+PURGED="$(api POST /api/v1/recycle/images/purge -H 'Content-Type: application/json' \
+    -d "{\"ids\":[${IMAGE_ID}]}")"
+expect_json "${PURGED}" "d['data']['purged']" "1" "彻底删除 1 张"
+GONE="$(api GET /api/v1/images/${IMAGE_ID})"
+expect_json "${GONE}" "d['error']['code']" "NOT_FOUND" "彻底删除之后查不到这张图"
+BIN_ONE="$(api GET /api/v1/recycle/images)"
+expect_json "${BIN_ONE}" "d['meta']['total']" "1" "回收站里只剩另一张"
 
 # 删光之后重传同一张图：预检必须报「不存在」，上传必须真的把图带回来。
 # 判定口径若只看 blobs 表，这里会「已存在」整批跳过，用户以为删除没删干净。
@@ -360,17 +383,34 @@ REUPLOAD_ID="$(printf '%s' "${REUPLOAD}" | python -c "import json,sys;print(json
 [[ "${REUPLOAD_ID}" != "${IMAGE_ID}" ]] || fail "重传应当是新的图片记录"
 ok "删光后重传真的把图带回来了（新 id ${REUPLOAD_ID}）"
 
-# 删相册：图片落到未分类、镜像目录收掉，物理文件仍归 GC 管
+# 删相册 = 相册连图一起进回收站：镜像目录收掉，但整份可以恢复
 ALBUM_DIR="$(find "${DATA_DIR}/users" -maxdepth 2 -type d -name '旅行*' 2>/dev/null | head -1)"
 [[ -n "${ALBUM_DIR}" ]] || fail "镜像树里没有相册目录"
 api DELETE "/api/v1/albums/${ALBUM_ID}" >/dev/null
-[[ ! -d "${ALBUM_DIR}" ]] || fail "删相册后目录还在：${ALBUM_DIR}"
+[[ ! -d "${ALBUM_DIR}" ]] || fail "进回收站后镜像目录还在：${ALBUM_DIR}"
 ok "删相册后镜像目录已收掉"
-IMAGES_LEFT="$(api GET /api/v1/images)"
-expect_json "${IMAGES_LEFT}" "d['meta']['total']" "1" "相册里的图落到未分类，没有被删"
+LIVE_AFTER_ALBUM="$(api GET /api/v1/images)"
+expect_json "${LIVE_AFTER_ALBUM}" "d['meta']['total']" "0" "相册里的图跟着进了回收站，不在正常列表里"
+BIN_ALBUM="$(api GET /api/v1/recycle/albums)"
+expect_json "${BIN_ALBUM}" "len(d['data']['albums'])" "1" "回收站里能看到这个相册"
 
-# 收尾：把重传的那张也删掉，文末「引用计数归零」才是此刻的事实
-api DELETE "/api/v1/images/${REUPLOAD_ID}" >/dev/null
+RESTORED_ALBUM="$(api POST "/api/v1/recycle/albums/${ALBUM_ID}/restore")"
+expect_json "${RESTORED_ALBUM}" "d['data']['restored_images']" "1" "恢复相册把图一起带回来"
+LIVE_BACK="$(api GET "/api/v1/images?album_id=${ALBUM_ID}")"
+expect_json "${LIVE_BACK}" "d['meta']['total']" "1" "图片回到相册里"
+[[ -d "${ALBUM_DIR}" ]] || fail "恢复之后镜像目录应当重新出现"
+ok "恢复之后镜像目录也回来了"
+
+# 再删一次、这次彻底删除：相册与图一起清掉，文末「引用计数归零」才是事实
+api DELETE "/api/v1/albums/${ALBUM_ID}" >/dev/null
+PURGED_ALBUM="$(api DELETE "/api/v1/recycle/albums/${ALBUM_ID}")"
+expect_json "${PURGED_ALBUM}" "d['data']['purged_images']" "1" "彻底删除相册带走了 1 张图"
+BIN_FINAL="$(api GET /api/v1/recycle/images)"
+expect_json "${BIN_FINAL}" "d['meta']['total']" "1" "回收站里只剩早先那张（未随相册删除）"
+EMPTY_BIN="$(api POST /api/v1/recycle/images/empty)"
+expect_json "${EMPTY_BIN}" "d['data']['purged']" "1" "清空回收站"
+BIN_EMPTY="$(api GET /api/v1/recycle/images)"
+expect_json "${BIN_EMPTY}" "d['meta']['total']" "0" "回收站已经空了"
 
 step "管理后台"
 STATS="$(api GET /api/v1/admin/stats)"

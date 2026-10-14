@@ -82,6 +82,11 @@ pub async fn site(
         "base_url": state.base_url().await,
         "upload_prefix": site.upload_prefix,
         "plaza_grid_columns": site.plaza_grid_columns,
+        "recycle_retention_days": state
+            .settings
+            .retention_days()
+            .await
+            .unwrap_or(0),
         "registration_open": registration_open,
         "registration_closed_reason": registration_closed_reason,
         "plaza_public": site.plaza_public,

@@ -16,6 +16,10 @@ use crate::AppState;
 
 /// 动作名常量。界面按这些名字做筛选与统计，拼错就等于漏记。
 pub mod actions {
+    /// 从回收站恢复（图片或相册），detail 里说明是哪一种
+    pub const RECYCLE_RESTORE: &str = "recycle_restore";
+    /// 彻底删除（清空回收站、或单个彻底删除）
+    pub const RECYCLE_PURGE: &str = "recycle_purge";
     pub const LOGIN_SUCCESS: &str = "login_success";
     pub const LOGIN_FAIL: &str = "login_fail";
     pub const LOGIN_BLOCKED: &str = "login_blocked";

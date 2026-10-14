@@ -955,10 +955,15 @@ export async function render(ctx: PageContext): Promise<void> {
         ? "全部图片"
         : "这个相册里的全部图片"
       : `选中的 ${count} 张图片`;
+    const retention = getState().site?.recycle_retention_days ?? 0;
     const ok = await confirmDanger(
-      `删除${scope}？`,
-      `${state.allMatching ? `一共 ${count} 张。` : ""}图片会从列表移除；物理文件在引用计数归零后由后台回收，删除不可撤销。`,
-      `删除 ${count} 张`,
+      `把${scope}移到回收站？`,
+      `${
+        retention > 0
+          ? `图片会先进回收站，${retention} 天内可以恢复（不占你的配额）。`
+          : "回收站已关闭，这一步会直接彻底删除，无法恢复。"
+      }${state.allMatching ? ` 一共 ${count} 张。` : ""}`,
+      `移到回收站${count > 0 ? `（${count} 张）` : ""}`,
     );
     if (!ok) return;
     try {

@@ -39,6 +39,9 @@ pub struct ImageDeletion {
     pub thumb_blob_id: Option<i64>,
     /// 原图字节数，用于回退用户用量
     pub size: i64,
+    /// 是否「随相册一起」进回收站：恢复相册时只带回这一批，
+    /// 不碰用户早先单独删掉的那些
+    pub by_album: bool,
 }
 
 /// 图片列表的排序方式。
@@ -270,6 +273,204 @@ impl Repo {
     }
 
     /// 相册维度的文件数与字节数，`fs/tree` 与容量展示都要。
+    /// 从回收站恢复一条引用：`delete_image_reference` 的逆操作。
+    ///
+    /// 三件事要一起回到原样：引用计数、账号用量、相册张数。
+    /// `count_album` 为 false 用于「随相册一起恢复」——那批图的张数在相册软删时
+    /// 也没减过，这里自然不该加，否则来回删/恢复几次计数就飘了。
+    pub async fn restore_image_reference(
+        &self,
+        image: &Image,
+        size: i64,
+        count_album: bool,
+    ) -> Result<()> {
+        let mut tx = self.db.pool().begin().await?;
+        let stamp = now_ts();
+
+        sqlx::query(
+            &self
+                .db
+                .sql("UPDATE images SET deleted_at = NULL, deleted_by_album = 0 WHERE id = ? AND deleted_at IS NOT NULL"),
+        )
+        .bind(image.id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(&self.db.sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"))
+            .bind(image.blob_id)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(thumb_id) = image.thumb_blob_id {
+            sqlx::query(&self.db.sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"))
+                .bind(thumb_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        sqlx::query(&self.db.sql("UPDATE users SET used_bytes = used_bytes + ? WHERE id = ?"))
+            .bind(size)
+            .bind(image.owner_id)
+            .execute(&mut *tx)
+            .await?;
+
+        if count_album {
+            if let Some(album_id) = image.album_id {
+                sqlx::query(&self.db.sql(
+                    "UPDATE albums SET image_count = image_count + 1, updated_at = ? WHERE id = ?",
+                ))
+                .bind(&stamp)
+                .bind(album_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 彻底删掉一条墓碑（只对已软删的行生效）。物理文件由 GC 按引用计数回收。
+    pub async fn purge_image_row(&self, id: i64) -> Result<u64> {
+        self.db
+            .execute(
+                "DELETE FROM images WHERE id = ? AND deleted_at IS NOT NULL",
+                Args::new().int(id),
+            )
+            .await
+    }
+
+    /// 数一下回收站里有多少张图（按账号）。
+    pub async fn count_deleted_images(&self, owner_id: i64) -> Result<i64> {
+        self.db
+            .count(
+                "SELECT COUNT(*) AS total FROM images WHERE owner_id = ? AND deleted_at IS NOT NULL",
+                Args::new().int(owner_id),
+            )
+            .await
+    }
+
+    /// 回收站列表：只列墓碑，按移入时间倒序。形状与图片列表一致，前端直接渲染。
+    pub async fn list_deleted_images(
+        &self,
+        owner_id: i64,
+        page: PageRequest,
+    ) -> Result<Page<ImageView>> {
+        let total = self.count_deleted_images(owner_id).await?;
+        let rows = self
+            .db
+            .fetch_all(
+                &format!(
+                    "{IMAGE_VIEW_SQL} WHERE i.owner_id = ? AND i.deleted_at IS NOT NULL \
+                     ORDER BY i.deleted_at DESC, i.id DESC LIMIT ? OFFSET ?"
+                ),
+                Args::new()
+                    .int(owner_id)
+                    .int(page.per_page)
+                    .int(page.offset()),
+            )
+            .await?;
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows.iter() {
+            items.push(ImageView::from_row(row)?);
+        }
+        let ids: Vec<i64> = items.iter().map(|item| item.id).collect();
+        let mut tag_map = self.tags_for_images(&ids).await?;
+        for view in items.iter_mut() {
+            view.tags = tag_map.remove(&view.id).unwrap_or_default();
+        }
+        Ok(Page::new(items, total, page))
+    }
+
+    /// 清掉某个实体上「已经过期」的墓碑（GC 回收物理文件前用）。
+    ///
+    /// 外键挡着实体行不让删，所以得先把墓碑摘掉；但只摘过期的——
+    /// 保留期内的墓碑是回收站，文件要留给恢复用。
+    pub async fn purge_tombstones_for_blob_before(
+        &self,
+        blob_id: i64,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64> {
+        self.db
+            .execute(
+                "DELETE FROM images WHERE (blob_id = ? OR thumb_blob_id = ?)                  AND deleted_at IS NOT NULL AND deleted_at < ?",
+                Args::new().int(blob_id).int(blob_id).text(ts(cutoff)),
+            )
+            .await
+    }
+
+    /// 清空某个账号的回收站（只删墓碑行，物理文件交给 GC）。
+    pub async fn purge_deleted_images(&self, owner_id: i64, limit: i64) -> Result<u64> {
+        self.db
+            .execute(
+                "DELETE FROM images WHERE id IN (                   SELECT id FROM images WHERE owner_id = ? AND deleted_at IS NOT NULL                    ORDER BY deleted_at ASC LIMIT ?)",
+                Args::new().int(owner_id).int(limit.clamp(1, 20_000)),
+            )
+            .await
+    }
+
+    /// 相册里还活着的图片行（软删相册时逐张走删除流程用）。
+    pub async fn list_album_live_images(&self, album_id: i64) -> Result<Vec<Image>> {
+        let sql = format!(
+            "SELECT {} FROM images WHERE album_id = ? AND deleted_at IS NULL ORDER BY id",
+            Image::COLUMNS
+        );
+        let rows = self.db.fetch_all(&sql, Args::new().int(album_id)).await?;
+        rows.iter().map(Image::from_row).collect()
+    }
+
+    /// 相册里「随相册一起」进回收站的图片行（恢复相册时只带回这一批）。
+    pub async fn list_album_binned_images(&self, album_id: i64) -> Result<Vec<Image>> {
+        let sql = format!(
+            "SELECT {} FROM images WHERE album_id = ? AND deleted_at IS NOT NULL \
+             AND deleted_by_album = ? ORDER BY id",
+            Image::COLUMNS
+        );
+        let rows = self
+            .db
+            .fetch_all(&sql, Args::new().int(album_id).bool(true))
+            .await?;
+        rows.iter().map(Image::from_row).collect()
+    }
+
+    /// 某个相册里所有墓碑的 id（彻底删除相册时用）。
+    pub async fn deleted_image_ids_in_album(&self, album_id: i64, limit: i64) -> Result<Vec<i64>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT id FROM images WHERE album_id = ? AND deleted_at IS NOT NULL \
+                 ORDER BY id LIMIT ?",
+                Args::new().int(album_id).int(limit.clamp(1, 20_000)),
+            )
+            .await?;
+        rows.iter().map(|row| get_i64(row, "id")).collect()
+    }
+
+    /// 这个实体上还有多少张「仍在保留期内」的墓碑。
+    ///
+    /// 回收站靠它把物理文件留住：只要还有没到期的墓碑，文件就不能收
+    /// （收走了就恢复不出来了）。到期的墓碑由 `purge_expired_tombstones` 清掉。
+    pub async fn count_tombstones_after(&self, blob_id: i64, cutoff: DateTime<Utc>) -> Result<i64> {
+        self.db
+            .count(
+                "SELECT COUNT(*) AS total FROM images \
+                 WHERE (blob_id = ? OR thumb_blob_id = ?) AND deleted_at IS NOT NULL AND deleted_at >= ?",
+                Args::new().int(blob_id).int(blob_id).text(ts(cutoff)),
+            )
+            .await
+    }
+
+    /// 清掉已经过了保留期的墓碑，返回清掉几条。
+    pub async fn purge_expired_tombstones(&self, cutoff: DateTime<Utc>, limit: i64) -> Result<u64> {
+        self.db
+            .execute(
+                "DELETE FROM images WHERE id IN (\
+                   SELECT id FROM images WHERE deleted_at IS NOT NULL AND deleted_at < ? \
+                   ORDER BY deleted_at ASC LIMIT ?)",
+                Args::new().text(ts(cutoff)).int(limit.clamp(1, 5000)),
+            )
+            .await
+    }
+
     /// 按范围取还活着的图片 id：`album_id` 为 `None` 表示不限相册（全部图片）。
     ///
     /// 给「整相册批量操作」用：前端不必先把几千个 id 拉到浏览器再发回来，
@@ -309,20 +510,6 @@ impl Repo {
         rows.iter().map(crate::model::Blob::from_row).collect()
     }
 
-    /// 清掉指向某个实体的软删行（墓碑）。
-    ///
-    /// 软删只是打标记，行还在；而 `images.blob_id` 的外键挡着实体的行不让删，
-    /// 于是「最后一张引用删了」之后物理文件永远回收不掉——墓碑把内容钉死了。
-    /// 这里没有回收站功能，内容都要删了，留一行指向不存在的实体没有意义。
-    /// 只删 `deleted_at` 非空的：活着的引用在调用方已经确认不存在。
-    pub async fn purge_tombstones_for_blob(&self, blob_id: i64) -> Result<u64> {
-        self.db
-            .execute(
-                "DELETE FROM images WHERE deleted_at IS NOT NULL AND (blob_id = ? OR thumb_blob_id = ?)",
-                Args::new().int(blob_id).int(blob_id),
-            )
-            .await
-    }
 
     pub async fn album_aggregates(&self, owner_id: i64) -> Result<Vec<AlbumAggregate>> {
         let rows = self
@@ -460,9 +647,12 @@ impl Repo {
         sqlx::query(
             &self
                 .db
-                .sql("UPDATE images SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL"),
+                .sql(
+                    "UPDATE images SET deleted_at = ?, deleted_by_album = ? WHERE id = ? AND deleted_at IS NULL",
+                ),
         )
         .bind(&stamp)
+        .bind(deletion.by_album)
         .bind(deletion.image_id)
         .execute(&mut *tx)
         .await?;
@@ -893,5 +1083,24 @@ impl Repo {
                 Args::new().text(ts(older_than)),
             )
             .await
+    }
+}
+
+impl Repo {
+    /// 回收站里某个相册的图片数量与字节数（回收站列表要显示「带回来多少」）。
+    pub async fn album_binned_totals(&self, album_id: i64) -> Result<(i64, i64)> {
+        let row = self
+            .db
+            .fetch_optional(
+                "SELECT COUNT(*) AS files, COALESCE(SUM(b.size), 0) AS bytes \
+                   FROM images i JOIN blobs b ON b.id = i.blob_id \
+                  WHERE i.album_id = ? AND i.deleted_at IS NOT NULL",
+                Args::new().int(album_id),
+            )
+            .await?;
+        match row {
+            Some(row) => Ok((get_i64(&row, "files")?, get_i64(&row, "bytes")?)),
+            None => Ok((0, 0)),
+        }
     }
 }

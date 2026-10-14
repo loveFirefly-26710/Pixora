@@ -19,6 +19,8 @@ export interface SiteInfo {
   terms: { required: boolean; version: string | null; articles: number };
   /** 广场网格列数，管理员可配 */
   plaza_grid_columns: number;
+  /** 回收站保留天数：0 = 关闭回收站（删除即彻底删除） */
+  recycle_retention_days: number;
 }
 
 export interface UserLimits {
@@ -377,6 +379,7 @@ export interface AdminSettings {
     require_login_to_upload: boolean;
     register_enabled: boolean;
     plaza_grid_columns: number;
+    recycle_retention_days: number;
   };
   upload: {
     max_file_bytes: number;

@@ -422,11 +422,13 @@ pub struct Album {
     pub sort_order: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// 被移进回收站的时间；`None` 表示正常可见
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 impl Album {
     pub const COLUMNS: &'static str = "id, owner_id, name, slug, description, visibility, \
-         cover_blob_id, image_count, sort_order, created_at, updated_at";
+         cover_blob_id, image_count, sort_order, created_at, updated_at, deleted_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -441,7 +443,13 @@ impl Album {
             sort_order: get_i64(row, "sort_order")?,
             created_at: get_ts(row, "created_at")?,
             updated_at: get_ts(row, "updated_at")?,
+            deleted_at: get_opt_ts(row, "deleted_at")?,
         })
+    }
+
+    /// 是否在回收站里。
+    pub fn is_deleted(&self) -> bool {
+        self.deleted_at.is_some()
     }
 
     pub fn is_public(&self) -> bool {
@@ -502,11 +510,14 @@ pub struct Image {
     pub views: i64,
     pub upload_time: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+    /// 这张图是「随相册一起」进的回收站：恢复相册时只带回这一批，
+    /// 不碰用户早先单独删掉的那些
+    pub deleted_by_album: bool,
 }
 
 impl Image {
     pub const COLUMNS: &'static str = "id, owner_id, album_id, blob_id, thumb_blob_id, \
-         original_name, title, visibility, views, upload_time, deleted_at";
+         original_name, title, visibility, views, upload_time, deleted_at, deleted_by_album";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -521,6 +532,7 @@ impl Image {
             views: get_i64(row, "views")?,
             upload_time: get_ts(row, "upload_time")?,
             deleted_at: get_opt_ts(row, "deleted_at")?,
+            deleted_by_album: get_bool(row, "deleted_by_album")?,
         })
     }
 

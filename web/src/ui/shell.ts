@@ -35,6 +35,7 @@ const USER_NAV: NavItem[] = [
   { path: "/account/security", label: "安全", icon: "🔒", match: ["/account/security"] },
   { path: "/account/api", label: "API Token", icon: "🔑", match: ["/account/api"] },
   { path: "/account/terms", label: "服务调整 · 服务条款", icon: "📄", match: ["/account/terms"] },
+  { path: "/recycle", label: "回收站", icon: "🗑", match: ["/recycle"] },
 ];
 
 const ADMIN_NAV: NavItem[] = [

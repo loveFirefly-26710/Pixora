@@ -6,6 +6,7 @@
 //! 删除相册**不删图片**：图片只是解除关联（移入「未分类」）。删相册顺手删图
 //! 是很多图床的默认行为，也是最容易造成数据损失的按钮，这里刻意不这么做。
 
+use chrono::Utc;
 use pixora_repo::model::{visibility, Album, User};
 use pixora_repo::repo::albums::{AlbumPatch, NewAlbum};
 use pixora_storage::cas::sanitize_slug;
@@ -167,6 +168,13 @@ impl AppState {
     }
 
     /// 删除相册：图片解除关联，不跟着删。
+    /// 把相册移进回收站：相册与它里面的图片一起进去，随时能整份恢复。
+    ///
+    /// 两处与「删除单张图」保持一致：每张图都走 `delete_image_reference`
+    /// （引用计数、账号用量、相册张数按同一套规则走），镜像链接拆掉、空目录收掉。
+    /// 只是图片标记成「随相册删除」，恢复相册时只带回这一批。
+    ///
+    /// 回收站关着（保留 0 天）时直接彻底删：相册行与其中的图片一起消失。
     pub async fn delete_album(&self, viewer: &Viewer, album_id: i64) -> Result<i64> {
         let album = self.require_owned_album(viewer, album_id).await?;
         // 默认相册是「上传不指定相册」的落脚点，删掉之后没有重建它的入口，
@@ -176,29 +184,160 @@ impl AppState {
                 "默认相册不能删除：上传不指定相册时就落在它这里",
             ));
         }
-        let count = album.image_count;
+        let actor_id = viewer.id();
+        let owner = self.repo.find_user_by_id(album.owner_id).await?;
+        let now = Utc::now();
 
-        // 相册目录是给人看的镜像视图，删相册要连它一起收掉：
-        // 里面的图片会被外键置空落到「未分类」（未分类没有镜像目录），
-        // 旧目录留着就成了指向一批已经不在这个相册里的图的残骸。
-        // 远端驱动维护的是数据库虚拟树，卸掉引用即消失，unlink 是空操作。
-        if let Ok(Some(owner)) = self.repo.find_user_by_id(album.owner_id).await {
-            for blob in self.repo.album_original_blobs(album_id).await? {
-                let view = pixora_storage::cas::view_rel_path(
+        // 图片先进回收站：一张张按单张删除那套走，计数与链接才不会飘
+        let images = self.repo.list_album_live_images(album_id).await?;
+        let mut moved = 0i64;
+        for image in &images {
+            let Ok(Some(blob)) = self.repo.find_blob_by_id(image.blob_id).await else {
+                continue;
+            };
+            if let Some(owner) = owner.as_ref() {
+                self.unlink_view_for(
+                    &blob.storage_driver,
+                    blob.backend_id,
                     &owner.uid,
                     &album.slug,
                     &blob.sha256,
                     &blob.ext,
-                );
-                if let Err(err) = self
-                    .storage
-                    .unlink_view(&blob.storage_driver, blob.backend_id, &view)
-                    .await
-                {
-                    tracing::debug!(error = %err, "删除相册时移除镜像链接失败");
+                )
+                .await;
+            }
+            self.repo
+                .delete_image_reference(
+                    &pixora_repo::repo::images::ImageDeletion {
+                        image_id: image.id,
+                        owner_id: image.owner_id,
+                        album_id: image.album_id,
+                        blob_id: image.blob_id,
+                        thumb_blob_id: image.thumb_blob_id,
+                        size: blob.size,
+                        by_album: true,
+                    },
+                    now,
+                )
+                .await?;
+            moved += 1;
+        }
+        if let Some(owner) = owner.as_ref() {
+            // 目录只删空的：图片链接都拆完了，这里通常就空了
+            self.prune_view_dir(
+                pixora_storage::names::LOCAL,
+                None,
+                &owner.uid,
+                &album.slug,
+            )
+            .await;
+        }
+
+        // 相册行本身软删：列表里消失，但恢复时还要靠它把图片带回来
+        self.repo.soft_delete_album(album_id, now).await?;
+
+        // 回收站关着就是彻底删：相册行与其中的墓碑一起清掉
+        if self.settings.retention_days().await? == 0 {
+            for image_id in self.repo.deleted_image_ids_in_album(album_id, 20_000).await? {
+                let _ = self.repo.purge_image_row(image_id).await;
+            }
+            self.repo.delete_album(album_id).await?;
+        }
+
+        if moved > 0 {
+            self.audit_detail(
+                crate::audit::actions::DELETE_IMAGE,
+                actor_id,
+                format!("album:{}", album.name),
+                serde_json::json!({ "moved_to_bin": moved, "album_id": album_id }),
+                None,
+            )
+            .await;
+        }
+        self.kick_gc();
+        Ok(moved.max(album.image_count))
+    }
+
+    /// 从回收站恢复相册：相册行与「随它一起删掉」的图片一起回来。
+    ///
+    /// 只带回 `deleted_by_album` 的那一批——用户在这个相册里单独删掉的图，
+    /// 是他自己删的，不该被这次恢复顺手捞回来。
+    pub async fn restore_album(&self, viewer: &Viewer, album_id: i64) -> Result<i64> {
+        let album = self.require_owned_album_any(viewer, album_id).await?;
+        if album.deleted_at.is_none() {
+            return Err(AppError::bad_request("这个相册不在回收站里"));
+        }
+        let actor_id = viewer.id();
+        self.repo.restore_album(album_id).await?;
+
+        let owner = self.repo.find_user_by_id(album.owner_id).await?;
+        let mut restored = 0i64;
+        for image in self.repo.list_album_binned_images(album_id).await? {
+            let Ok(Some(blob)) = self.repo.find_blob_by_id(image.blob_id).await else {
+                continue;
+            };
+            // 张数在软删时没减过，这里也不加（count_album = false）
+            self.repo
+                .restore_image_reference(&image, blob.size, false)
+                .await?;
+            if let Some(owner) = owner.as_ref() {
+                self.link_view_for(
+                    &blob.storage_driver,
+                    blob.backend_id,
+                    &blob.storage_key,
+                    &owner.uid,
+                    &album.slug,
+                    &blob.sha256,
+                    &blob.ext,
+                )
+                .await;
+            }
+            restored += 1;
+        }
+
+        self.audit_detail(
+            crate::audit::actions::RECYCLE_RESTORE,
+            actor_id,
+            format!("album:{}", album.name),
+            serde_json::json!({ "restored_images": restored, "album_id": album_id }),
+            None,
+        )
+        .await;
+        Ok(restored)
+    }
+
+    /// 彻底删除回收站里的相册：相册行与其中的图片一起清掉，物理文件交给 GC。
+    pub async fn purge_album(&self, viewer: &Viewer, album_id: i64) -> Result<i64> {
+        let album = self.require_owned_album_any(viewer, album_id).await?;
+        if album.deleted_at.is_none() {
+            return Err(AppError::bad_request("相册还在使用中，先把它移到回收站"));
+        }
+        let actor_id = viewer.id();
+
+        // 先清照片：镜像链接拆掉、墓碑行删掉，物理文件由 GC 收
+        let ids = self.repo.deleted_image_ids_in_album(album_id, 20_000).await?;
+        let count = ids.len() as i64;
+        let owner = self.repo.find_user_by_id(album.owner_id).await?;
+        for id in &ids {
+            if let (Ok(Some(owner)), Ok(Some(image))) = (
+                self.repo.find_user_by_id(album.owner_id).await,
+                self.repo.find_image(*id).await,
+            ) {
+                if let Ok(Some(blob)) = self.repo.find_blob_by_id(image.blob_id).await {
+                    self.unlink_view_for(
+                        &blob.storage_driver,
+                        blob.backend_id,
+                        &owner.uid,
+                        &album.slug,
+                        &blob.sha256,
+                        &blob.ext,
+                    )
+                    .await;
                 }
             }
-            // 只有本地磁盘有真实目录；只删空目录，里面还有东西就留着
+            let _ = self.repo.purge_image_row(*id).await;
+        }
+        if let Some(owner) = owner.as_ref() {
             self.prune_view_dir(
                 pixora_storage::names::LOCAL,
                 None,
@@ -209,10 +348,44 @@ impl AppState {
         }
 
         self.repo.delete_album(album_id).await?;
-        // 删相册把一批图片交给「未分类」，它们的实体可能就此没人引用了：
-        // 催一次回收，别让用户等下一个整点半
         self.kick_gc();
+        self.audit_detail(
+            crate::audit::actions::RECYCLE_PURGE,
+            actor_id,
+            format!("album:{}", album.name),
+            serde_json::json!({ "purged_images": count, "album_id": album_id }),
+            None,
+        )
+        .await;
         Ok(count)
+    }
+
+    /// 回收站里的相册列表（含各自带回来多少张图）。
+    pub async fn deleted_albums(&self, viewer: &Viewer) -> Result<Vec<AlbumPayload>> {
+        let owner = viewer.user().ok_or(AppError::Unauthorized)?;
+        let albums = self.repo.list_deleted_albums(owner.id).await?;
+        let mut out = Vec::with_capacity(albums.len());
+        for album in albums {
+            let (count, bytes) = self
+                .repo
+                .album_binned_totals(album.id)
+                .await
+                .unwrap_or((0, 0));
+            out.push(self.album_payload(&album, count, bytes).await);
+        }
+        Ok(out)
+    }
+
+    /// 带回收站一起找相册（恢复、彻底删除要看见它），并校验归属。
+    async fn require_owned_album_any(&self, viewer: &Viewer, album_id: i64) -> Result<Album> {
+        let actor = viewer.user().ok_or_else(|| AppError::Unauthorized)?;
+        let album = self
+            .repo
+            .find_album_any(album_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("相册"))?;
+        self.ensure_can_touch(actor.id, actor.is_admin(), album.owner_id, "相册")?;
+        Ok(album)
     }
 
     // ------------------------------------------------------------

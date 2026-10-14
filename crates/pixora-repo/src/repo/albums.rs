@@ -4,6 +4,8 @@
 //! 因此同一用户内必须唯一（数据库上有唯一约束，这里再多做一次存在性检查，
 //! 好给出可读提示而不是抛约束冲突）。
 
+use chrono::{DateTime, Utc};
+
 use crate::args::{Args, WhereBuilder};
 use crate::error::{RepoError, Result};
 use crate::model::*;
@@ -50,7 +52,11 @@ impl Repo {
     // ---------- 读取 ----------
 
     pub async fn find_album_by_id(&self, id: i64) -> Result<Option<Album>> {
-        let sql = format!("SELECT {} FROM albums WHERE id = ?", Album::COLUMNS);
+        // 只认活着的相册：回收站里的相册不该还能被上传、批量操作选中
+        let sql = format!(
+            "SELECT {} FROM albums WHERE id = ? AND deleted_at IS NULL",
+            Album::COLUMNS
+        );
         let row = self.db.fetch_optional(&sql, Args::new().int(id)).await?;
         row.as_ref().map(Album::from_row).transpose()
     }
@@ -58,7 +64,7 @@ impl Repo {
     /// 同一个人名下 slug 唯一，所以这一对键就能定位一行。
     pub async fn find_album_by_slug(&self, owner_id: i64, slug: &str) -> Result<Option<Album>> {
         let sql = format!(
-            "SELECT {} FROM albums WHERE owner_id = ? AND slug = ?",
+            "SELECT {} FROM albums WHERE owner_id = ? AND slug = ? AND deleted_at IS NULL",
             Album::COLUMNS
         );
         let row = self
@@ -75,6 +81,8 @@ impl Repo {
         page: PageRequest,
     ) -> Result<Page<Album>> {
         let mut filters = WhereBuilder::new();
+        // 回收站里的相册不进任何列表
+        filters = filters.and("deleted_at IS NULL", |args| args);
         if let Some(owner_id) = filter.owner_id {
             filters = filters.and("owner_id = ?", move |args| args.int(owner_id));
         }
@@ -124,7 +132,8 @@ impl Repo {
     /// 侧边栏要全量、不分页，单独给一条查询省掉一次总数统计。
     pub async fn list_albums_all(&self, owner_id: i64) -> Result<Vec<Album>> {
         let sql = format!(
-            "SELECT {} FROM albums WHERE owner_id = ? ORDER BY sort_order ASC, id ASC",
+            "SELECT {} FROM albums WHERE owner_id = ? AND deleted_at IS NULL \
+             ORDER BY sort_order ASC, id ASC",
             Album::COLUMNS
         );
         let rows = self
@@ -203,11 +212,62 @@ impl Repo {
 
     /// 删相册。相册里的图片不会被删，`images.album_id` 由外键置空——
     /// 「删目录不删内容」是设计稿定下的语义。
+    /// 彻底删除相册行。回收站的「彻底删除」与管理员清理走这里。
     pub async fn delete_album(&self, id: i64) -> Result<()> {
         self.db
             .execute("DELETE FROM albums WHERE id = ?", Args::new().int(id))
             .await?;
         Ok(())
+    }
+
+    /// 移进回收站。行还在，只是不再出现在任何列表里。
+    pub async fn soft_delete_album(&self, id: i64, at: DateTime<Utc>) -> Result<()> {
+        self.db
+            .execute(
+                "UPDATE albums SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+                Args::new().text(ts(at)).text(ts(at)).int(id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 从回收站恢复。
+    pub async fn restore_album(&self, id: i64) -> Result<()> {
+        self.db
+            .execute(
+                "UPDATE albums SET deleted_at = NULL, updated_at = ? WHERE id = ?",
+                Args::new().text(now_ts()).int(id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 按 id 连回收站一起找。恢复、彻底删除这些操作需要看见它。
+    pub async fn find_album_any(&self, id: i64) -> Result<Option<Album>> {
+        let sql = format!("SELECT {} FROM albums WHERE id = ?", Album::COLUMNS);
+        let row = self.db.fetch_optional(&sql, Args::new().int(id)).await?;
+        row.as_ref().map(Album::from_row).transpose()
+    }
+
+    /// 回收站里的相册列表（按移入时间倒序）。
+    pub async fn list_deleted_albums(&self, owner_id: i64) -> Result<Vec<Album>> {
+        let sql = format!(
+            "SELECT {} FROM albums WHERE owner_id = ? AND deleted_at IS NOT NULL \
+             ORDER BY deleted_at DESC",
+            Album::COLUMNS
+        );
+        let rows = self.db.fetch_all(&sql, Args::new().int(owner_id)).await?;
+        rows.iter().map(Album::from_row).collect()
+    }
+
+    /// 数一下回收站里有多少个相册。
+    pub async fn count_deleted_albums(&self, owner_id: i64) -> Result<i64> {
+        self.db
+            .count(
+                "SELECT COUNT(*) AS total FROM albums WHERE owner_id = ? AND deleted_at IS NOT NULL",
+                Args::new().int(owner_id),
+            )
+            .await
     }
 
     /// 设封面。传 `None` 即回到「没有封面」，列表页据此用第一张图兜底。
@@ -235,6 +295,8 @@ impl Repo {
     pub async fn slug_exists(&self, owner_id: i64, slug: &str) -> Result<bool> {
         self.db
             .exists(
+                // 不排除回收站：占着 slug 的相册哪怕在回收站里，也得拦住
+                // 「新建同名相册」——不然恢复时就撞唯一键了
                 "SELECT 1 AS hit FROM albums WHERE owner_id = ? AND slug = ?",
                 Args::new().int(owner_id).text(slug),
             )

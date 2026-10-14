@@ -113,7 +113,7 @@ API 客户端：
   "name": "Pixora", "base_url": "https://img.example.com",
   "upload_prefix": "images",
   "registration_open": true, "registration_closed_reason": null,
-  "plaza_public": true, "plaza_grid_columns": 3,
+  "plaza_public": true, "plaza_grid_columns": 3, "recycle_retention_days": 30,
   "formats": ["jpg","png","gif","webp","avif","heic","tiff","bmp","svg"],
   "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
   "thumb_client": true, "thumb_server_fallback": false,
@@ -262,7 +262,8 @@ API 客户端：
 
 ### `PATCH /api/v1/albums/{id}` / `DELETE /api/v1/albums/{id}` — write
 
-`DELETE` 删相册不删图片：里面的图片回到「未分类」，响应的 `detached_images` 是解除了多少张。
+`DELETE` 是**移进回收站**：相册与它里面的图片一起软删（图片标记为「随相册删除」），
+响应 `detached_images` 是带进回收站的图片数。保留期内可以整份恢复（见「回收站」一节）。
 **默认相册（slug = `default`）不允许删除**——上传不指定相册时落在它这里，删了没有重建入口，
 返回 `BAD_REQUEST`。
 
@@ -588,7 +589,8 @@ API 客户端：
 ```json
 { "data": {
   "site": { "name": "Pixora", "base_url": "https://img.example.com",
-            "plaza_public": true, "require_login_to_upload": true, "register_enabled": true },
+            "plaza_public": true, "require_login_to_upload": true, "register_enabled": true,
+            "plaza_grid_columns": 3, "recycle_retention_days": 30 },
   "upload": { "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
               "queue_depth": 500, "formats": ["jpg","png"] },
   "thumb": { "client": true, "server_fallback": false },

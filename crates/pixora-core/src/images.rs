@@ -611,6 +611,7 @@ impl AppState {
                         blob_id: image.blob_id,
                         thumb_blob_id: image.thumb_blob_id,
                         size: blob.size,
+                        by_album: false,
                     },
                     Utc::now(),
                 )
@@ -622,6 +623,13 @@ impl AppState {
         }
 
         if removed > 0 {
+            // 回收站关着（保留 0 天）时删除就是彻底的：墓碑当场清掉，
+            // 否则它们会以「引用计数为 0 但外键还在」的状态一直挂着
+            if self.settings.retention_days().await? == 0 {
+                for image in images {
+                    let _ = self.repo.purge_image_row(image.id).await;
+                }
+            }
             // 最后一张引用可能刚刚消失：催一次回收，别让文件在磁盘上多躺半小时
             self.kick_gc();
             self.audit_detail(
@@ -634,6 +642,164 @@ impl AppState {
             .await;
         }
         Ok(removed)
+    }
+
+    // ---------- 回收站 ----------
+
+    /// 回收站的图片列表（形状与普通列表一致，前端同一套渲染）。
+    pub async fn deleted_images(
+        &self,
+        viewer: &Viewer,
+        page: PageRequest,
+    ) -> Result<(Vec<ImageItemPayload>, i64, i64)> {
+        let owner = viewer.user().ok_or(AppError::Unauthorized)?;
+        let result = self
+            .repo
+            .list_deleted_images(owner.id, page)
+            .await?;
+        let retention = self.settings.retention_days().await?;
+        let items = self.shape_items(viewer, result.items).await?;
+        Ok((items, result.total, retention))
+    }
+
+    /// 从回收站恢复：引用计数、账号用量、相册张数、镜像链接一起回到原样。
+    pub async fn restore_images(&self, viewer: &Viewer, ids: &[i64]) -> Result<u64> {
+        if ids.is_empty() {
+            return Err(AppError::bad_request("没有选中任何图片"));
+        }
+        if ids.len() > 1000 {
+            return Err(AppError::bad_request("单次最多操作 1000 张"));
+        }
+        let actor_id = viewer.id();
+        let mut restored = 0u64;
+        for id in ids {
+            let Some(image) = self.repo.find_image(*id).await? else {
+                continue;
+            };
+            if image.deleted_at.is_none() {
+                continue; // 本来就没删
+            }
+            let actor = viewer.user().ok_or(AppError::Unauthorized)?;
+            if image.owner_id != actor.id && !actor.is_admin() {
+                continue;
+            }
+            let Some(blob) = self.repo.find_blob_by_id(image.blob_id).await? else {
+                continue;
+            };
+            self.repo
+                .restore_image_reference(&image, blob.size, true)
+                .await?;
+
+            // 镜像链接：恢复之后这张图该重新出现在相册目录里
+            if let (Ok(Some(owner)), Some(album_id)) = (
+                self.repo.find_user_by_id(image.owner_id).await,
+                image.album_id,
+            ) {
+                if let Ok(Some(album)) = self.repo.find_album_by_id(album_id).await {
+                    self.link_view_for(
+                        &blob.storage_driver,
+                        blob.backend_id,
+                        &blob.storage_key,
+                        &owner.uid,
+                        &album.slug,
+                        &blob.sha256,
+                        &blob.ext,
+                    )
+                    .await;
+                }
+            }
+            restored += 1;
+        }
+        if restored > 0 {
+            self.audit_detail(
+                actions::RECYCLE_RESTORE,
+                actor_id,
+                format!("images:{restored}"),
+                serde_json::json!({ "restored": restored, "ids": ids.iter().take(20).collect::<Vec<_>>() }),
+                None,
+            )
+            .await;
+        }
+        Ok(restored)
+    }
+
+    /// 彻底删除：墓碑行消失，物理文件交给 GC（引用计数已归零）。
+    pub async fn purge_images(&self, viewer: &Viewer, ids: &[i64]) -> Result<u64> {
+        if ids.is_empty() {
+            return Err(AppError::bad_request("没有选中任何图片"));
+        }
+        let actor = viewer.user().ok_or(AppError::Unauthorized)?.clone();
+        let mut purged = 0u64;
+        for id in ids {
+            let Some(image) = self.repo.find_image(*id).await? else {
+                continue;
+            };
+            if image.deleted_at.is_none() {
+                continue; // 没进回收站的不在这里删
+            }
+            if image.owner_id != actor.id && !actor.is_admin() {
+                continue;
+            }
+            // 镜像链接跟着走（相册还能找到就拆，找不到也没关系——目录是视图）
+            if let (Ok(Some(owner)), Some(album_id)) = (
+                self.repo.find_user_by_id(image.owner_id).await,
+                image.album_id,
+            ) {
+                if let Ok(Some(blob)) = self.repo.find_blob_by_id(image.blob_id).await {
+                    if let Ok(Some(album)) = self.repo.find_album_any(album_id).await {
+                        self.unlink_view_for(
+                            &blob.storage_driver,
+                            blob.backend_id,
+                            &owner.uid,
+                            &album.slug,
+                            &blob.sha256,
+                            &blob.ext,
+                        )
+                        .await;
+                        self.prune_view_dir(
+                            &blob.storage_driver,
+                            blob.backend_id,
+                            &owner.uid,
+                            &album.slug,
+                        )
+                        .await;
+                    }
+                }
+            }
+            purged += self.repo.purge_image_row(image.id).await?;
+        }
+        if purged > 0 {
+            self.kick_gc();
+            self.audit_detail(
+                actions::RECYCLE_PURGE,
+                Some(actor.id),
+                format!("images:{purged}"),
+                serde_json::json!({ "purged": purged, "ids": ids.iter().take(20).collect::<Vec<_>>() }),
+                None,
+            )
+            .await;
+        }
+        Ok(purged)
+    }
+
+    /// 清空当前账号的回收站。
+    pub async fn empty_bin(&self, viewer: &Viewer) -> Result<u64> {
+        let actor = viewer.user().ok_or(AppError::Unauthorized)?.clone();
+        // 逐张走彻底删除：镜像链接与审计都要留痕
+        let page = PageRequest::new(Some(1), Some(500), 500, 500);
+        let listed = self.repo.list_deleted_images(actor.id, page).await?;
+        let ids: Vec<i64> = listed.items.iter().map(|item| item.id).collect();
+        let purged = self.purge_images(viewer, &ids).await?;
+        // 页面之外还有（超过 500 张）的时候再来一轮，直到清干净
+        if listed.total > ids.len() as i64 {
+            let owner = viewer.user().ok_or(AppError::Unauthorized)?;
+            let more = self.repo.purge_deleted_images(owner.id, 20_000).await?;
+            if more > 0 {
+                self.kick_gc();
+            }
+            return Ok(purged + more);
+        }
+        Ok(purged)
     }
 
     /// 把仓储的视图转成接口形状，并按访问者裁剪字段。
