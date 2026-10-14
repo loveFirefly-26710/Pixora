@@ -21,6 +21,7 @@ import { createUploadPanel, type UploadPanelHandle } from "../upload/panel";
 interface AlbumOption {
   id: number;
   name: string;
+  slug: string;
 }
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -96,7 +97,7 @@ export async function render(ctx: PageContext): Promise<void> {
     const data = await request<AlbumList>("/albums", {
       query: { uid: viewingUid ?? undefined },
     });
-    const albums: AlbumOption[] = data.albums.map((album) => ({ id: album.id, name: album.name }));
+    const albums: AlbumOption[] = data.albums.map((album) => ({ id: album.id, name: album.name, slug: album.slug }));
     if (panel) panel.refreshAlbums(albums, initialAlbumId);
     return albums;
   }

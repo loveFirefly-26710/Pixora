@@ -24,8 +24,31 @@ pub enum MailError {
     #[error("SMTP 连接或投递失败：{0}")]
     Transport(String),
 
+    /// 服务器拒了这组凭据。单独成一类：这种错九成是配置问题，
+    /// 管理员照着清单能自己改好，不该让他去猜「连接失败」是什么意思。
+    #[error("邮箱认证失败（{0}）：发信账号或密码不对。挨个核对：1) 发信账号要填完整邮箱地址；\
+2) 密码填邮箱登录密码，若邮箱开了「客户端专用密码 / 授权码」则填那个；\
+3) 确认该邮箱没有关闭 SMTP 发信权限（企业邮箱后台通常有这一项）")]
+    Auth(String),
+
     #[error("SMTP 未配置：{0}")]
     NotConfigured(String),
+}
+
+impl MailError {
+    /// 把 lettre 的错误归类。认证失败在 SMTP 里是 5xx 永久错误，
+    /// 常见码：535（标准）、526（阿里云的叫法）、530/534/538。
+    pub fn from_transport(err: &lettre::transport::smtp::Error) -> Self {
+        let text = err.to_string();
+        let lower = text.to_ascii_lowercase();
+        let auth_code = ["535", "526", "530", "534", "538"]
+            .iter()
+            .any(|code| text.contains(code));
+        if auth_code || lower.contains("authentication") {
+            return Self::Auth(text);
+        }
+        Self::Transport(text)
+    }
 }
 
 pub type Result<T> = std::result::Result<T, MailError>;
@@ -162,7 +185,7 @@ impl Mailer {
             .send(message)
             .await
             .map(|_| ())
-            .map_err(|err| MailError::Transport(err.to_string()))
+            .map_err(|err| MailError::from_transport(&err))
     }
 
     fn build_message(&self, to: &str, subject: &str, body: &str) -> Result<Message> {
@@ -200,7 +223,7 @@ impl Mailer {
                     self.config.security.as_str()
                 )
             })
-            .map_err(|err| MailError::Transport(err.to_string()))
+            .map_err(|err| MailError::from_transport(&err))
     }
 
     /// 真发一封测试信，管理后台的「测试发信」按钮走这个。

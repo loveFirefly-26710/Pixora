@@ -370,8 +370,8 @@ export function imageTile(
       decoding: "async",
     });
     if (item.width && item.height) {
-      img.width = 0;
-      img.setAttribute("data-ratio", String(item.width / item.height));
+      // 交给 CSS 按图片自身比例出高度（.tile .ph 里的 aspect-ratio）
+      thumb.style.setProperty("--ratio", `${item.width} / ${item.height}`);
     }
     thumb.append(img);
   } else {

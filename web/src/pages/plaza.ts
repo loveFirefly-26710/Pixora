@@ -60,7 +60,12 @@ export async function render(ctx: PageContext): Promise<void> {
   const user = currentUser();
   const site = getState().site;
 
-  ctx.outlet.append(
+  // 内容限宽居中：广场图片不铺满整屏，两侧留白（与其他页面同一套 .pad）
+  const root = h("div.pad");
+  ctx.outlet.append(root);
+  ctx = { ...ctx, outlet: root };
+
+  root.append(
     pageHead(
       "广场",
       user
@@ -88,7 +93,6 @@ export async function render(ctx: PageContext): Promise<void> {
   // 已登录时把上传面板放在最上面：传完刷新列表就能看到结果
   if (user) {
     const panel = createUploadPanel({
-      compact: true,
       onUploaded: () => {
         if (query.sort === "new") void refresh();
       },

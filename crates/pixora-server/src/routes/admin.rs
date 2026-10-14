@@ -1707,10 +1707,28 @@ pub async fn mail_test(
     let to = field_opt_str(&body, "to")
         .unwrap_or_else(|| auth.user.email.clone());
     let Some(mailer) = state.mailer() else {
-        return crate::http::error_response(AppError::bad_request(
-            "SMTP 尚未配置完整（主机与发信地址都要填），请先在系统设置里保存邮件配置",
-        ));
+        // 说清楚是缺哪块，而不是笼统一句「没配置完整」
+        let reason = state
+            .mailer_problem()
+            .unwrap_or_else(|| "SMTP 服务器与发信邮箱都要填".to_string());
+        return crate::http::error_response(AppError::bad_request(format!(
+            "还没法发信：{reason}。在下面改好、点「保存设置」，再测一次"
+        )));
     };
+
+    // 这次实际用的是哪套配置：端口或账号填错时，对着这行一眼就能看出来
+    let config = mailer.config();
+    let used = format!(
+        "{}:{}（{}），发信账号 {}",
+        config.host,
+        config.port,
+        config.security.as_str(),
+        if config.username.trim().is_empty() {
+            "（空）"
+        } else {
+            config.username.as_str()
+        }
+    );
 
     match mailer.send_test(&to).await {
         Ok(()) => {
@@ -1726,11 +1744,14 @@ pub async fn mail_test(
                 .await;
             finish::<serde_json::Value>(Ok(serde_json::json!({
                 "ok": true,
-                "message": format!("测试邮件已发出（{to}），请查收"),
+                "message": format!("测试邮件已发出（{to}），请查收。本次用的配置：{used}"),
                 "csrf_token": cookie_value(&headers, CSRF_COOKIE),
             })))
         }
-        Err(err) => crate::http::error_response(err.into()),
+        // 发不出去基本是配置问题：回 400 而不是 500，并把用的配置带上
+        Err(err) => crate::http::error_response(AppError::bad_request(format!(
+            "测试发信失败：{err}。本次用的配置：{used}"
+        ))),
     }
 }
 
