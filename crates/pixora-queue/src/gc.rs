@@ -16,9 +16,22 @@ use chrono::Utc;
 
 use pixora_core::AppState;
 
-/// 回收无引用的物理文件，返回处理数量。
-pub async fn collect_blobs(state: &Arc<AppState>, grace_minutes: i64, batch: i64) -> pixora_core::Result<u64> {
-    let older_than = Utc::now() - chrono::Duration::minutes(grace_minutes.max(5));
+/// 一轮回收的结果。
+pub struct GcOutcome {
+    /// 真正清掉的实体数
+    pub removed: u64,
+    /// 引用已归零、但还在宽限期里的实体数：调用方据此安排下一轮早点来
+    pub pending_grace: i64,
+}
+
+/// 回收无引用的物理文件。
+pub async fn collect_blobs(
+    state: &Arc<AppState>,
+    grace_minutes: i64,
+    batch: i64,
+) -> pixora_core::Result<GcOutcome> {
+    let grace = chrono::Duration::minutes(grace_minutes.max(5));
+    let older_than = Utc::now() - grace;
     let candidates = state.repo.list_gc_candidates(older_than, batch).await?;
     let mut removed = 0u64;
 
@@ -68,7 +81,18 @@ pub async fn collect_blobs(state: &Arc<AppState>, grace_minutes: i64, batch: i64
             }
         }
     }
-    Ok(removed)
+
+    // 宽限期按「登记时间」算，这里换个口径数一下：引用已归零但还没到点的，
+    // 下一轮要早点来（宽限期一到就该收走，不再等一个完整周期）
+    let pending_grace = state
+        .repo
+        .count_unreferenced_newer_than(older_than)
+        .await
+        .unwrap_or(0);
+    Ok(GcOutcome {
+        removed,
+        pending_grace,
+    })
 }
 
 /// 对账：重算用量与相册计数。修正是幂等的，跑多少次结果一样。

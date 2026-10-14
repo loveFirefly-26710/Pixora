@@ -179,6 +179,19 @@ impl Repo {
         rows.iter().map(Blob::from_row).collect()
     }
 
+    /// 数一下「引用已归零、但还没到宽限期」的实体。
+    ///
+    /// 回收任务拿它决定下一轮什么时候再看：刚失去引用的文件在宽限期到点后就该被收走，
+    /// 不该再等一个完整的扫描周期。
+    pub async fn count_unreferenced_newer_than(&self, newer_than: DateTime<Utc>) -> Result<i64> {
+        self.db
+            .count(
+                "SELECT COUNT(*) AS total FROM blobs WHERE ref_count = 0 AND created_at >= ?",
+                Args::new().text(ts(newer_than)),
+            )
+            .await
+    }
+
     /// 删除实体行。调用前必须确认 `ref_count = 0`，物理文件由调用方先删。
     pub async fn delete_blob(&self, id: i64) -> Result<()> {
         self.db
