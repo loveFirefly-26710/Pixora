@@ -196,7 +196,7 @@ pub async fn blobs_exists(
         })
         .unwrap_or_default();
 
-    match state.check_hashes(&hashes).await {
+    match state.check_hashes(auth.user.id, &hashes).await {
         Ok(outcome) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "exist": outcome.exist,
             "missing": outcome.missing,

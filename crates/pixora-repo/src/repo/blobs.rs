@@ -58,7 +58,13 @@ impl Repo {
     ///
     /// 这是省带宽的关键一步——重复文件连上传请求都不发。哈希数量可能上千，
     /// 按 500 一批切分，避开各家数据库的参数个数上限。
-    pub async fn existing_hashes(&self, hashes: &[String]) -> Result<HashCheck> {
+    /// 预检：这些哈希里，哪些**在调用者的图库里已经有一张活着的图**。
+    ///
+    /// 判定口径是「有没有活着的引用」，不是「blobs 表里还有没有这份文件」。
+    /// 物理文件在最后一张引用删掉后还会留一阵（等 GC 回收），拿它当依据的话，
+    /// 用户把图全删了再传同一批会被判成「已存在」而整批跳过——图没进来，
+    /// 看起来就像删除没删干净。
+    pub async fn existing_hashes(&self, owner_id: i64, hashes: &[String]) -> Result<HashCheck> {
         let mut exist: Vec<String> = Vec::new();
         if hashes.is_empty() {
             return Ok(HashCheck::default());
@@ -67,9 +73,9 @@ impl Repo {
         for chunk in hashes.chunks(500) {
             let placeholders = vec!["?"; chunk.len()].join(", ");
             let sql = format!(
-                "SELECT sha256 FROM blobs WHERE kind = 'original' AND sha256 IN ({placeholders})"
+                "SELECT DISTINCT b.sha256 AS sha256 FROM blobs b                  JOIN images i ON i.blob_id = b.id                  WHERE b.kind = 'original' AND i.deleted_at IS NULL AND i.owner_id = ?                  AND b.sha256 IN ({placeholders})"
             );
-            let mut args = Args::new();
+            let mut args = Args::new().int(owner_id);
             for hash in chunk {
                 args = args.text(hash);
             }

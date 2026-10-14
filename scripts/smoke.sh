@@ -347,6 +347,31 @@ DEAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}${URL_PATH}")"
 [[ "${DEAD_CODE}" == "404" ]] || fail "全部引用删除后直链仍可用（${DEAD_CODE}）"
 ok "全部引用删除后直链返回 404"
 
+# 删光之后重传同一张图：预检必须报「不存在」，上传必须真的把图带回来。
+# 判定口径若只看 blobs 表，这里会「已存在」整批跳过，用户以为删除没删干净。
+REMISS="$(api POST /api/v1/blobs/exists -H 'Content-Type: application/json' \
+    -d "{\"hashes\":[\"${HASH}\"]}")"
+expect_json "${REMISS}" "len(d['data']['exist'])" "0" "删光后预检不再报「已存在」"
+
+REUPLOAD="$(api POST /api/v1/upload -F "file=@${PNG}" -F "sha256=${HASH}" \
+    -F "album_id=${ALBUM_ID}" -F "visibility=public" -F "original_name=sample.png")"
+expect_json "${REUPLOAD}" "d['data']['dedup']" "True" "重传命中服务端去重（不重复占盘）"
+REUPLOAD_ID="$(printf '%s' "${REUPLOAD}" | python -c "import json,sys;print(json.load(sys.stdin)['data']['id'])")"
+[[ "${REUPLOAD_ID}" != "${IMAGE_ID}" ]] || fail "重传应当是新的图片记录"
+ok "删光后重传真的把图带回来了（新 id ${REUPLOAD_ID}）"
+
+# 删相册：图片落到未分类、镜像目录收掉，物理文件仍归 GC 管
+ALBUM_DIR="$(find "${DATA_DIR}/users" -maxdepth 2 -type d -name '旅行*' 2>/dev/null | head -1)"
+[[ -n "${ALBUM_DIR}" ]] || fail "镜像树里没有相册目录"
+api DELETE "/api/v1/albums/${ALBUM_ID}" >/dev/null
+[[ ! -d "${ALBUM_DIR}" ]] || fail "删相册后目录还在：${ALBUM_DIR}"
+ok "删相册后镜像目录已收掉"
+IMAGES_LEFT="$(api GET /api/v1/images)"
+expect_json "${IMAGES_LEFT}" "d['meta']['total']" "1" "相册里的图落到未分类，没有被删"
+
+# 收尾：把重传的那张也删掉，文末「引用计数归零」才是此刻的事实
+api DELETE "/api/v1/images/${REUPLOAD_ID}" >/dev/null
+
 step "管理后台"
 STATS="$(api GET /api/v1/admin/stats)"
 expect_json "${STATS}" "d['data']['user_total']" "1" "管理概览：1 个用户"

@@ -54,6 +54,9 @@ pub struct AppState {
     /// 没能装配出邮件器的原因。测试发信用它说明白「是配置缺了哪块」，
     /// 而不是笼统回一句「SMTP 未配置完整」。
     mailer_problem: RwLock<Option<String>>,
+    /// 「现在就去回收」的信号。删除操作与定时扫描都走这里，
+    /// 物理文件始终只由 GC 那个任务删。
+    gc_notify: tokio::sync::Notify,
     /// 远端驱动与第三方校验共用的 HTTP 客户端（连接池共享）
     pub http: Arc<reqwest::Client>,
     pub started_at: DateTime<Utc>,
@@ -103,6 +106,7 @@ impl AppState {
             ip_guard,
             mailer: RwLock::new(None),
             mailer_problem: RwLock::new(None),
+            gc_notify: tokio::sync::Notify::new(),
             http,
             started_at: Utc::now(),
             db_driver,
@@ -174,6 +178,17 @@ impl AppState {
 
     pub fn mailer(&self) -> Option<Arc<Mailer>> {
         self.mailer.read().expect("邮件器锁不该中毒").clone()
+    }
+
+    /// 催一次 Blob 回收。删除类操作调用它：让物理文件尽快（而不是等下一轮扫描）
+    /// 被回收。真正的删除仍由 GC 任务做，这里只是叫醒它。
+    pub fn kick_gc(&self) {
+        self.gc_notify.notify_one();
+    }
+
+    /// GC 任务等这个信号（或超时）。返回一个 future，与定时器一起 select。
+    pub async fn wait_gc_kick(&self) {
+        self.gc_notify.notified().await;
     }
 
     /// 邮件器没能装配出来时，卡在哪一步。

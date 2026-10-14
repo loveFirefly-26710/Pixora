@@ -381,6 +381,31 @@ try {
     Api DELETE "/api/v1/images/$imageId" | Out-Null
     ExpectStatus "$script:Base$urlPath" 404 "全部引用删除后直链返回 404"
 
+    # 删光之后重传同一张图：预检报「不存在」，上传把图带回来
+    $remiss = Api POST "/api/v1/blobs/exists" @("-H", "Content-Type: application/json",
+        "-d", (JsonBody "preflight2" @{ hashes = @($hash) }))
+    ExpectJson $remiss { @($d.data.exist).Count -eq 0 } "删光后预检不再报「已存在」"
+
+    $reupload = Api POST "/api/v1/upload" @("-F", "file=@$png", "-F", "sha256=$hash",
+        "-F", "album_id=$albumId", "-F", "visibility=public")
+    ExpectJson $reupload { $d.data.dedup } "重传命中服务端去重（不重复占盘）"
+    $reuploadId = ($reupload | ConvertFrom-Json).data.id
+    if ($reuploadId -eq $imageId) { Fail "重传应当是新的图片记录" }
+    Ok "删光后重传真的把图带回来了"
+
+    # 删相册：镜像目录收掉，图片落到未分类
+    $albumDir = Get-ChildItem (Join-Path $dataDir "users") -Recurse -Directory -Filter "旅行*" |
+        Select-Object -First 1
+    if (-not $albumDir) { Fail "镜像树里没有相册目录" }
+    Api DELETE "/api/v1/albums/$albumId" | Out-Null
+    if (Test-Path $albumDir.FullName) { Fail "删相册后目录还在：$($albumDir.FullName)" }
+    Ok "删相册后镜像目录已收掉"
+    $imagesLeft = Api GET "/api/v1/images"
+    ExpectJson $imagesLeft { $d.meta.total -eq 1 } "相册里的图落到未分类，没有被删"
+
+    # 收尾：把重传的那张也删掉，文末「引用计数归零」才是此刻的事实
+    Api DELETE "/api/v1/images/$reuploadId" | Out-Null
+
     # 引用归零 ≠ 立刻回收。物理文件由后台 GC 在宽限期（默认 60 分钟）之后删，
     # 这个窗口是为了避开「先登记实体、再建引用」之间的时间差。
     # 回收行为本身由 crates/pixora-queue/tests/gc.rs 覆盖（含「还有引用时绝不删」）。
