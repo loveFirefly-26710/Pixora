@@ -17,6 +17,7 @@ import { toastError } from "../core/toast";
 import type { ImageItem } from "../core/types";
 import { createUploadPanel, loadAlbumOptions } from "../upload/panel";
 import { openLightbox } from "../ui/lightbox";
+import { applyMasonry } from "../ui/masonry";
 import {
   emptyState,
   imageTile,
@@ -173,6 +174,8 @@ export async function render(ctx: PageContext): Promise<void> {
           );
         }
         gridHost.replaceChildren(grid);
+        // 图片高度不一，排成瀑布流才不会在短图下面留空洞
+        applyMasonry(grid);
       }
 
       const pager = pagination(page.meta, (next) =>
