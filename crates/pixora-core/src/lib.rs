@@ -51,6 +51,9 @@ pub struct AppState {
     pub ip_guard: Arc<IpGuard>,
     /// 邮件发送器。设置改了要重建，所以放在锁里。
     mailer: RwLock<Option<Arc<Mailer>>>,
+    /// 没能装配出邮件器的原因。测试发信用它说明白「是配置缺了哪块」，
+    /// 而不是笼统回一句「SMTP 未配置完整」。
+    mailer_problem: RwLock<Option<String>>,
     /// 远端驱动与第三方校验共用的 HTTP 客户端（连接池共享）
     pub http: Arc<reqwest::Client>,
     pub started_at: DateTime<Utc>,
@@ -99,6 +102,7 @@ impl AppState {
             limits,
             ip_guard,
             mailer: RwLock::new(None),
+            mailer_problem: RwLock::new(None),
             http,
             started_at: Utc::now(),
             db_driver,
@@ -135,13 +139,22 @@ impl AppState {
         {
             Ok(value) => value.unwrap_or_default(),
             Err(err) => {
+                // 拿不到密码就别拿空密码去撞认证：那会把「主密钥不匹配」
+                // 显示成「认证失败」，人照着账号密码改一圈也修不好。
                 tracing::warn!(error = %err, "读取 SMTP 密码失败");
-                String::new()
+                *self.mailer.write().expect("邮件器锁不该中毒") = None;
+                *self.problem_mut() = Some(format!(
+                    "库里的 SMTP 密码读不出来（{err}）；多半是当前主密钥与写入时不一致，重新填一次密码即可"
+                ));
+                return;
             }
         };
 
         if mail.smtp_host.trim().is_empty() || mail.from_email.trim().is_empty() {
             *self.mailer.write().expect("邮件器锁不该中毒") = None;
+            *self.problem_mut() = Some(
+                "SMTP 服务器与发信邮箱都要填，邮件功能才会启用".to_string(),
+            );
             return;
         }
 
@@ -156,10 +169,25 @@ impl AppState {
         config.from_name = mail.from_name.clone();
 
         *self.mailer.write().expect("邮件器锁不该中毒") = Some(Arc::new(Mailer::new(config)));
+        *self.problem_mut() = None;
     }
 
     pub fn mailer(&self) -> Option<Arc<Mailer>> {
         self.mailer.read().expect("邮件器锁不该中毒").clone()
+    }
+
+    /// 邮件器没能装配出来时，卡在哪一步。
+    pub fn mailer_problem(&self) -> Option<String> {
+        self.mailer_problem
+            .read()
+            .expect("邮件器原因锁不该中毒")
+            .clone()
+    }
+
+    fn problem_mut(&self) -> std::sync::RwLockWriteGuard<'_, Option<String>> {
+        self.mailer_problem
+            .write()
+            .expect("邮件器原因锁不该中毒")
     }
 
     /// 站点地址。设置里有就用设置的，其次环境变量，最后从监听地址推断。

@@ -1,7 +1,7 @@
 /**
  * 可复用的上传面板。
  *
- * 上传页与广场页共用同一块面板，四种入口（拖拽 / 选文件 / 选文件夹 / 粘贴）效果一样，
+ * 上传页与广场页共用同一块面板，几个入口（拖拽 / 选文件 / 选文件夹 / 粘贴）效果一样，
  * 最终都进同一个队列（upload/queue.ts 的单例），所以两个页面来回切不会丢队列。
  *
  * 面板只负责「展示 + 收集设置」，不自己发请求：状态变化全部来自队列事件，
@@ -25,21 +25,19 @@ import {
 
 export interface UploadPanelOptions {
   /** 目标相册候选。广场页可以传空数组，面板会隐藏相册选择。 */
-  albums?: Array<{ id: number; name: string }>;
+  albums?: Array<{ id: number; name: string; slug: string }>;
   /** 预选的目标相册 */
   albumId?: number | null;
   /** 每张上传成功后的回调（广场页用来把新图插进列表） */
   onUploaded?: (result: UploadResult) => void;
   /** 一次队列跑完后的回调 */
   onFinished?: (stats: QueueStats) => void;
-  /** 紧凑模式：广场页顶部用，隐藏「选择方式」四宫格 */
-  compact?: boolean;
 }
 
 export interface UploadPanelHandle {
   root: HTMLElement;
   /** 相册列表异步到手后回填 */
-  refreshAlbums(albums: Array<{ id: number; name: string }>, albumId?: number | null): void;
+  refreshAlbums(albums: Array<{ id: number; name: string; slug: string }>, albumId?: number | null): void;
   destroy(): void;
 }
 
@@ -144,7 +142,6 @@ export async function collectFiles(dataTransfer: DataTransfer): Promise<Incoming
 
 export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanelHandle {
   const queue = getUploadQueue();
-  const compact = options.compact ?? false;
 
   let notices: Array<{ tone: "info" | "ok" | "warn" | "err"; text: string }> = [];
   let lastToast = { message: "", at: 0 };
@@ -222,23 +219,8 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     });
   });
 
-  const methodGrid = h(
-    "div.meth",
-    null,
-    h("div.m-box", null, h("b", { text: "拖拽" }), h("small", { text: "文件或文件夹拖进虚线框，松开即入队" })),
-    h("div.m-box", null, h("b", { text: "选择文件" }), h("small", { text: "系统文件选择器，支持多选与 Ctrl+A" })),
-    h("div.m-box", null, h("b", { text: "选择文件夹" }), h("small", { text: "递归扫描，相对路径保留为标签" })),
-    h("div.m-box", null, h("b", { text: "粘贴" }), h("small", { text: "页面任意位置 Ctrl+V，截图工具直接贴" })),
-  );
-  const desktopCard = h(
-    "div.card.upload-desktop",
-    null,
-    h("h4", null, "选择方式 ", h("small", { text: "四种入口效果一样，进同一个队列" })),
-    methodGrid,
-    dropzone,
-  );
-  // 紧凑模式（广场页）：去掉说明性的四宫格，保留拖拽区本身——拖拽是 PC 上最快的入口
-  if (compact) methodGrid.style.display = "none";
+  // 桌面端只剩拖拽区本身：四个「入口」卡片只是把同一件事说了四遍
+  const desktopCard = h("div.card.upload-desktop", null, dropzone);
 
   const mobileEntry = (
     icon: string,
@@ -335,19 +317,33 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     ),
   );
 
-  const setAlbumOptions = (albums: Array<{ id: number; name: string }>, albumId?: number | null): void => {
+  const setAlbumOptions = (
+    albums: Array<{ id: number; name: string; slug: string }>,
+    albumId?: number | null,
+  ): void => {
     const desired = albumId != null ? albumId : queue.getSettings().albumId;
     albumSelect.replaceChildren(
-      h("option", { value: "", text: "默认相册" }),
+      // 「不指定相册」跟相册页里的叫法保持一致：未分类。
+      // 它以前叫「默认相册」，和用户自己那张默认相册重名——
+      // 下拉里于是出现两个「默认相册」，谁都说不清选的是哪一个。
+      h("option", { value: "", text: "未分类" }),
       ...albums.map((album) => h("option", { value: String(album.id), text: album.name })),
     );
-    const wanted = desired !== null ? String(desired) : "";
-    albumSelect.value = [...albumSelect.options].some((option) => option.value === wanted)
-      ? wanted
-      : "";
-    // 只有页面明确指定了相册（URL 里的 album_id）才回写设置：
-    // 否则每次进页面都会用「默认相册」把用户上次的选择冲掉
-    if (albumId != null) {
+
+    const wanted = desired != null ? String(desired) : "";
+    const hasWanted = wanted !== "" && [...albumSelect.options].some((option) => option.value === wanted);
+    if (hasWanted) {
+      albumSelect.value = wanted;
+    } else {
+      // 没选过，或原来选中的相册已经不在了：落到真正的「默认相册」。
+      // 下拉里显示哪张，上传就进哪张——不再出现「显示着默认相册、图却进了未分类」。
+      const fallback = albums.find((album) => album.slug === "default") ?? albums[0] ?? null;
+      albumSelect.value = fallback ? String(fallback.id) : "";
+    }
+
+    // 页面明确指定了相册，或者我们替用户选定了默认值，都要回写：
+    // 只有「用户上次自己选过、而且那张还在」才不回写，免得把他的选择冲掉
+    if (albumId != null || !hasWanted) {
       queue.setSettings({ albumId: albumSelect.value ? Number(albumSelect.value) : null });
     }
   };

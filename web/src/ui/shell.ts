@@ -1,9 +1,12 @@
 /**
- * 应用外壳：顶部导航、左侧边栏、底部 tab、抽屉。
+ * 应用外壳：顶部导航 + 左侧边栏（≥1024px）+ 底部 tab（<1024px）。
  *
- * 三处导航形态由断点决定（PC 侧边栏 / 移动底部 tab / 后台抽屉），
- * 结构一次建好，之后只切 class 与高亮，不重建 DOM——
- * 重建会让移动端的滚动位置和抽屉动画都出问题。
+ * 顶栏只放四样东西：图标（点回广场）、搜索框、账号（登录按钮或头像）、API 文档。
+ * 页面之间的导航走侧边栏；窄屏收进底部 tab——不再有 ☰ 抽屉，
+ * 同一个入口两套形态只会让人猜「导航到底在哪」。
+ *
+ * 三种形态的 DOM 一次建好，之后只切 class 与高亮，不重建——
+ * 重建会让移动端的滚动位置出问题。
  */
 
 import { h } from "../core/dom";
@@ -24,15 +27,14 @@ const ALBUMS: NavItem = { path: "/albums", label: "相册", icon: "▤", match: 
 const UPLOAD: NavItem = { path: "/upload", label: "上传", icon: "＋", match: ["/upload"] };
 const MINE: NavItem = { path: "/account", label: "我的", icon: "◇", match: ["/account"] };
 
+/** 侧边栏的「用户中心」。广场不在这里：顶栏的品牌图标就是回广场的入口。 */
 const USER_NAV: NavItem[] = [
-  PLAZA,
   ALBUMS,
   UPLOAD,
   { path: "/account", label: "账号信息", icon: "◇", match: ["/account"] },
   { path: "/account/security", label: "安全", icon: "🔒", match: ["/account/security"] },
   { path: "/account/api", label: "API Token", icon: "🔑", match: ["/account/api"] },
   { path: "/account/terms", label: "服务调整 · 服务条款", icon: "📄", match: ["/account/terms"] },
-  { path: "/docs/api", label: "API 文档", icon: "📘", match: ["/docs"] },
 ];
 
 const ADMIN_NAV: NavItem[] = [
@@ -45,11 +47,13 @@ const ADMIN_NAV: NavItem[] = [
   { path: "/admin/terms", label: "服务条款", icon: "📄", match: ["/admin/terms"] },
 ];
 
+const ABOUT_NAV: NavItem[] = [{ path: "/docs/api", label: "API 文档", icon: "📘", match: ["/docs"] }];
+
 let refs: {
   shell: HTMLElement;
   navbar: HTMLElement;
+  sidebar: HTMLElement | null;
   tabbar: HTMLElement;
-  drawer: HTMLElement;
   outlet: HTMLElement;
 } | null = null;
 
@@ -68,49 +72,34 @@ function navLink(item: NavItem): HTMLElement {
   }, h("span", { text: item.icon }), h("span", { text: item.label }));
 }
 
+/** 顶栏。图标 + 搜索框 + 账号 + API 文档，别的一律不放。 */
 export function renderNavbar(): HTMLElement {
-  const state = getState();
-  const site = state.site;
-  const user = state.user;
+  const user = getState().user;
   const navbar = h("div.navbar");
 
   navbar.append(
-    h("a.logo", { href: "#/", html: `Pi<em>x</em>ora` }),
-    // 导航收进抽屉后，这个按钮是所有页面唯一的入口，所以不分断点、始终显示
-    h("button.btn.sm.gho", {
-      type: "button",
-      text: "☰",
-      "aria-label": "打开导航菜单",
-      on: { click: () => toggleDrawer(true) },
-    }),
+    h("a.logo", { href: "#/", html: `Pi<em>x</em>ora`, "aria-label": "回到广场首页" }),
   );
 
-  // 搜索框只在广场与相册页出现
+  // 搜索框固定在顶栏（不再只在广场与相册页出现）：在哪儿搜都落到当前板块的结果页
   const path = currentPath();
-  if (path === "/" || path.startsWith("/albums") || path === "/plaza") {
-    const input = h("input", { placeholder: "搜索标签、关键词…", "aria-label": "搜索" });
-    const form = h("form.search", { role: "search" }, "⌕", input);
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const keyword = input.value.trim();
-      const target = path.startsWith("/albums") ? "/albums" : "/";
-      navigate(keyword ? `${target}?q=${encodeURIComponent(keyword)}` : target);
-    });
-    navbar.append(form);
-  } else if (site) {
-    navbar.append(h("span.hint", { text: site.name, style: { fontSize: "12px", color: "var(--muted)" } }));
-  }
+  const target = path.startsWith("/albums") ? "/albums" : "/";
+  const input = h("input", { placeholder: "搜索标签、关键词…", "aria-label": "搜索" });
+  // 回填当前查询串：刷新或前进后退后，搜索框和地址栏说同一件事
+  const query = new URLSearchParams(location.hash.split("?")[1] ?? "").get("q");
+  if (query) input.value = query;
+  const form = h("form.search", { role: "search" }, "⌕", input);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const keyword = input.value.trim();
+    navigate(keyword ? `${target}?q=${encodeURIComponent(keyword)}` : target);
+  });
+  navbar.append(form);
 
   navbar.append(h("span.spacer"));
 
   if (user) {
-    if (isAdmin()) {
-      navbar.append(
-        h("a.btn.gho.sm", { href: "#/admin/users", text: "管理后台" }),
-      );
-    }
     navbar.append(
-      h("a.btn.gho.sm", { href: "#/albums", text: "我的相册" }),
       h("a.avatar", {
         href: "#/account",
         class: user.role === "admin" ? "admin" : "",
@@ -123,9 +112,11 @@ export function renderNavbar(): HTMLElement {
     // 游客看到两个按钮会先纠结「我该点哪个」，而这两步的落点本来就是同一个表单。
     navbar.append(h("a.btn.pri", { href: "#/login", text: "登录" }));
   }
+  navbar.append(h("a.btn.gho.sm", { href: "#/docs/api", text: "API 文档" }));
 
   return navbar;
 }
+
 export function renderTabbar(): HTMLElement {
   const tabbar = h("nav.tabbar", { "aria-label": "主导航" });
   const user = getState().user;
@@ -144,61 +135,43 @@ export function renderTabbar(): HTMLElement {
   return tabbar;
 }
 
-function renderDrawer(): HTMLElement {
-  const drawer = h("div.drawer", { "aria-hidden": "true" });
-  const mask = h("div.mask");
-  mask.addEventListener("click", () => toggleDrawer(false));
-  const sheet = h("div.sheet");
-  const close = h("button.btn.sm.gho", {
-    type: "button",
-    text: "✕",
-    "aria-label": "关闭菜单",
-    on: { click: () => toggleDrawer(false) },
-  });
-  sheet.append(h("div.flexline", { style: { marginBottom: "8px" } }, h("b", { text: "导航" }), h("span.spacer"), close));
-
+/**
+ * 侧边栏。游客没有（广场页由顶栏与搜索框自足），登录后才有导航可讲。
+ *
+ * 广场页也不显示：那一页是「浏览」的入口，一进来就压一条导航栏反而挡图。
+ * 顶栏的品牌图标与底部 tab 都能回广场，不缺这一个入口。
+ */
+function renderSidebar(): HTMLElement | null {
   const user = getState().user;
-  const groups: Array<[string, NavItem[]]> = user
-    ? [["用户中心", USER_NAV], ["管理后台", isAdmin() ? ADMIN_NAV : []], ["关于", [{ path: "/docs/api", label: "API 文档", icon: "📘" }]]]
-    : [["浏览", [PLAZA]], ["关于", [{ path: "/docs/api", label: "API 文档", icon: "📘" }]]];
+  if (!user) return null;
+  const path = currentPath();
+  if (path === "/" || path === "/plaza") return null;
 
+  const sidebar = h("nav.sidebar", { "aria-label": "侧边导航" });
+  const groups: Array<[string, NavItem[]]> = [
+    ["用户中心", USER_NAV],
+    ["管理后台", isAdmin() ? ADMIN_NAV : []],
+    ["关于", ABOUT_NAV],
+  ];
   for (const [title, items] of groups) {
     if (items.length === 0) continue;
-    sheet.append(h("div.grp", { text: title }));
-    for (const item of items) {
-      const link = navLink(item);
-      link.addEventListener("click", () => toggleDrawer(false));
-      sheet.append(link);
-    }
+    sidebar.append(h("div.grp", { text: title }));
+    for (const item of items) sidebar.append(navLink(item));
   }
-
-  drawer.append(mask, sheet);
-  return drawer;
-}
-
-export function toggleDrawer(open: boolean): void {
-  if (!refs) return;
-  refs.drawer.classList.toggle("on", open);
-  refs.drawer.setAttribute("aria-hidden", String(!open));
-  if (!open) {
-    window.setTimeout(() => {
-      if (refs) refs.drawer.classList.remove("on");
-    }, 0);
-  }
+  return sidebar;
 }
 
 /** 建外壳并返回页面内容挂载点。 */
 export function mountShell(root: HTMLElement): HTMLElement {
   const navbar = renderNavbar();
   const tabbar = renderTabbar();
-  const drawer = renderDrawer();
   const outlet = h("main.app-main");
+  const sidebar = renderSidebar();
 
-  // 按 UI 原型：界面里没有常驻侧边栏，导航全部走顶栏的菜单抽屉
-  const shell = h("div.shell", null, outlet);
-  root.replaceChildren(navbar, shell, tabbar, drawer);
+  const shell = h("div.shell", null, sidebar, outlet);
+  root.replaceChildren(navbar, shell, tabbar);
 
-  refs = { shell, navbar, tabbar, drawer, outlet };
+  refs = { shell, navbar, sidebar, tabbar, outlet };
   subscribe(() => refreshNav());
   return outlet;
 }
@@ -208,7 +181,13 @@ export function outlet(): HTMLElement {
   return refs.outlet;
 }
 
-/** 只重建三处导航，不动页面内容。 */
+/**
+ * 重建导航，不动页面内容。每次路由变化都会走这里。
+ *
+ * 侧边栏该不该出现取决于「登录没登录 + 在哪个页面」，所以不能只建一次：
+ * 进广场时摘掉、进相册时装回来，SHELL 就是那一个 flex 行，
+ * 没有侧边栏时整行给内容，不会空出一列。
+ */
 export function refreshNav(): void {
   if (!refs) return;
   const navbar = renderNavbar();
@@ -219,8 +198,9 @@ export function refreshNav(): void {
   refs.tabbar.replaceWith(tabbar);
   refs.tabbar = tabbar;
 
-  refs.drawer.replaceWith(renderDrawer());
-  refs.drawer = refs.shell.parentElement?.querySelector(".drawer") ?? refs.drawer;
+  if (refs.sidebar) refs.sidebar.remove();
+  refs.sidebar = renderSidebar();
+  if (refs.sidebar) refs.shell.prepend(refs.sidebar);
 }
 
 /** 判断当前是否在某个路径下（页面内部高亮用）。 */
@@ -266,4 +246,4 @@ export function userViewBanner(
   );
 }
 
-export { PLAZA, ALBUMS, UPLOAD, MINE, ADMIN_NAV, USER_NAV };
+export { PLAZA, ALBUMS, UPLOAD, MINE, ADMIN_NAV, USER_NAV, ABOUT_NAV };
