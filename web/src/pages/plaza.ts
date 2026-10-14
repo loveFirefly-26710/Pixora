@@ -164,7 +164,9 @@ export async function render(ctx: PageContext): Promise<void> {
       return;
     }
     if (currentPage >= totalPages) {
-      footer.replaceChildren(h("span", { text: currentPage === 0 ? "" : "没有更多了" }));
+      // 一张都没有（空广场、搜索无结果，或者第一页还没回来）时不摆「没有更多了」，
+      // 列表空着就让它空着
+      footer.replaceChildren(h("span", { text: items.length === 0 ? "" : "没有更多了" }));
       return;
     }
     // 自动加载为主，这个按钮是兜底：观察器不可用、或用户就想手动点一下时用得上
@@ -208,21 +210,13 @@ export async function render(ctx: PageContext): Promise<void> {
 
       if (reset) grid.replaceChildren();
       if (currentPage === 1 && page.items.length === 0) {
-        grid.replaceChildren(
-          emptyState(
-            "🖼",
-            query.q || query.tag
-              ? "没有匹配的图片，换个关键词试试。"
-              : "广场上还没有公开图片。",
-            user && !query.q && !query.tag
-              ? h("button.btn.pri", {
-                  type: "button",
-                  text: "去上传",
-                  on: { click: () => navigate("/upload") },
-                })
-              : undefined,
-          ),
-        );
+        // 广场空着时不摆占位提示：没有内容就是没有内容，「还没有公开图片」这类
+        // 文案只是噪音。搜索或标签没命中时才给一句说明，那才是要看的反馈
+        if (query.q || query.tag) {
+          grid.replaceChildren(emptyState("🖼", "没有匹配的图片，换个关键词试试。"));
+        } else {
+          grid.replaceChildren();
+        }
       } else {
         for (const item of page.items) {
           grid.append(
