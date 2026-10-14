@@ -145,6 +145,18 @@ function albumRow(
       on: { click: () => navigate(`/albums/${album.id}`) },
     }),
   );
+  // 「选中全部图片」：跳到该相册、进去就是全选状态，接着就能批量删除/打标签/移动。
+  // 默认相册同样适用——它只是不能删相册本身。
+  if (album.image_count > 0) {
+    actions.append(
+      h("button.btn.sm", {
+        type: "button",
+        text: "选中全部图片",
+        title: `进入相册并勾选全部 ${album.image_count} 张`,
+        on: { click: () => navigate(`/albums/${album.id}?select=all`) },
+      }),
+    );
+  }
 
   if (!readOnly) {
     const rename = h("button.btn.sm", { type: "button", text: "改名" });

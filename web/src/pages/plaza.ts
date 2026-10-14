@@ -6,6 +6,10 @@
  * 两边的口径是一致的。
  *
  * 已登录：上传区在广场上方，同屏可见，传完立刻能在下面看到自己的图（如果设为公开）。
+ *
+ * 列表是**一直往下滑一直加载**，没有翻页：画廊翻页很难受——页数一多就不知道
+ * 自己在哪，点下一页还会跳回顶部。加载入口是底部一个哨兵元素，它进入视口就取下一页
+ * （提前 600px 预取，滑到底时下一页往往已经在路上了）。
  */
 
 import { requestPage } from "../core/api";
@@ -22,16 +26,18 @@ import {
   emptyState,
   imageTile,
   pageHead,
-  pagination,
   qtip,
   skeletonGrid,
+  spinner,
 } from "../ui/widgets";
+
+/** 一页取多少：与列表页一致。 */
+const PER_PAGE = 24;
 
 interface PlazaQuery {
   q: string | null;
   tag: string | null;
   sort: string;
-  page: number;
 }
 
 function readQuery(ctx: PageContext): PlazaQuery {
@@ -39,17 +45,10 @@ function readQuery(ctx: PageContext): PlazaQuery {
     q: ctx.query.get("q"),
     tag: ctx.query.get("tag"),
     sort: ctx.query.get("sort") === "hot" ? "hot" : "new",
-    page: Number(ctx.query.get("page") ?? "1") || 1,
   };
 }
 
-/**
- * 广场每行放几张图，由管理员在后台配置（默认 3 列）。
- *
- * 这里只把列数作为 CSS 变量交给样式表：真正的列数还要看窗口够不够宽，
- * 窄屏放不下时自动少放几列，这件事用 CSS 的 auto-fill 做掉，
- * 免得为了响应式在 JS 里监听窗口尺寸。
- */
+/** 广场的列数由后台配置（默认 3 列，比原来的 5 列大一圈）。 */
 function gridColumnsStyle(): string {
   const columns = getState().site?.plaza_grid_columns ?? 3;
   const clamped = Math.min(6, Math.max(2, columns));
@@ -76,7 +75,7 @@ export async function render(ctx: PageContext): Promise<void> {
   );
 
   if (!user && site && !site.plaza_public) {
-    ctx.outlet.append(
+    root.append(
       qtip(
         "warn",
         "广场对未登录用户关闭",
@@ -86,20 +85,31 @@ export async function render(ctx: PageContext): Promise<void> {
     return;
   }
 
-  const gridHost = h("div");
-  const pagerHost = h("div");
-  let loading = false;
-  let refresh: () => Promise<void> = async () => {};
+  // 网格只建一次，往下追加节点：重建会把已经排好的瀑布流和滚动位置一起丢掉
+  const grid = h("div.grid.igrid", { style: gridColumnsStyle() });
+  const footer = h("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: "8px",
+      padding: "22px 0 8px",
+      color: "var(--muted)",
+      fontSize: "12.5px",
+    },
+  });
 
-  // 已登录时把上传面板放在最上面：传完刷新列表就能看到结果
+  let loadFirstPage: () => Promise<void> = async () => {};
+
   if (user) {
     const panel = createUploadPanel({
       onUploaded: () => {
-        if (query.sort === "new") void refresh();
+        // 传完把列表刷回第一页：新图在最前面，用户一眼能看到
+        if (query.sort === "new") void loadFirstPage();
       },
     });
     panel.root.style.marginBottom = "18px";
-    ctx.outlet.append(panel.root);
+    root.append(panel.root);
     // 目标相册下拉要有真清单：拿不到就退回「默认相册」（面板自己的兜底）
     void loadAlbumOptions(getState().viewingUid)
       .then((albums) => panel.refreshAlbums(albums))
@@ -109,20 +119,20 @@ export async function render(ctx: PageContext): Promise<void> {
   // 搜索只在顶栏那一个输入框里（页面里不再重复），标签筛选也交给它——
   // 后端的关键词匹配本来就同时命中标题与标签
   const tagRow = h("div.flexline", { style: { marginBottom: "14px" } });
-  ctx.outlet.append(tagRow, gridHost, pagerHost);
+  root.append(tagRow, grid, footer);
 
   const sortChips = () => [
     h("button.chip", {
       type: "button",
       class: query.sort === "new" ? "on" : "",
       text: "最新",
-      on: { click: () => update({ sort: "new", page: null }) },
+      on: { click: () => update({ sort: "new" }) },
     }),
     h("button.chip", {
       type: "button",
       class: query.sort === "hot" ? "on" : "",
       text: "最热",
-      on: { click: () => update({ sort: "hot", page: null }) },
+      on: { click: () => update({ sort: "hot" }) },
     }),
   ];
   tagRow.append(h("span.spacer"), ...sortChips());
@@ -131,23 +141,74 @@ export async function render(ctx: PageContext): Promise<void> {
   const headerSearch = document.querySelector<HTMLInputElement>(".navbar .search input");
   if (headerSearch) headerSearch.value = query.q ?? "";
 
-  async function load(): Promise<void> {
+  const items: ImageItem[] = [];
+  let currentPage = 0;
+  let totalPages = 1;
+  let loading = false;
+  let failed = false;
+
+  function paintFooter(): void {
+    if (loading) {
+      footer.replaceChildren(spinner(), h("span", { text: "正在加载…" }));
+      return;
+    }
+    if (failed) {
+      footer.replaceChildren(
+        h("span", { text: "加载失败" }),
+        h("button.btn.sm", {
+          type: "button",
+          text: "重试",
+          on: { click: () => void loadMore() },
+        }),
+      );
+      return;
+    }
+    if (currentPage >= totalPages) {
+      footer.replaceChildren(h("span", { text: currentPage === 0 ? "" : "没有更多了" }));
+      return;
+    }
+    // 自动加载为主，这个按钮是兜底：观察器不可用、或用户就想手动点一下时用得上
+    footer.replaceChildren(
+      h("button.btn.sm", {
+        type: "button",
+        text: "加载更多",
+        on: { click: () => void loadMore() },
+      }),
+    );
+  }
+
+  /** 取下一页并追加。`reset` 用于排序变化后从头来。 */
+  async function loadMore(reset = false): Promise<void> {
     if (loading) return;
+    if (!reset && currentPage >= totalPages) return;
     loading = true;
-    gridHost.replaceChildren(skeletonGrid(8));
+    failed = false;
+    if (reset) {
+      currentPage = 0;
+      totalPages = 1;
+      items.length = 0;
+      grid.replaceChildren(skeletonGrid(8));
+      footer.replaceChildren();
+    } else {
+      paintFooter();
+    }
+
     try {
       const page = await requestPage<ImageItem>("/plaza", {
         query: {
           q: query.q ?? undefined,
           tag: query.tag ?? undefined,
           sort: query.sort,
-          page: query.page,
-          per_page: 24,
+          page: currentPage + 1,
+          per_page: PER_PAGE,
         },
       });
+      currentPage = page.meta.page;
+      totalPages = Math.max(1, page.meta.total_pages);
 
-      if (page.items.length === 0) {
-        gridHost.replaceChildren(
+      if (reset) grid.replaceChildren();
+      if (currentPage === 1 && page.items.length === 0) {
+        grid.replaceChildren(
           emptyState(
             "🖼",
             query.q || query.tag
@@ -163,58 +224,67 @@ export async function render(ctx: PageContext): Promise<void> {
           ),
         );
       } else {
-        const grid = h("div.grid.igrid", { style: gridColumnsStyle() });
         for (const item of page.items) {
           grid.append(
             imageTile(item, {
               subtitle: `u_${item.owner_uid} · ${relativeTime(item.upload_time)}`,
-              onOpen: (clicked) =>
-                openLightbox(page.items, clicked, { anonymous: !user }),
+              // 预览浮层拿累加后的整份列表：翻到哪就能在浮层里前后翻到哪
+              onOpen: (clicked) => openLightbox(items, clicked, { anonymous: !user }),
             }),
           );
         }
-        gridHost.replaceChildren(grid);
-        // 图片高度不一，排成瀑布流才不会在短图下面留空洞
+        items.push(...page.items);
+        // 新加的这段算跨行数；已有节点的跨行数不会因为追加而改变
         applyMasonry(grid);
       }
-
-      const pager = pagination(page.meta, (next) =>
-        update({ page: next > 1 ? String(next) : null }),
-      );
-      pagerHost.replaceChildren(pager ?? h("span"));
     } catch (err) {
-      gridHost.replaceChildren(
-        emptyState(
-          "⚠",
-          "加载失败，请稍后重试。",
-          h("button.btn", {
-            type: "button",
-            text: "重新加载",
-            on: { click: () => void load() },
-          }),
-        ),
-      );
+      failed = true;
+      if (currentPage === 0) {
+        grid.replaceChildren(
+          emptyState(
+            "⚠",
+            "加载失败，请稍后重试。",
+            h("button.btn", {
+              type: "button",
+              text: "重新加载",
+              on: { click: () => void loadMore(true) },
+            }),
+          ),
+        );
+      }
       toastError(err);
     } finally {
       loading = false;
+      paintFooter();
     }
   }
 
-  refresh = load;
+  loadFirstPage = () => loadMore(true);
 
-  function update(patch: Partial<Record<"q" | "tag" | "sort" | "page", string | number | null>>): void {
-    const next: Record<string, string | number | null> = {
+  // 哨兵：进入视口就取下一页
+  const sentinel = h("div", { style: { height: "1px" } });
+  footer.after(sentinel);
+  if (typeof IntersectionObserver === "function") {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadMore();
+      },
+      { rootMargin: "600px 0px" },
+    );
+    observer.observe(sentinel);
+  }
+
+  function update(patch: Partial<Record<"q" | "tag" | "sort", string | null>>): void {
+    const next: Record<string, string | null> = {
       q: query.q,
       tag: query.tag,
       sort: query.sort,
-      page: query.page,
       ...patch,
     };
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(next)) {
       if (value === null || value === "") continue;
       // 默认值不进 URL，链接才干净
-      if (key === "page" && value === 1) continue;
       if (key === "sort" && value === "new") continue;
       params.set(key, String(value));
     }
@@ -222,5 +292,5 @@ export async function render(ctx: PageContext): Promise<void> {
     navigate(encoded ? `/?${encoded}` : "/");
   }
 
-  await load();
+  await loadMore(true);
 }

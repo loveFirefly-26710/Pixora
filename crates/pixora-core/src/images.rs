@@ -20,6 +20,16 @@ use crate::audit::actions;
 use crate::error::{AppError, Result};
 use crate::AppState;
 
+/// 批量操作的目标范围。`album_id` 为 `None` 表示不限相册（该账号的全部图片）。
+#[derive(Debug, Clone, Copy)]
+pub struct BatchScope {
+    pub album_id: Option<i64>,
+}
+
+/// 按范围批量操作时一次最多涉及多少张：比 id 列表的上限宽松，
+/// 但也不能让一次请求把整库拖进内存。
+const BATCH_SCOPE_LIMIT: i64 = 10_000;
+
 /// 访问者。页面权限判断集中用这个，别在各处 `if user.role == "admin"`。
 #[derive(Debug, Clone)]
 pub enum Viewer {
@@ -317,20 +327,41 @@ impl AppState {
         viewer: &Viewer,
         action: BatchAction,
         ids: &[i64],
+        scope: Option<BatchScope>,
         album_id: Option<i64>,
         tags: Option<Vec<String>>,
         visibility: Option<String>,
     ) -> Result<u64> {
-        if ids.is_empty() {
-            return Err(AppError::bad_request("没有选中任何图片"));
-        }
-        if ids.len() > 1000 {
-            return Err(AppError::bad_request("单次最多操作 1000 张"));
-        }
+        // 目标要么是前端选中的 id 列表，要么是一个范围（整个相册 / 全部图片）。
+        // 范围这条路是为了「整相册一键操作」：几千张图不必先拉到浏览器再发回来，
+        // 也绕开了 id 列表的长度上限。
+        let ids: Vec<i64> = match scope {
+            Some(scope) => {
+                let owner = viewer.user().ok_or(AppError::Unauthorized)?;
+                let resolved = self
+                    .repo
+                    .image_ids_in_scope(owner.id, scope.album_id, BATCH_SCOPE_LIMIT)
+                    .await?;
+                if resolved.is_empty() {
+                    return Ok(0);
+                }
+                resolved
+            }
+            None => {
+                if ids.is_empty() {
+                    return Err(AppError::bad_request("没有选中任何图片"));
+                }
+                if ids.len() > 1000 {
+                    return Err(AppError::bad_request("单次最多操作 1000 张"));
+                }
+                ids.to_vec()
+            }
+        };
+
 
         // 先把可操作的图片筛出来，越权的直接跳过而不是整批失败
         let mut owned: Vec<Image> = Vec::new();
-        for id in ids {
+        for id in &ids {
             if let Some(image) = self.require_touchable_optional(viewer, *id).await? {
                 owned.push(image);
             }

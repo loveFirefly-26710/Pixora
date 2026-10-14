@@ -180,6 +180,20 @@ function renderSidebar(): HTMLElement | null {
   return sidebar;
 }
 
+/**
+ * 把顶栏的真实高度写进 `--nav-h`。
+ *
+ * 粘性元素（侧边栏、相册页的工具栏与相册栏）都按它对齐。写死一个数字不行：
+ * 顶栏在窄屏 49px、宽屏 59px，里面放头像还是「登录」按钮、有没有搜索框
+ * 都会让它变——量出来的才是对的。
+ */
+function syncNavHeight(navbar: HTMLElement): void {
+  const height = Math.round(navbar.getBoundingClientRect().height);
+  if (height > 0) {
+    document.documentElement.style.setProperty("--nav-h", `${height}px`);
+  }
+}
+
 /** 建外壳并返回页面内容挂载点。 */
 export function mountShell(root: HTMLElement): HTMLElement {
   const navbar = renderNavbar();
@@ -191,6 +205,10 @@ export function mountShell(root: HTMLElement): HTMLElement {
   root.replaceChildren(navbar, shell, tabbar);
 
   refs = { shell, navbar, sidebar, tabbar, outlet };
+  syncNavHeight(navbar);
+  window.addEventListener("resize", () => {
+    if (refs) syncNavHeight(refs.navbar);
+  });
   subscribe(() => refreshNav());
   return outlet;
 }
@@ -212,6 +230,8 @@ export function refreshNav(): void {
   const navbar = renderNavbar();
   refs.navbar.replaceWith(navbar);
   refs.navbar = navbar;
+  // 换页时顶栏内容会变（搜索框、按钮），高度跟着量一次
+  syncNavHeight(navbar);
 
   const tabbar = renderTabbar();
   refs.tabbar.replaceWith(tabbar);

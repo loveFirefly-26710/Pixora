@@ -104,8 +104,8 @@
   .sidebar {
     display: block;
     position: sticky;
-    top: 49px;
-    max-height: calc(100vh - 49px);
+    top: var(--nav-h);
+    max-height: calc(100vh - var(--nav-h));
     overflow: auto;
   }
 }
@@ -1753,6 +1753,23 @@ tr.pick {
   align-items: flex-start;
 }
 
+/* 相册页：工具栏与左侧相册栏在往下滚时留在顶栏下面。
+   49px 是顶栏高度，和侧边栏的 sticky 用的是同一个值。 */
+.albums-split .albumlist {
+  position: sticky;
+  top: var(--nav-h);
+  align-self: flex-start;
+  max-height: calc(100vh - var(--nav-h));
+  overflow: auto;
+}
+
+.albums-body .albums-toolbar {
+  position: sticky;
+  top: var(--nav-h);
+  z-index: 6;
+  background: var(--bg);
+}
+
 .albums-body {
   flex: 1;
   min-width: 0;
@@ -1768,10 +1785,15 @@ tr.pick {
     flex-direction: column;
   }
   .albumlist {
+    position: sticky;
+    top: var(--nav-h);
+    z-index: 6;
+    max-height: none;
     width: 100%;
     flex: 0 0 auto;
     border-right: 0;
     border-bottom: 1px solid var(--border);
+    background: var(--surface);
     display: flex;
     align-items: center;
     flex-wrap: nowrap;
