@@ -338,13 +338,25 @@ function createId(index: number): string {
   return `q${Date.now().toString(36)}${index.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-/** 服务端格式白名单优先；拿不到站点信息时退回常见图片扩展名，宁可多收也别把 HEIC 挡在外面。 */
+/** 服务端格式白名单优先；拿不到站点信息时退回常见图片扩展名，宁可多收也别把 HEIC 挡在外面。
+ *  登录后以「我的生效策略」为准——管理员可以按用户单独放宽或收紧格式白名单。 */
 function isLikelyImage(file: File): boolean {
-  const formats = getState().site?.formats ?? [];
+  const formats = getState().user?.limits?.formats ?? getState().site?.formats ?? [];
   const ext = extOf(file.name);
   if (formats.length > 0) return formats.includes(ext);
   if (file.type.startsWith("image/")) return true;
   return ["jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif", "tiff", "tif", "bmp", "svg"].includes(ext);
+}
+
+/** 单批张数上限：登录后按我的生效策略（可能被按用户覆盖），没登录回落到站点全局值。 */
+function effectiveBatchLimit(): number {
+  return getState().user?.limits?.max_batch_size ?? getState().site?.max_batch_size ?? 1000;
+}
+
+/** 单用户并发上限：策略里的值，客户端选的并发数不能超过它。 */
+function effectiveConcurrencyCap(): number {
+  const fallback = CONCURRENCY_OPTIONS[CONCURRENCY_OPTIONS.length - 1];
+  return getState().user?.limits?.max_concurrent_uploads ?? fallback;
 }
 
 class UploadQueue {
@@ -501,7 +513,7 @@ class UploadQueue {
       });
     }
 
-    const limit = getState().site?.max_batch_size ?? 1000;
+    const limit = effectiveBatchLimit();
     if (this.items.length > limit) {
       this.emit({
         kind: "notice",
@@ -568,9 +580,14 @@ class UploadQueue {
 
   setSettings(patch: Partial<StoredUploadSettings>): void {
     const next: StoredUploadSettings = { ...this.settings, ...patch };
-    const concurrency = CONCURRENCY_OPTIONS.includes(next.concurrency as Concurrency)
+    // 管理员可以按用户把并发上限压下来（比如 1）：客户端选的 4 不能越过它。
+    // 结果必须落在 CONCURRENCY_OPTIONS 之内，否则下拉框会显示成空
+    const cap = effectiveConcurrencyCap();
+    const allowed = CONCURRENCY_OPTIONS.filter((value) => value <= cap);
+    const wanted = CONCURRENCY_OPTIONS.includes(next.concurrency as Concurrency)
       ? (next.concurrency as Concurrency)
       : 1;
+    const concurrency = (allowed.includes(wanted) ? wanted : (allowed[allowed.length - 1] ?? 1)) as Concurrency;
     this.settings = {
       albumId: typeof next.albumId === "number" ? next.albumId : null,
       tags: typeof next.tags === "string" ? next.tags : "",

@@ -271,14 +271,7 @@ impl Settings {
 
     pub async fn upload(&self) -> Result<UploadSettings> {
         let formats = match self.raw(keys::UPLOAD_FORMATS).await? {
-            // 归一化会把 jpeg/tif/heif 折叠成 jpg/tiff/heic，清单里因此会出现重复项，
-            // 去重后再返回（界面上的格式 chips 不该重复出现同一个扩展名）
-            Some(value) if !value.trim().is_empty() => dedupe(
-                value
-                    .split(',')
-                    .map(crate::media::normalize_ext)
-                    .filter(|item| crate::media::rule_for_ext(item).is_some()),
-            ),
+            Some(value) if !value.trim().is_empty() => parse_format_list(&value),
             _ => dedupe(crate::media::DEFAULT_ENABLED.iter().map(|item| crate::media::normalize_ext(*item))),
         };
 
@@ -379,6 +372,25 @@ impl Settings {
 fn dedupe(items: impl Iterator<Item = String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     items.filter(|item| seen.insert(item.clone())).collect()
+}
+
+/// 解析逗号分隔的格式白名单：扩展名先归一化（`jpeg`→`jpg`、`tif`→`tiff`），
+/// 丢掉不认识的，再去重。
+///
+/// `jpeg` 折成 `jpg` 这一步不能省：嗅探出来的扩展名只会是 `jpg`，白名单里
+/// 留着 `jpeg` 的话，管理员勾了 JPEG 反而传不上任何 jpg。settings 里的
+/// `upload.formats` 与策略行的 `formats` 共用这一套解释，同一份清单写在
+/// 两处不会算出不同结果。
+pub fn parse_format_list(raw: &str) -> Vec<String> {
+    dedupe(
+        raw.split(',')
+            // 手写的清单常带空格（「jpg, png」），不 trim 的话整项会被当成
+            // 认不出来的扩展名丢掉
+            .map(str::trim)
+            .map(crate::media::normalize_ext)
+            .map(|ext| if ext == "jpeg" { "jpg".to_string() } else { ext })
+            .filter(|item| crate::media::rule_for_ext(item).is_some()),
+    )
 }
 
 /// 直链一级目录的净化：只留字母数字与连字符，长度不超过 32。

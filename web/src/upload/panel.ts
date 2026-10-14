@@ -49,11 +49,13 @@ export interface UploadPanelHandle {
   destroy(): void;
 }
 
-/** 支持哪些格式、单张上限多少——都来自 /site，管理员改白名单这里跟着变。 */
+/** 支持哪些格式、单张上限多少——登录后按「我的生效策略」（管理员可能按用户覆盖过），
+ *  未登录才回落到 /site 的全局值。 */
 function supportedHint(): string {
-  const site = getState().site;
-  const formats = (site?.formats ?? []).map((ext) => ext.toUpperCase());
-  const size = site?.max_file_bytes ? formatBytes(site.max_file_bytes) : "";
+  const limits = getState().user?.limits;
+  const formats = (limits?.formats ?? getState().site?.formats ?? []).map((ext) => ext.toUpperCase());
+  const maxBytes = limits?.max_file_size ?? getState().site?.max_file_bytes;
+  const size = maxBytes ? formatBytes(maxBytes) : "";
   if (formats.length === 0) {
     return size ? `单张最大 ${size}` : "";
   }
@@ -294,6 +296,9 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     h("option", { value: "private", text: "私有" }),
     h("option", { value: "public", text: "公开" }),
   );
+  // 并发上限可能被按用户压下来（策略里的 max_concurrent_uploads）：超出的档位直接禁用，
+  // 免得选了又被队列悄悄改回较小的值
+  const concurrencyCap = getState().user?.limits?.max_concurrent_uploads;
   const concurrencySelect = h(
     "select.f",
     null,
@@ -301,6 +306,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
       h("option", {
         value: String(value),
         text: value === 1 ? "1（逐张，推荐）" : String(value),
+        disabled: concurrencyCap !== undefined && value > concurrencyCap ? true : undefined,
       }),
     ),
   );

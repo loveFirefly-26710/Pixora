@@ -736,8 +736,14 @@ pub struct RateLimitPolicy {
     pub upload_per_day: i64,
     pub upload_bytes_per_day: i64,
     pub max_concurrent_uploads: i64,
+    /// 上传策略的四项：`0`（数值）与空串（格式）都表示「跟随上一层」。
+    /// 解析顺序（见 `pixora_core::uploads::effective_upload_limits`）：
+    /// 单用户覆盖 → 全局策略行 → 系统设置里的站点默认
     pub max_batch_size: i64,
     pub max_file_size: i64,
+    pub max_pixels: i64,
+    /// 逗号分隔的扩展名列表，与 settings 里的 `upload.formats` 同一种写法
+    pub formats: Option<String>,
     pub unlimited: bool,
     pub note: Option<String>,
     pub updated_at: DateTime<Utc>,
@@ -746,7 +752,8 @@ pub struct RateLimitPolicy {
 impl RateLimitPolicy {
     pub const COLUMNS: &'static str = "id, user_id, api_per_minute, api_per_hour, api_read_per_minute, \
          api_burst, upload_per_minute, upload_per_hour, upload_per_day, upload_bytes_per_day, \
-         max_concurrent_uploads, max_batch_size, max_file_size, unlimited, note, updated_at";
+         max_concurrent_uploads, max_batch_size, max_file_size, max_pixels, formats, unlimited, \
+         note, updated_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -763,6 +770,8 @@ impl RateLimitPolicy {
             max_concurrent_uploads: get_i64(row, "max_concurrent_uploads")?,
             max_batch_size: get_i64(row, "max_batch_size")?,
             max_file_size: get_i64(row, "max_file_size")?,
+            max_pixels: get_i64(row, "max_pixels")?,
+            formats: get_opt_str(row, "formats")?,
             unlimited: get_bool(row, "unlimited")?,
             note: get_opt_str(row, "note")?,
             updated_at: get_ts(row, "updated_at")?,
@@ -774,6 +783,9 @@ impl RateLimitPolicy {
     }
 
     /// 全局默认值。管理员和未覆盖用户都从这里起步。
+    ///
+    /// 上传策略的四项（单批张数、单文件上限、像素上限、格式白名单）默认给 0 / 空：
+    /// 它们表示「跟随系统设置里的站点默认」，内置一份数字只会和系统设置打架。
     pub fn defaults() -> Self {
         Self {
             id: 0,
@@ -787,8 +799,10 @@ impl RateLimitPolicy {
             upload_per_day: 2000,
             upload_bytes_per_day: 5 * 1024 * 1024 * 1024,
             max_concurrent_uploads: 4,
-            max_batch_size: 1000,
-            max_file_size: 20 * 1024 * 1024,
+            max_batch_size: 0,
+            max_file_size: 0,
+            max_pixels: 0,
+            formats: None,
             unlimited: false,
             note: None,
             updated_at: now(),

@@ -300,6 +300,33 @@ try {
     if ($viewLinks -lt 1) { Fail "镜像目录树里没有链接" }
     Ok "镜像目录树里建了 $viewLinks 个链接"
 
+    Step "上传策略按用户生效"
+    $adminUid = ((Api GET "/api/v1/me") | ConvertFrom-Json).data.user.uid
+    # 给这个账号挂一份「只允许 jpg」的覆盖：png 立刻被拦，覆盖真的进了解析链
+    Api PUT "/api/v1/admin/ratelimit/users/$adminUid" @(
+        "-H", "Content-Type: application/json", "-d", (JsonBody "policy-jpg" @{ formats = @("jpg") })
+    ) | Out-Null
+    $pngQuoted = $png -replace '\\','/'
+    $blocked = Api POST "/api/v1/upload" @("-F", "file=@$pngQuoted", "-F", "original_name=blocked.png")
+    ExpectJson $blocked { $d.error.code -eq "UNSUPPORTED_FORMAT" } "按用户收紧格式白名单后 png 被拦"
+    $meLimits = Api GET "/api/v1/me"
+    ExpectJson $meLimits { $d.data.user.limits.formats -join "," -eq "jpg" } "/me 的 limits 带生效格式"
+    ExpectJson $meLimits { $d.data.user.limits.max_file_size -gt 0 } "/me 的 limits 带生效单文件上限"
+
+    # 更紧的单文件上限在收流那一步就拦（不是收完再判）
+    Api PUT "/api/v1/admin/ratelimit/users/$adminUid" @(
+        "-H", "Content-Type: application/json",
+        "-d", (JsonBody "policy-small" @{ max_file_size = 10; formats = @("png") })
+    ) | Out-Null
+    $tooBig = Api POST "/api/v1/upload" @("-F", "file=@$pngQuoted", "-F", "original_name=big.png")
+    ExpectJson $tooBig { $d.error.code -eq "FILE_TOO_LARGE" } "按用户收紧单文件上限后收流即拦"
+
+    # 恢复默认：重新跟随站点白名单（这里不再传一张，否则会多出一条图片记录）
+    $siteFormats = ((Api GET "/api/v1/site") | ConvertFrom-Json).data.formats -join ","
+    Api DELETE "/api/v1/admin/ratelimit/users/$adminUid" | Out-Null
+    $restored = Api GET "/api/v1/me"
+    ExpectJson $restored { $d.data.user.limits.formats -join "," -eq $siteFormats } "恢复默认后重新跟随站点白名单"
+
     Step "直链"
     $urlPath = $url.Replace($script:Base, "")
     ExpectStatus "$script:Base$urlPath" 200 "直链返回 200"

@@ -322,6 +322,9 @@ pub async fn user_prefs(state: &AppState, user: &User) -> (bool, bool) {
 pub async fn user_view(state: &Arc<AppState>, user: &User) -> pixora_core::Result<serde_json::Value> {
     let stats = state.repo.user_stats(user.id).await?;
     let limits = state.repo.effective_policy(user).await?;
+    // 上传策略（单文件上限、单批张数、像素上限、格式白名单、并发数）按生效值给：
+    // 客户端的上传队列据此限流，不能再拿 /site 里的全局值当自己的额度
+    let upload = state.effective_upload_limits(user).await?;
     let (login_alert, new_device_guard) = user_prefs(state, user).await;
 
     Ok(serde_json::json!({
@@ -350,8 +353,13 @@ pub async fn user_view(state: &Arc<AppState>, user: &User) -> pixora_core::Resul
             "upload_per_minute": limits.upload_per_minute,
             "upload_per_day": limits.upload_per_day,
             "upload_bytes_per_day": limits.upload_bytes_per_day,
-            "max_file_size": limits.max_file_size,
-            "max_batch_size": limits.max_batch_size,
+            // 下面这些是「生效的上传策略」，可能被单用户覆盖过，
+            // 所以不再等于 /site 里的全局值
+            "max_file_size": upload.max_file_bytes,
+            "max_batch_size": upload.max_batch,
+            "max_pixels": upload.max_pixels,
+            "formats": upload.formats,
+            "max_concurrent_uploads": upload.max_concurrent_uploads,
             "unlimited": limits.unlimited,
         },
     }))
@@ -800,6 +808,149 @@ mod tests {
             second["data"]["id"].as_i64(),
             first["data"]["id"].as_i64(),
             "去重不等于复用图片记录"
+        );
+    }
+
+    /// 上传策略按用户设置并真正生效：站点白名单收紧时全局一致地拦，
+    /// 给某个用户单独放开后只有他能传；单文件上限的覆盖在收流那一步就拦住。
+    #[tokio::test]
+    async fn per_user_upload_policy_governs_the_upload_path() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "policy@example.com", "8403", false).await;
+
+        let plaintext = "px_live_test_policy_token";
+        state
+            .repo
+            .create_api_token(&NewApiToken {
+                user_id: user.id,
+                name: "策略测试".into(),
+                token_hash: pixora_crypto::token::token_hash(plaintext),
+                display: "px_live_policy…".into(),
+                scopes: vec!["upload".into(), "read".into()],
+                expires_at: None,
+            })
+            .await
+            .expect("签发令牌");
+
+        // 站点白名单收紧到不含 png：这个用户先被拦住
+        state
+            .settings
+            .set(pixora_core::settings::keys::UPLOAD_FORMATS, "jpg,gif")
+            .await
+            .expect("站点格式白名单");
+        let blocked = app(state.clone())
+            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .await
+            .expect("发请求");
+        let blocked = body_json(blocked).await;
+        assert_eq!(
+            blocked["error"]["code"], "UNSUPPORTED_FORMAT",
+            "站点白名单不含 png 时应当拦住：{blocked}"
+        );
+
+        // 给这个用户单独放开 png：只有他传得上去
+        state
+            .repo
+            .upsert_user_policy(
+                user.id,
+                &pixora_repo::model::RateLimitPolicy {
+                    formats: Some("png".into()),
+                    ..pixora_repo::model::RateLimitPolicy::defaults()
+                },
+            )
+            .await
+            .expect("写用户覆盖");
+        let allowed = app(state.clone())
+            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .await
+            .expect("发请求");
+        assert_eq!(allowed.status(), StatusCode::OK, "单独放开后应当能传");
+        let allowed = body_json(allowed).await;
+        assert!(allowed["error"].is_null(), "{allowed}");
+
+        // /me 的 limits 要带上这份生效值：客户端队列据此限流，而不是拿站点全局值
+        let me = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/me")
+                    .header("authorization", format!("Bearer {plaintext}"))
+                    .body(Body::empty())
+                    .expect("构造请求"),
+            )
+            .await
+            .expect("发请求");
+        let me = body_json(me).await;
+        let formats = me["data"]["user"]["limits"]["formats"]
+            .as_array()
+            .expect("limits.formats");
+        assert_eq!(
+            formats.iter().filter_map(|item| item.as_str()).collect::<Vec<_>>(),
+            vec!["png"],
+            "生效格式要按用户覆盖给：{me}"
+        );
+
+        // 单文件上限的覆盖：10 字节的用户传 67 字节的 PNG，收流时就该拦。
+        // 覆盖是整行写入，所以每次都带上「允许 png」——否则上一个格式覆盖被清掉，
+        // 断言失败的原因会变成格式而不是尺寸
+        let with_png = |policy: pixora_repo::model::RateLimitPolicy| pixora_repo::model::RateLimitPolicy {
+            formats: Some("png".into()),
+            ..policy
+        };
+        state
+            .repo
+            .upsert_user_policy(
+                user.id,
+                &with_png(pixora_repo::model::RateLimitPolicy {
+                    max_file_size: 10,
+                    ..pixora_repo::model::RateLimitPolicy::defaults()
+                }),
+            )
+            .await
+            .expect("写用户覆盖");
+        let too_big = app(state.clone())
+            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .await
+            .expect("发请求");
+        let too_big = body_json(too_big).await;
+        assert_eq!(
+            too_big["error"]["code"], "FILE_TOO_LARGE",
+            "更紧的单文件上限必须生效：{too_big}"
+        );
+
+        // 像素上限同理：站点调到 1 万像素以下后，1x1 仍然合法；上限以下不该误伤
+        state
+            .repo
+            .upsert_user_policy(
+                user.id,
+                &with_png(pixora_repo::model::RateLimitPolicy {
+                    max_pixels: 1,
+                    ..pixora_repo::model::RateLimitPolicy::defaults()
+                }),
+            )
+            .await
+            .expect("写用户覆盖");
+        let pixels = app(state.clone())
+            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .await
+            .expect("发请求");
+        let pixels = body_json(pixels).await;
+        assert!(pixels["error"].is_null(), "1x1 正好在上限内不该被拦：{pixels}");
+
+        // 把用户覆盖整行删掉：立刻回到站点白名单（不含 png），又被拦住
+        state
+            .repo
+            .delete_user_policy(user.id)
+            .await
+            .expect("删用户覆盖");
+        let restored = app(state.clone())
+            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .await
+            .expect("发请求");
+        let restored = body_json(restored).await;
+        assert_eq!(
+            restored["error"]["code"], "UNSUPPORTED_FORMAT",
+            "恢复默认后要重新跟随站点白名单：{restored}"
         );
     }
 }

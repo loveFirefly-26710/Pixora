@@ -134,6 +134,9 @@ impl AppState {
         let actions = self.repo.list_user_actions(id, 50).await?;
         let policy = self.repo.effective_policy(&user).await?;
         let custom = self.repo.user_policy(id).await?;
+        // 上传策略按生效值展示：用户卡上填了 0（跟随）也不该让详情页显示 0，
+        // 管理员要看到的是这个人当下真正被允许传多大的文件、什么格式
+        let upload = self.effective_upload_limits(&user).await?;
 
         Ok(AdminUserDetail {
             user: AdminUserRow {
@@ -189,11 +192,35 @@ impl AppState {
                     .as_ref()
                     .map(|row| row.upload_bytes_per_day)
                     .unwrap_or(policy.upload_bytes_per_day),
-                max_concurrent_uploads: policy.max_concurrent_uploads,
-                max_batch_size: policy.max_batch_size,
-                max_file_size: policy.max_file_size,
+                max_concurrent_uploads: upload.max_concurrent_uploads,
+                max_batch_size: upload.max_batch,
+                max_file_size: upload.max_file_bytes,
+                max_pixels: upload.max_pixels,
+                formats: upload.formats,
                 note: custom.as_ref().and_then(|row| row.note.clone()),
             },
+            policy_override: custom.as_ref().map(|row| PolicyRow {
+                unlimited: row.unlimited,
+                custom: true,
+                api_per_minute: row.api_per_minute,
+                api_per_hour: row.api_per_hour,
+                api_read_per_minute: row.api_read_per_minute,
+                api_burst: row.api_burst,
+                upload_per_minute: row.upload_per_minute,
+                upload_per_hour: row.upload_per_hour,
+                upload_per_day: row.upload_per_day,
+                upload_bytes_per_day: row.upload_bytes_per_day,
+                max_concurrent_uploads: row.max_concurrent_uploads,
+                max_batch_size: row.max_batch_size,
+                max_file_size: row.max_file_size,
+                max_pixels: row.max_pixels,
+                formats: row
+                    .formats
+                    .as_deref()
+                    .map(crate::settings::parse_format_list)
+                    .unwrap_or_default(),
+                note: row.note.clone(),
+            }),
         })
     }
 
@@ -661,9 +688,13 @@ pub struct PolicyRow {
     pub upload_per_hour: i64,
     pub upload_per_day: i64,
     pub upload_bytes_per_day: i64,
+    /// 下面五项是「生效的上传策略」：单用户覆盖 → 全局默认 → 系统设置，
+    /// 所以它们可能不等于系统设置里的全局值
     pub max_concurrent_uploads: i64,
     pub max_batch_size: i64,
     pub max_file_size: i64,
+    pub max_pixels: i64,
+    pub formats: Vec<String>,
     pub note: Option<String>,
 }
 
@@ -675,7 +706,12 @@ pub struct AdminUserDetail {
     pub totp_enabled: bool,
     pub email_verified: bool,
     pub actions: Vec<UserActionRow>,
+    /// 生效值（三层解析后的结果），只用于展示
     pub policy: PolicyRow,
+    /// 该用户自己的覆盖行（未解析的原始值，`0 / 空` 表示跟随）。
+    /// 编辑界面回传时要带这一份而不是上面的生效值：生效值是解析结果，
+    /// 写回去会把「跟随」固化成「等于当前全局值」的覆盖
+    pub policy_override: Option<PolicyRow>,
 }
 
 #[cfg(test)]

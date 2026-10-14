@@ -87,6 +87,79 @@ pub struct HashCheckOutcome {
     pub missing: Vec<String>,
 }
 
+/// 生效的上传策略（某个用户的）。
+///
+/// 解析顺序：**单用户覆盖 → 全局策略行 → 系统设置里的站点默认**。
+/// 三项数值里 `0`、格式里的空串都表示「跟随上一层」——用户卡不填就跟随
+/// 全局默认，全局默认不填就跟随系统设置，所以管理员改系统设置时，标了
+/// 「跟随」的人会立刻跟着变，标了自定义的不受影响。界面展示的是解析后的
+/// 生效值，不会让人看到 0。
+#[derive(Debug, Clone)]
+pub struct EffectiveUploadLimits {
+    /// 单文件大小上限：同时是收 multipart 流的截断阈值
+    pub max_file_bytes: i64,
+    /// 单批最大张数：客户端队列据此限流
+    pub max_batch: i64,
+    /// 像素上限：解压炸弹防线
+    pub max_pixels: i64,
+    /// 允许的图片格式（扩展名，已归一化）
+    pub formats: Vec<String>,
+    /// 单用户并发上传数：客户端队列的上限
+    pub max_concurrent_uploads: i64,
+}
+
+impl EffectiveUploadLimits {
+    /// 三层解析的落点。管理页要一次算一页用户的生效值，逐行回查数据库
+    /// 会把三层解析拆成 N 次查询，所以解析逻辑收在这里，谁都能直接用。
+    pub fn resolve(
+        site: &crate::settings::UploadSettings,
+        global: &pixora_repo::model::RateLimitPolicy,
+        own: Option<&pixora_repo::model::RateLimitPolicy>,
+    ) -> Self {
+        // 上层优先：用户覆盖在前，全局默认殿后
+        let layers = [own, Some(global)];
+
+        // 第一个非 0 的值生效；都没有就用站点默认
+        let pick = |get: fn(&pixora_repo::model::RateLimitPolicy) -> i64, fallback: i64| {
+            layers
+                .iter()
+                .flatten()
+                .map(|policy| get(policy))
+                .find(|value| *value > 0)
+                .unwrap_or(fallback)
+        };
+
+        let formats = layers
+            .iter()
+            .flatten()
+            .filter_map(|policy| policy.formats.as_deref())
+            .map(crate::settings::parse_format_list)
+            .find(|list| !list.is_empty())
+            .unwrap_or_else(|| site.formats.clone());
+
+        Self {
+            max_file_bytes: pick(|policy| policy.max_file_size, site.max_file_bytes),
+            max_batch: pick(|policy| policy.max_batch_size, site.max_batch),
+            max_pixels: pick(|policy| policy.max_pixels, site.max_pixels),
+            formats,
+            max_concurrent_uploads: pick(
+                |policy| policy.max_concurrent_uploads,
+                pixora_repo::model::RateLimitPolicy::defaults().max_concurrent_uploads,
+            ),
+        }
+    }
+}
+
+impl AppState {
+    /// 解析某个用户生效的上传策略。
+    pub async fn effective_upload_limits(&self, user: &User) -> Result<EffectiveUploadLimits> {
+        let site = self.settings.upload().await?;
+        let global = self.repo.global_policy().await?;
+        let own = self.repo.user_policy(user.id).await?;
+        Ok(EffectiveUploadLimits::resolve(&site, &global, own.as_ref()))
+    }
+}
+
 impl AppState {
     /// 批量预检：客户端一次发上千个哈希，服务端只回哪些已存在。
     ///
@@ -134,6 +207,9 @@ impl AppState {
 
         let upload_settings = self.settings.upload().await?;
         let policy = self.repo.effective_policy(user).await?;
+        // 单文件上限、像素上限、格式白名单按「生效的上传策略」判：
+        // 单用户覆盖优先，没覆盖才落到全局默认与系统设置
+        let limits = self.effective_upload_limits(user).await?;
 
         // 背压：服务端队列深度超阈值就拒，客户端按 Retry-After 退避
         let depth = self.repo.queue_depth().await?;
@@ -143,9 +219,7 @@ impl AppState {
 
         // 先把字节落到临时文件：大小上限在流的过程中就能判，不必等收完
         let temp = TempUpload::begin(&self.storage.local_root()).await?;
-        let collected = temp
-            .write_all(reader, upload_settings.max_file_bytes)
-            .await?;
+        let collected = temp.write_all(reader, limits.max_file_bytes).await?;
 
         if collected.size == 0 {
             return Err(AppError::InvalidImage("文件为空".into()));
@@ -157,7 +231,7 @@ impl AppState {
         let ext = sniffed.ext.to_string();
         let normalized_ext = media::normalize_ext(&ext);
         let declared_ext = media::normalize_ext(&media::ext_from_name(&input.original_name));
-        if !upload_settings.formats.contains(&normalized_ext) {
+        if !limits.formats.contains(&normalized_ext) {
             return Err(AppError::UnsupportedFormat(ext.clone()));
         }
         // 扩展名与真实格式不符时以真实格式为准（有人把 .png 改成 .jpg）
@@ -173,7 +247,7 @@ impl AppState {
         let (width, height) = media::dimensions(&collected.metadata_bytes(), sniffed.mime)
             .unwrap_or((0, 0));
         if width > 0 && height > 0 {
-            media::check_pixels(width, height, upload_settings.max_pixels as u64)?;
+            media::check_pixels(width, height, limits.max_pixels as u64)?;
         }
 
         // 配额与限流：都在拿到真实大小之后判
@@ -707,6 +781,20 @@ pub async fn purge_stale_temp_files(data_root: &std::path::Path, older_than_seco
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixora_repo::model::RateLimitPolicy;
+
+    /// 站点默认（系统设置那一层）
+    fn site_settings() -> crate::settings::UploadSettings {
+        crate::settings::UploadSettings {
+            max_file_bytes: 100 * 1024 * 1024,
+            max_batch: 1000,
+            max_pixels: 80_000_000,
+            queue_depth: 500,
+            formats: vec!["jpg".into(), "png".into()],
+            thumb_client: true,
+            thumb_server_fallback: false,
+        }
+    }
 
     #[test]
     fn input_visibility_normalizes() {
@@ -716,5 +804,56 @@ mod tests {
         assert_eq!(input.normalized_visibility(), "public");
         input.visibility = "whatever".into();
         assert_eq!(input.normalized_visibility(), "private", "非法值按私有处理");
+    }
+
+    /// 三层解析：单用户覆盖 → 全局策略行 → 系统设置；0 与空格式串表示「跟随」。
+    #[test]
+    fn effective_limits_resolve_user_then_global_then_site() {
+        let site = site_settings();
+        // 全局策略行什么也没覆盖（0 / 空）：全部落到系统设置
+        let global = RateLimitPolicy::defaults();
+        let none = EffectiveUploadLimits::resolve(&site, &global, None);
+        assert_eq!(none.max_file_bytes, site.max_file_bytes);
+        assert_eq!(none.max_batch, site.max_batch);
+        assert_eq!(none.max_pixels, site.max_pixels);
+        assert_eq!(none.formats, site.formats);
+
+        // 全局策略行设了单文件上限：没被单独覆盖的用户跟着它走
+        let global = RateLimitPolicy {
+            max_file_size: 30 * 1024 * 1024,
+            ..RateLimitPolicy::defaults()
+        };
+        let inherited = EffectiveUploadLimits::resolve(&site, &global, None);
+        assert_eq!(inherited.max_file_bytes, 30 * 1024 * 1024);
+        assert_eq!(inherited.max_pixels, site.max_pixels, "没设的字段继续跟随系统设置");
+
+        // 用户覆盖优先；他只设了格式，其它字段继续按全局与系统设置解析
+        let own = RateLimitPolicy {
+            formats: Some("webp, jpeg".into()),
+            ..RateLimitPolicy::defaults()
+        };
+        let resolved = EffectiveUploadLimits::resolve(&site, &global, Some(&own));
+        assert_eq!(resolved.max_file_bytes, 30 * 1024 * 1024);
+        assert_eq!(
+            resolved.formats,
+            vec!["webp".to_string(), "jpg".to_string()],
+            "jpeg 要归一化成 jpg"
+        );
+
+        // 像素上限只认第一个非 0 的值：用户设了就轮不到全局
+        let own = RateLimitPolicy {
+            max_pixels: 4_000_000,
+            ..RateLimitPolicy::defaults()
+        };
+        let resolved = EffectiveUploadLimits::resolve(&site, &global, Some(&own));
+        assert_eq!(resolved.max_pixels, 4_000_000);
+
+        // 全是空值时格式回落到系统设置；认不出来的扩展名会被丢掉
+        let own = RateLimitPolicy {
+            formats: Some("webp, not-a-format".into()),
+            ..RateLimitPolicy::defaults()
+        };
+        let resolved = EffectiveUploadLimits::resolve(&site, &global, Some(&own));
+        assert_eq!(resolved.formats, vec!["webp".to_string()]);
     }
 }
