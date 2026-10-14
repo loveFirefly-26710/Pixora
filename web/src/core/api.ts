@@ -162,8 +162,10 @@ function xhrSend(
     const xhr = new XMLHttpRequest();
     xhr.open(options.method ?? "POST", url, true);
     xhr.withCredentials = true;
-    const csrf = currentCsrfToken();
-    if (csrf) xhr.setRequestHeader("X-CSRF-Token", csrf);
+    // CSRF 请求头只能由 request() 统一注入一次。这里以前也设了一遍，
+    // 结果是同一个头被设置两次——XHR 的 setRequestHeader 遇到重名会**拼接**
+    // 而不是覆盖（「TOKEN, TOKEN」），服务端拿到一个长度翻倍的值，
+    // 双提交比对必然失败。上传走的就是这条 XHR 路径，症状是并发上传时一片 403。
     for (const [key, value] of Object.entries(options.headers ?? {})) {
       xhr.setRequestHeader(key, value);
     }
