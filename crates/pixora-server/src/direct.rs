@@ -24,7 +24,7 @@ use axum::response::{IntoResponse, Response};
 use pixora_core::{AppError, AppState};
 use pixora_repo::model::storage_kind;
 
-use crate::http::{error_response, AppResponse};
+use crate::http::error_response;
 
 /// 处理 `/{prefix}/{file}`。
 ///
@@ -238,22 +238,3 @@ fn etag_header(sha256: &str) -> HeaderValue {
     HeaderValue::from_str(&format!("\"{sha256}\"")).unwrap_or(HeaderValue::from_static("\"0\""))
 }
 
-/// 健康检查。给容器编排与反向代理用。
-pub async fn healthz(State(state): State<Arc<AppState>>) -> Response {
-    let db_ok = state.repo.db().ping().await.is_ok();
-    let uptime = (chrono::Utc::now() - state.started_at).num_seconds().max(0);
-    let body = serde_json::json!({
-        "status": if db_ok { "ok" } else { "degraded" },
-        "db": if db_ok { "ok" } else { "error" },
-        "uptime_seconds": uptime,
-    });
-    if db_ok {
-        AppResponse::ok(body)
-    } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({ "status": "degraded", "db": "error" })),
-        )
-            .into_response()
-    }
-}

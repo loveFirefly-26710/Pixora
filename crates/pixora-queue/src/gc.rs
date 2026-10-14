@@ -137,15 +137,3 @@ pub async fn requeue_stale_jobs(state: &Arc<AppState>) -> pixora_core::Result<u6
     let older_than = Utc::now() - chrono::Duration::minutes(30);
     Ok(state.repo.requeue_stale(older_than).await?)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn grace_period_has_a_floor() {
-        // 宽限期不允许小于 5 分钟：太小会把正在上传的文件当垃圾
-        let minutes: i64 = 1;
-        assert_eq!(minutes.max(5), 5);
-    }
-}

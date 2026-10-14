@@ -116,7 +116,8 @@ struct SentDocument {
 struct TelegramDocument {
     file_id: String,
     file_size: Option<u64>,
-    mime_type: Option<String>,
+    // 响应里还有 mime_type 等字段，驱动用不上：最终 MIME 由服务端嗅探决定，
+    // 不采信远端返回的声明。serde 默认忽略未知字段，所以不声明即可。
 }
 
 #[derive(Debug, Deserialize)]
