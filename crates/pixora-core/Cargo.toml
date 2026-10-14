@@ -1,0 +1,31 @@
+[package]
+name = "pixora-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pixora 领域模型与业务服务"
+
+[dependencies]
+pixora-crypto.workspace = true
+pixora-repo.workspace = true
+pixora-storage.workspace = true
+pixora-mail.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures-util.workspace = true
+tokio-util.workspace = true
+image.workspace = true
+governor.workspace = true
+ipnet.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true

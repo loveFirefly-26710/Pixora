@@ -1,0 +1,70 @@
+# Pixora 反向代理配置。
+#
+# 三件事交给 Caddy：
+#   1. TLS 证书自动申请与续期（不占应用进程的内存与文件句柄）；
+#   2. 上传路径的体积上限与长超时；
+#   3. 压缩与安全响应头。
+#
+# 关于「让 Caddy 直接发文件」：应用支持 X-Accel-Redirect（见 direct.rs），
+# 但 Caddy 没有 nginx `internal` 的直接等价物——把 CAS 目录直接暴露成一个
+# 公开路径会让「私有图片不许直接访问」这条判断被绕过（判断在应用里做）。
+# 所以这里默认让请求经过应用流式回传；如果确实要零拷贝，两种可行做法：
+#   - 用 nginx（它有 internal，天然只允许应用内部跳转）；
+#   - 或者在 Caddy 里用 `@from_app remote_ip <docker 网段>` 限定来源，
+#     把 file_server 只对容器内网开放。
+# 默认不这么做：少一个配置项就少一处被配错的机会。
+
+{
+	admin off
+	log {
+		output stdout
+		format console
+	}
+}
+
+{$PIXORA_DOMAIN} {
+	encode zstd gzip
+
+	# 上传与 API：体积上限略大于应用的单文件上限（默认 20MiB）
+	@upload path /api/v1/upload /upload /api/v1/blobs/exists
+	handle @upload {
+		request_body {
+			max_size 64MB
+		}
+		reverse_proxy pixora:8080 {
+			# 上传可能较慢，宽限到 5 分钟（应用自己的超时是 120 秒，
+			# 这里留足余量，避免代理先掐断而应用还在写盘）
+			transport http {
+				read_timeout 300s
+			}
+		}
+	}
+
+	# 直链与静态资源：给长缓存，交给浏览器与 CDN。应用已经设了
+	# immutable 的 Cache-Control，这里不重复覆盖。
+	@assets path /main.js /main.css /favicon.svg /manifest.webmanifest /workers/*
+	handle @assets {
+		header Cache-Control "public, max-age=3600"
+		reverse_proxy pixora:8080
+	}
+
+	# 其余全部走应用（含前端路由与 SPA 回落）
+	handle {
+		reverse_proxy pixora:8080
+	}
+
+	# 安全响应头。CSP 写得比较紧：前端不加载任何外部资源，
+	# 所以既没有 CDN 也没有内联脚本的例外。
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "SAMEORIGIN"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

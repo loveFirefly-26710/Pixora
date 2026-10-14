@@ -1,0 +1,101 @@
+# Pixora 单机部署。
+#
+# 三个服务的内存上限加起来 376M（应用 128 + 数据库 200 + Caddy 48），
+# 给系统留了余量，整栈压在 500MB 预算之内。
+#
+# 用法：
+#   1. 复制 .env.example 为 .env，填好 POSTGRES_PASSWORD 与 PIXORA_MASTER_KEY
+#   2. docker compose up -d
+#   3. 打开 https://你的域名/install 走安装向导
+#
+# 想更省内存就用 SQLite：把 db 服务与 depends_on 去掉，
+# 环境变量改成 PIXORA_DB_DRIVER=sqlite / PIXORA_DB_DSN=/data/pixora.db，
+# 整栈可以压到 80MB 以内。
+
+services:
+  pixora:
+    image: pixora:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      PIXORA_DB_DRIVER: ${PIXORA_DB_DRIVER:-postgres}
+      PIXORA_DB_DSN: ${PIXORA_DB_DSN:-postgres://pixora:${POSTGRES_PASSWORD}@db:5432/pixora}
+      PIXORA_DATA_DIR: /data
+      # 主密钥：用于加密存储后端凭据与 SMTP 密码。生产环境必须显式注入，
+      # 换掉它等于让已加密的凭据全部失效（要重新填一遍）。
+      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?必须设置 PIXORA_MASTER_KEY}
+      # 反向代理后面必须显式设置，否则直链地址会变成容器内网地址
+      PIXORA_BASE_URL: ${PIXORA_BASE_URL:-}
+      # 只信最靠近服务端的一层代理，防止客户端伪造 X-Forwarded-For 绕过 IP 黑名单
+      PIXORA_TRUST_PROXY: "1"
+      # 想让反向代理直接发文件（零拷贝）时打开，并同步配置 Caddyfile 的
+      # 内部路径与来源限制；默认关闭是因为 Caddy 没有 nginx internal 的等价物，
+      # 直接把 CAS 目录暴露成公开路径会绕过私有图片的访问判断。
+      # PIXORA_ACCEL_PREFIX: /data-files
+      PIXORA_WORKERS: ${PIXORA_WORKERS:-4}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./data:/data
+    expose:
+      - "8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { memory: 128M }
+        reservations: { memory: 64M }
+    healthcheck:
+      test: ["CMD", "/pixora", "--health-probe"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command: >
+      postgres -c shared_buffers=64MB -c work_mem=4MB
+               -c max_connections=50 -c effective_cache_size=128MB
+    environment:
+      POSTGRES_DB: pixora
+      POSTGRES_USER: pixora
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pixora -d pixora"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits: { memory: 200M }
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?必须设置域名，Caddy 用它申请证书}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 只读挂载数据目录：Caddy 靠 X-Accel-Redirect 直接发文件
+      - ./data:/srv/data:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - pixora
+    deploy:
+      resources:
+        limits: { memory: 48M }
+
+volumes:
+  caddy_data:
+  caddy_config:

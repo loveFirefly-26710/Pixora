@@ -1,0 +1,26 @@
+# 行尾约定。
+#
+# Windows 上 clone 出来的 .sh 若是 CRLF，bash 会报「bad interpreter」；
+# Caddyfile / Dockerfile / .sql 同理（脚本与配置对行尾敏感）。
+# 源码统一 LF，仓库里存的就是唯一形态，省掉每次提交的一堆
+# "LF will be replaced by CRLF" 噪音。
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.sql text eol=lf
+*.rs text eol=lf
+*.ts text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+
+Dockerfile text eol=lf
+Caddyfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# 二进制产物不改行尾
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary
+*.woff2 binary

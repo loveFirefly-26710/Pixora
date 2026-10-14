@@ -1,0 +1,17 @@
+[package]
+name = "pixora-mail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pixora 的 SMTP 客户端与邮件模板渲染"
+
+[dependencies]
+pixora-crypto.workspace = true
+
+lettre.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+chrono.workspace = true

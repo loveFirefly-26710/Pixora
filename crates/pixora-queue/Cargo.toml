@@ -1,0 +1,28 @@
+[package]
+name = "pixora-queue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pixora 进程内有界队列与 worker（上传、Blob GC、邮件重试、缩略图兜底）"
+
+[dependencies]
+pixora-core.workspace = true
+pixora-repo.workspace = true
+pixora-storage.workspace = true
+pixora-mail.workspace = true
+pixora-crypto.workspace = true
+
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures-util.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true

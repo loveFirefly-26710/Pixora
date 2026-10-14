@@ -1,0 +1,49 @@
+[package]
+name = "pixora-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pixora 单二进制入口：路由、中间件、handler、静态资源"
+
+[features]
+default = ["embed-web"]
+# 把 web/dist 打进二进制；关掉后从 PIXORA_WEB_DIR 读盘（前端联调更方便）
+embed-web = []
+
+[dependencies]
+pixora-core.workspace = true
+pixora-repo.workspace = true
+pixora-storage.workspace = true
+pixora-mail.workspace = true
+pixora-queue.workspace = true
+pixora-crypto.workspace = true
+
+axum.workspace = true
+axum-extra.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+mimalloc.workspace = true
+rust-embed.workspace = true
+ipnet.workspace = true
+percent-encoding.workspace = true
+sqlx.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true
