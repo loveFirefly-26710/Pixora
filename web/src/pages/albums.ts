@@ -28,7 +28,15 @@ import { toastError, toastOk, toastWithCode } from "../core/toast";
 import type { AdminUserRow, AlbumList, ImageItem } from "../core/types";
 import { applyMasonry } from "../ui/masonry";
 import { userViewBanner } from "../ui/shell";
-import { emptyState, imageTile, pageHead, pagination, progressBar, qtip, skeletonGrid } from "../ui/widgets";
+import {
+  emptyState,
+  imageTile,
+  pageHead,
+  progressBar,
+  qtip,
+  skeletonGrid,
+  spinner,
+} from "../ui/widgets";
 
 type SortKey = "new" | "size" | "name";
 
@@ -100,10 +108,34 @@ export async function render(ctx: PageContext): Promise<void> {
   // 的高度范围内移动，而父容器就只有这一条工具栏那么高，等于没粘住）
   const toolbarHost = h("div.albums-toolbar");
   const listHost = h("div");
-  const pagerHost = h("div");
+  // 页脚：状态文字/按钮居中，往下就是无限滚动的哨兵
+  const pagerHost = h("div.albums-more", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: "8px",
+      padding: "18px 0 6px",
+      color: "var(--muted)",
+      fontSize: "12.5px",
+    },
+  });
   const selbar = h("div.selbar");
   const body = h("div.albums-body", null, toolbarHost, listHost, pagerHost);
   root.append(headHost, h("div.albums-split", null, sideHost, body), selbar);
+
+  // 无限滚动的哨兵：它进入视口就取下一页（提前 600px 预取，滑到底不用等）
+  const sentinel = h("div", { style: { height: "1px" } });
+  pagerHost.after(sentinel);
+  if (typeof IntersectionObserver === "function") {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadMore();
+      },
+      { rootMargin: "600px 0px" },
+    );
+    observer.observe(sentinel);
+  }
   mount(
     sideHost,
     ...Array.from({ length: 4 }, () => h("div.skel", { style: { height: "30px", marginBottom: "8px" } })),
@@ -196,7 +228,7 @@ export async function render(ctx: PageContext): Promise<void> {
     h("button.btn.sm", { type: "button", text: "复制直链", on: { click: () => void batchCopy() } }),
     h("button.btn.sm.dgr", { type: "button", text: "删除", on: { click: () => void batchDelete() } }),
     h("span.spacer"),
-    h("button.btn.sm.gho", { type: "button", text: "全选本页", on: { click: () => selectPage() } }),
+    h("button.btn.sm.gho", { type: "button", text: "全选已加载", on: { click: () => selectPage() } }),
     h("button.btn.sm.gho", { type: "button", text: "取消选择", on: { click: () => cancelSelection() } }),
   );
 
@@ -206,7 +238,7 @@ export async function render(ctx: PageContext): Promise<void> {
     null,
     narrowCount,
     h("span.spacer"),
-    h("button.chip", { type: "button", text: "全选本页", on: { click: () => selectPage() } }),
+    h("button.chip", { type: "button", text: "全选已加载", on: { click: () => selectPage() } }),
     h("button.chip", { type: "button", text: "取消", on: { click: () => cancelSelection() } }),
   );
 
@@ -292,6 +324,9 @@ export async function render(ctx: PageContext): Promise<void> {
       }
       if (options.append) {
         state.items = [...state.items, ...result.items];
+        // 追加也要推进「当前页」：不推进的话下一轮还会再取同一页，
+        // 表现是同一批图被反复追加（列表越滑越长，件件重复）
+        state.page = page;
       } else if (options.prepend) {
         state.items = [...result.items, ...state.items];
         state.offset = (page - 1) * perPage;
@@ -303,6 +338,13 @@ export async function render(ctx: PageContext): Promise<void> {
       renderList();
       renderPager(result.meta.page);
     } catch (err) {
+      if (options.append) {
+        // 追加失败只影响这一页：列表留着，页脚给「重试」
+        loadMoreFailed = true;
+        renderPager(state.page);
+        toastError(err);
+        return;
+      }
       renderError(err);
     }
   }
@@ -321,12 +363,45 @@ export async function render(ctx: PageContext): Promise<void> {
     pagerHost.replaceChildren();
   }
 
-  function renderPager(page: number): void {
-    const widget = pagination(
-      { page, total_pages: state.totalPages, total: state.total },
-      (next) => void loadImages(next),
+  let loadingMore = false;
+  let loadMoreFailed = false;
+
+  /** 底部状态：正在加载 / 加载失败可重试 / 没有更多了 / 手动加载更多的兜底按钮。 */
+  function renderPager(_page: number): void {
+    if (loadingMore) {
+      pagerHost.replaceChildren(spinner(), h("span", { text: "正在加载…" }));
+      return;
+    }
+    if (loadMoreFailed) {
+      pagerHost.replaceChildren(
+        h("span", { text: "加载失败" }),
+        h("button.btn.sm", { type: "button", text: "重试", on: { click: () => void loadMore() } }),
+      );
+      return;
+    }
+    if (state.page >= state.totalPages) {
+      pagerHost.replaceChildren(h("span", { text: state.page === 0 ? "" : "没有更多了" }));
+      return;
+    }
+    pagerHost.replaceChildren(
+      h("button.btn.sm", { type: "button", text: "加载更多", on: { click: () => void loadMore() } }),
     );
-    pagerHost.replaceChildren(...(widget ? [widget] : []));
+  }
+
+  /** 往下滑到底就取下一页：与广场同一套做法（提前 600px 预取）。 */
+  async function loadMore(): Promise<void> {
+    if (loadingMore || state.page >= state.totalPages) return;
+    loadingMore = true;
+    loadMoreFailed = false;
+    renderPager(state.page);
+    try {
+      await loadImages(state.page + 1, { append: true });
+    } finally {
+      loadingMore = false;
+      // 收尾一定要重画页脚：加载中那一帧是 loadImages 里画的，
+      // 只把标志位改回来、不重画的话，页脚会一直停在「正在加载…」
+      renderPager(state.page);
+    }
   }
 
   // ---------- 相册侧栏 ----------
@@ -459,7 +534,7 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   function renderTable(): void {
-    selectAllRef = h("input", { type: "checkbox", "aria-label": "全选本页" });
+    selectAllRef = h("input", { type: "checkbox", "aria-label": "全选已加载的图片" });
     selectAllRef.addEventListener("change", () => {
       if (selectAllRef?.checked) selectPage();
       else clearPageSelection();
@@ -579,13 +654,9 @@ export async function render(ctx: PageContext): Promise<void> {
     return state.items.findIndex((item) => item.id === id);
   }
 
-  /** 当前页（per_page 切片）的项，用于「全选本页」与表头半选判定。 */
+  /** 已经加载出来的项（无限滚动下就是列表里现有的这些），用于全选与表头半选判定。 */
   function pageItems(): ImageItem[] {
-    const start = (state.page - 1) * PER_PAGE;
-    return state.items.filter((_, index) => {
-      const absolute = state.offset + index;
-      return absolute >= start && absolute < start + PER_PAGE;
-    });
+    return state.items;
   }
 
   function toggleSelect(id: number, options: { anchor?: boolean } = {}): void {
@@ -804,7 +875,8 @@ export async function render(ctx: PageContext): Promise<void> {
   async function afterBatch(message: string): Promise<void> {
     toastOk(message);
     cancelSelection();
-    await Promise.all([loadImages(state.page), loadAlbums()]);
+    // 累加出来的列表不能只刷「最后一页」：从第一页重新拉一遍
+    await Promise.all([loadImages(1), loadAlbums()]);
   }
 
   async function batchTag(): Promise<void> {
@@ -915,7 +987,7 @@ export async function render(ctx: PageContext): Promise<void> {
       await request(`/images/${item.id}`, { method: "DELETE", query: { uid: viewingUid ?? undefined } });
       toastOk("已删除 1 张图片");
       state.selected.delete(item.id);
-      await Promise.all([loadImages(state.page), loadAlbums()]);
+      await Promise.all([loadImages(1), loadAlbums()]);
     } catch (err) {
       toastError(err);
     }
