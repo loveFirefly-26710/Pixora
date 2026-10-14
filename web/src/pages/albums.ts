@@ -1,0 +1,1277 @@
+/**
+ * 我的相册。
+ *
+ * 两种视图（网格 / 列表）共用一套选择模型：
+ *   左键单击打开预览浮层（不跳页），Shift 按范围连选，Ctrl 离散多选，
+ *   移动端长按 500ms 进多选模式后逐张点选，Esc 关浮层或取消选择。
+ *
+ * 选择状态放在页面级对象里，DOM 只做增量同步（切 class / 改 checkbox）——
+ * 一页几十个 tile，每选一张就重建整个网格会让滚动位置和浮层都抖。
+ */
+
+import { ApiError, request, requestPage } from "../core/api";
+import { copyText, debounce, h, mount } from "../core/dom";
+import {
+  formatBytes,
+  formatDateTime,
+  formatDimensions,
+  formatNumber,
+  formatQuota,
+  formatShortDateTime,
+  shortHash,
+} from "../core/format";
+import { confirmDanger, openModal, promptDialog } from "../core/modal";
+import { navigate, type PageContext } from "../core/router";
+import { getState, setViewingUid } from "../core/state";
+import { loadViewPreference, saveViewPreference } from "../core/store";
+import { toast, toastError, toastOk, toastWithCode } from "../core/toast";
+import type { AdminUserRow, AlbumList, ImageItem } from "../core/types";
+import { userViewBanner } from "../ui/shell";
+import { emptyState, imageTile, pageHead, pagination, progressBar, qtip, skeletonGrid } from "../ui/widgets";
+
+type SortKey = "new" | "size" | "name";
+
+const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
+  { value: "new", label: "上传时间 ↓" },
+  { value: "size", label: "大小 ↓" },
+  { value: "name", label: "名称 ↑" },
+];
+
+const PER_PAGE = 24;
+/** 长按进入多选的门槛：低于 400ms 会被误触发，高于 600ms 用户会以为没反应。 */
+const LONG_PRESS_MS = 500;
+const NARROW = "(max-width: 767px)";
+
+/** 列表里显示的标题：title → 原文件名 → 短哈希，三者都空是不可能的。 */
+function titleOf(item: ImageItem): string {
+  return item.title ?? item.original_name ?? shortHash(item.sha256, item.ext);
+}
+
+/** 下载走 `?download=1`，服务端会带 Content-Disposition；download 属性在跨域时会被浏览器忽略。 */
+function downloadUrl(item: ImageItem): string {
+  return `${item.url}${item.url.includes("?") ? "&" : "?"}download=1`;
+}
+
+function isNarrow(): boolean {
+  return window.matchMedia(NARROW).matches;
+}
+
+export async function render(ctx: PageContext): Promise<void> {
+  const parsedAlbumId = Number(ctx.params.albumId ?? "");
+  const viewingUid = getState().viewingUid;
+
+  const state = {
+    albumId: Number.isFinite(parsedAlbumId) && parsedAlbumId > 0 ? parsedAlbumId : null,
+    q: ctx.query.get("q") ?? "",
+    sort: "new" as SortKey,
+    view: loadViewPreference(),
+    page: 1,
+    items: [] as ImageItem[],
+    /** state.items[0] 在整个结果里的绝对下标：浮层翻页加载相邻页时用它换算 */
+    offset: 0,
+    total: 0,
+    totalPages: 1,
+    albums: null as AlbumList | null,
+    selected: new Set<number>(),
+    anchor: null as number | null,
+    multi: false,
+    lightboxOpen: false,
+  };
+
+  /** 长按抬起时会补发一次 click，这个标记让 capture 处理器吞掉它，避免刚选中又被切掉。 */
+  let suppressClick = false;
+
+  const root = h("div.pad");
+  ctx.outlet.append(root);
+
+  // ---------- 骨架：先占位再拉数据，避免白屏 ----------
+
+  const headHost = h("div");
+  const sideHost = h("div.albumlist");
+  const toolbarHost = h("div");
+  const listHost = h("div");
+  const pagerHost = h("div");
+  const selbar = h("div.selbar");
+  const body = h("div.albums-body", null, toolbarHost, listHost, pagerHost);
+  root.append(headHost, h("div.albums-split", null, sideHost, body), selbar);
+  mount(
+    sideHost,
+    ...Array.from({ length: 4 }, () => h("div.skel", { style: { height: "30px", marginBottom: "8px" } })),
+  );
+  mount(listHost, skeletonGrid(8));
+
+  if (viewingUid) {
+    headHost.append(
+      buildViewBanner(viewingUid, () => {
+        setViewingUid(null);
+        navigate("/albums");
+      }),
+    );
+  }
+  headHost.append(
+    h(
+      "div.flexline",
+      { style: { justifyContent: "space-between", alignItems: "flex-start" } },
+      pageHead(
+        "我的相册",
+        "左键单击图片直接打开预览；Shift 连选一段，Ctrl 点选多张；移动端长按进入多选。",
+      ),
+      h(
+        "div.flexline",
+        null,
+        // 用户视图下隐藏「上传」与「新建相册」：契约里 /upload 与 POST /albums 都没有 uid 参数，
+        // 在这里点下去会悄悄落到管理员自己的账号，不如不给入口
+        viewingUid ? null : uploadButton(),
+        viewingUid
+          ? null
+          : h("button.btn.gho", {
+              type: "button",
+              text: "新建相册",
+              on: { click: () => void createAlbum() },
+            }),
+      ),
+    ),
+  );
+
+  function uploadButton(): HTMLElement {
+    return h("button.btn.pri", {
+      type: "button",
+      text: "＋ 上传图片",
+      on: {
+        click: () =>
+          navigate(state.albumId !== null ? `/upload?album_id=${state.albumId}` : "/upload"),
+      },
+    });
+  }
+
+  // ---------- 常规工具栏（建一次，避免搜索框每次输入都被重建打断） ----------
+
+  const searchInput = h("input.f", {
+    placeholder: "在相册内搜索…",
+    value: state.q,
+    style: { width: "180px", padding: "4px 10px", fontSize: "12.5px" },
+  });
+  searchInput.addEventListener(
+    "input",
+    debounce(() => {
+      state.q = searchInput.value.trim();
+      void loadImages(1);
+    }, 320),
+  );
+
+  const sortSelect = h(
+    "select.f",
+    { style: { width: "136px", padding: "4px 10px", fontSize: "12.5px" } },
+    ...SORT_OPTIONS.map((option) => h("option", { value: option.value, text: option.label })),
+  );
+  sortSelect.value = state.sort;
+  sortSelect.addEventListener("change", () => {
+    state.sort = sortSelect.value as SortKey;
+    void loadImages(1);
+  });
+
+  const gridChip = h("button.chip", {
+    type: "button",
+    text: "网格",
+    on: { click: () => setView("grid") },
+  });
+  const listChip = h("button.chip", {
+    type: "button",
+    text: "列表",
+    on: { click: () => setView("list") },
+  });
+  const selectChip = h("button.chip", {
+    type: "button",
+    text: "选择",
+    on: { click: () => enterMulti() },
+  });
+
+  const normalToolbar = h(
+    "div.toolbar",
+    null,
+    gridChip,
+    listChip,
+    h("span.spacer"),
+    searchInput,
+    sortSelect,
+    selectChip,
+  );
+
+  // ---------- 批量操作条：宽屏完整版，窄屏紧凑版 + 底部固定条 ----------
+
+  const wideCount = h("span");
+  const wideBatch = h(
+    "div.toolbar.sel.sel-wide",
+    null,
+    wideCount,
+    h("button.btn.sm", { type: "button", text: "打标签", on: { click: () => void batchTag() } }),
+    h("button.btn.sm", { type: "button", text: "移动到相册", on: { click: () => void batchMove() } }),
+    h("button.btn.sm", { type: "button", text: "复制直链", on: { click: () => void batchCopy() } }),
+    h("button.btn.sm.dgr", { type: "button", text: "删除", on: { click: () => void batchDelete() } }),
+    h("span.spacer"),
+    h("button.btn.sm.gho", { type: "button", text: "全选本页", on: { click: () => selectPage() } }),
+    h("button.btn.sm.gho", { type: "button", text: "取消选择", on: { click: () => cancelSelection() } }),
+  );
+
+  const narrowCount = h("span", { style: { fontWeight: "600", color: "var(--primary)" } });
+  const narrowBatch = h(
+    "div.toolbar.sel.sel-narrow",
+    null,
+    narrowCount,
+    h("span.spacer"),
+    h("button.chip", { type: "button", text: "全选本页", on: { click: () => selectPage() } }),
+    h("button.chip", { type: "button", text: "取消", on: { click: () => cancelSelection() } }),
+  );
+
+  const selbarActions: Array<[string, string, () => void]> = [
+    ["打标签", "", () => void batchTag()],
+    ["移动", "", () => void batchMove()],
+    ["复制直链", "", () => void batchCopy()],
+    ["删除", "dgr", () => void batchDelete()],
+  ];
+  mount(
+    selbar,
+    ...selbarActions.map(([label, tone, action]) =>
+      h("button.btn", { type: "button", class: tone, text: label, on: { click: action } }),
+    ),
+  );
+
+  toolbarHost.append(normalToolbar, wideBatch, narrowBatch);
+
+  // ---------- 键盘：Esc 关浮层或取消选择 ----------
+
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (!root.isConnected) {
+      document.removeEventListener("keydown", onKeyDown);
+      return;
+    }
+    if (event.key !== "Escape") return;
+    if (document.querySelector(".lb")) return; // 浮层自己处理 Esc
+    if (state.multi || state.selected.size > 0) cancelSelection();
+  };
+  document.addEventListener("keydown", onKeyDown);
+
+  // ---------- 数据加载 ----------
+
+  async function loadAlbums(): Promise<void> {
+    try {
+      const data = await request<AlbumList>("/albums", {
+        query: { uid: viewingUid ?? undefined },
+      });
+      state.albums = data;
+      renderSidebar(data);
+    } catch (err) {
+      mount(
+        sideHost,
+        h("div.tip", {
+          style: { padding: "8px" },
+          text: err instanceof ApiError ? err.message : "相册列表加载失败",
+        }),
+        h("button.btn.sm", {
+          type: "button",
+          text: "重试",
+          on: { click: () => void loadAlbums() },
+        }),
+      );
+    }
+  }
+
+  async function loadImages(
+    page: number,
+    options: { append?: boolean; prepend?: boolean } = {},
+  ): Promise<void> {
+    if (!options.append && !options.prepend) {
+      mount(listHost, skeletonGrid(8));
+      pagerHost.replaceChildren();
+    }
+    try {
+      const result = await requestPage<ImageItem>("/images", {
+        query: {
+          uid: viewingUid ?? undefined,
+          album_id: state.albumId ?? undefined,
+          q: state.q || undefined,
+          sort: state.sort,
+          page,
+          per_page: PER_PAGE,
+        },
+      });
+      state.total = result.meta.total;
+      state.totalPages = result.meta.total_pages;
+      const perPage = result.meta.per_page || PER_PAGE;
+      // 删到当前页为空时回退一页，否则用户会停在一个空列表上（上一页还有图）
+      if (!options.append && !options.prepend && result.items.length === 0 && page > 1 && result.meta.total > 0) {
+        await loadImages(page - 1);
+        return;
+      }
+      if (options.append) {
+        state.items = [...state.items, ...result.items];
+      } else if (options.prepend) {
+        state.items = [...result.items, ...state.items];
+        state.offset = (page - 1) * perPage;
+      } else {
+        state.items = result.items;
+        state.page = page;
+        state.offset = (page - 1) * perPage;
+      }
+      renderList();
+      renderPager(result.meta.page);
+    } catch (err) {
+      renderError(err);
+    }
+  }
+
+  function renderError(err: unknown): void {
+    const message = err instanceof ApiError ? err.message : "图片列表加载失败";
+    mount(
+      listHost,
+      qtip("err", "加载失败", message),
+      h(
+        "div",
+        { style: { marginTop: "12px" } },
+        h("button.btn", { type: "button", text: "重试", on: { click: () => void loadImages(state.page) } }),
+      ),
+    );
+    pagerHost.replaceChildren();
+  }
+
+  function renderPager(page: number): void {
+    const widget = pagination(
+      { page, total_pages: state.totalPages, total: state.total },
+      (next) => void loadImages(next),
+    );
+    pagerHost.replaceChildren(...(widget ? [widget] : []));
+  }
+
+  // ---------- 相册侧栏 ----------
+
+  function renderSidebar(data: AlbumList): void {
+    const link = (id: number | null, name: string, count: number): HTMLElement =>
+      h(
+        "a",
+        {
+          href: id === null ? "#/albums" : `#/albums/${id}`,
+          class: state.albumId === id ? "on" : "",
+        },
+        h("span", { text: "▤" }),
+        h("span", { text: name, style: { overflow: "hidden", textOverflow: "ellipsis" } }),
+        h("span.c", { text: formatNumber(count) }),
+      );
+
+    const usage = data.usage;
+    mount(
+      sideHost,
+      h("div.par", { text: "我的相册" }),
+      link(null, data.all.name || "全部图片", data.all.image_count),
+      ...data.albums.map((album) => link(album.id, album.name, album.image_count)),
+      h("button.new", {
+        type: "button",
+        text: "＋ 新建相册",
+        on: { click: () => void createAlbum() },
+      }),
+      h("div.par.album-usage", { text: "用量" }),
+      h(
+        "div.album-usage",
+        { style: { padding: "0 9px" } },
+        progressBar(usage.used_bytes, usage.quota_bytes),
+        h("div.tip", {
+          style: { marginTop: "6px" },
+          text: `已用 ${formatQuota(usage.used_bytes, usage.quota_bytes)}`,
+        }),
+      ),
+    );
+  }
+
+  async function createAlbum(): Promise<void> {
+    const name = await promptDialog({
+      title: "新建相册",
+      label: "相册名称",
+      placeholder: "例如：旅行",
+      hint: "slug 会按名称自动生成，重名时会提示冲突。",
+    });
+    if (!name) return;
+    try {
+      await request("/albums", { json: { name } });
+      toastOk(`已创建相册「${name}」`);
+      await loadAlbums();
+    } catch (err) {
+      toastError(err);
+    }
+  }
+
+  // ---------- 视图与列表 ----------
+
+  function setView(view: "grid" | "list"): void {
+    if (state.view === view) return;
+    state.view = view;
+    saveViewPreference(view);
+    applyViewChips();
+    renderList();
+  }
+
+  function applyViewChips(): void {
+    gridChip.classList.toggle("on", state.view === "grid");
+    listChip.classList.toggle("on", state.view === "list");
+  }
+  applyViewChips();
+
+  function renderList(): void {
+    if (state.items.length === 0) {
+      mount(
+        listHost,
+        emptyState(
+          "▤",
+          state.q ? `没有找到与「${state.q}」相关的图片。` : "这里还没有图片。",
+          state.q ? undefined : uploadButton(),
+        ),
+      );
+      syncSelectionUI();
+      return;
+    }
+    if (state.view === "grid") renderGrid();
+    else renderTable();
+    syncSelectionUI();
+  }
+
+  function thumbFor(item: ImageItem): HTMLElement {
+    const thumb = h("div.ph", { class: `c${(item.id % 6) + 1}` });
+    // 有缩略图用缩略图；没有就用原图按容器缩放，带宽影响有限（契约 4.1）
+    thumb.append(
+      h("img", {
+        src: item.has_thumb && item.thumb_url ? item.thumb_url : item.url,
+        alt: titleOf(item),
+        loading: "lazy",
+        decoding: "async",
+      }),
+    );
+    return thumb;
+  }
+
+  function renderGrid(): void {
+    const grid = h("div.grid.igrid");
+    state.items.forEach((item, index) => {
+      grid.append(
+        imageTile(item, {
+          selected: state.selected.has(item.id),
+          onOpen: () => openLightbox(state.offset + index),
+          onSelect: (target, event) => handleTileSelect(target, event),
+        }),
+      );
+    });
+    mount(listHost, grid);
+    attachLongPress(grid, ".tile[data-image-id]");
+
+    // 多选模式下单击要变成勾选，而不是开预览：在捕获阶段拦掉 tile 自己的 click
+    grid.addEventListener(
+      "click",
+      (event) => {
+        if (!state.multi) return;
+        const tile = (event.target as HTMLElement).closest<HTMLElement>(".tile[data-image-id]");
+        if (!tile) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (suppressClick) {
+          suppressClick = false;
+          return;
+        }
+        toggleSelect(Number(tile.dataset.imageId));
+      },
+      true,
+    );
+  }
+
+  function renderTable(): void {
+    selectAllRef = h("input", { type: "checkbox", "aria-label": "全选本页" });
+    selectAllRef.addEventListener("change", () => {
+      if (selectAllRef?.checked) selectPage();
+      else clearPageSelection();
+    });
+
+    const headers = h(
+      "tr",
+      null,
+      h("th", { style: { width: "36px" } }, selectAllRef),
+      h("th", { style: { width: "52px" }, text: "预览" }),
+      h("th", { text: "文件名" }),
+      h("th", { text: "标签" }),
+      h("th", { style: { width: "88px" }, text: "大小" }),
+      h("th", { class: "hide-md", style: { width: "118px" }, text: "尺寸" }),
+      h("th", { class: "hide-md", style: { width: "130px" }, text: "上传时间" }),
+      h("th", { style: { width: "158px" }, text: "操作" }),
+    );
+
+    const tbody = h("tbody");
+    state.items.forEach((item, index) => {
+      const checkbox = h("input", {
+        type: "checkbox",
+        checked: state.selected.has(item.id),
+        "aria-label": `选择 ${titleOf(item)}`,
+      });
+      checkbox.addEventListener("click", (event) => event.stopPropagation());
+      checkbox.addEventListener("change", () => toggleSelect(item.id, { anchor: true }));
+
+      const mini = thumbFor(item);
+      mini.classList.add("mini");
+      const previewCell = h("td", { "data-label": "预览" }, mini);
+      previewCell.style.cursor = "pointer";
+      previewCell.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openLightbox(state.offset + index);
+      });
+
+      const row = h(
+        "tr",
+        { "data-image-id": String(item.id) },
+        h("td", { "data-label": "" }, checkbox),
+        previewCell,
+        h(
+          "td",
+          { "data-label": "文件名" },
+          h("b", { text: titleOf(item) }),
+          h("div.mono", {
+            style: { color: "var(--faint)", fontSize: "11px" },
+            text: `${shortHash(item.sha256, item.ext)}`,
+          }),
+        ),
+        h(
+          "td",
+          { "data-label": "标签" },
+          ...item.tags.slice(0, 3).map((tag) => h("span.tag", { text: tag })),
+        ),
+        h("td", { "data-label": "大小", text: formatBytes(item.size) }),
+        h("td", { "data-label": "尺寸", class: "hide-md", text: formatDimensions(item.width, item.height) }),
+        h("td", { "data-label": "上传时间", class: "hide-md", text: formatShortDateTime(item.upload_time) }),
+        h(
+          "td",
+          { "data-label": "操作" },
+          h(
+            "button.btn.sm",
+            { type: "button", text: "复制", on: { click: (event) => void copyLink(item, event as MouseEvent) } },
+          ),
+          " ",
+          h("button.btn.sm", {
+            type: "button",
+            text: "预览",
+            on: { click: () => openLightbox(state.offset + index) },
+          }),
+          " ",
+          h("button.btn.sm.dgr", {
+            type: "button",
+            text: "删除",
+            on: { click: (event) => void deleteOne(item, event as MouseEvent) },
+          }),
+        ),
+      );
+      tbody.append(row);
+    });
+
+    const table = h("table.responsive", null, h("thead", null, headers), tbody);
+    mount(listHost, h("div.table-wrap", null, table));
+
+    // 行点击：Shift 按行范围连选，Ctrl 离散，普通点击单选（文件管理器的习惯）
+    const onRowClick = (event: Event): void => {
+      const target = event.target as HTMLElement;
+      if (target.closest("input, button")) return;
+      const row = target.closest<HTMLElement>("tr[data-image-id]");
+      if (!row) return;
+      const id = Number(row.dataset.imageId);
+      if (state.multi) {
+        toggleSelect(id);
+        return;
+      }
+      const mouse = event as MouseEvent;
+      if (mouse.shiftKey) {
+        selectRange(id);
+        return;
+      }
+      if (mouse.ctrlKey || mouse.metaKey) {
+        toggleSelect(id, { anchor: true });
+        return;
+      }
+      state.selected.clear();
+      state.selected.add(id);
+      state.anchor = id;
+      syncSelectionUI();
+    };
+    table.addEventListener("click", onRowClick);
+    attachLongPress(table, "tr[data-image-id]");
+  }
+
+  // ---------- 选择模型 ----------
+
+  let selectAllRef: HTMLInputElement | null = null;
+
+  function indexOfId(id: number): number {
+    return state.items.findIndex((item) => item.id === id);
+  }
+
+  /** 当前页（per_page 切片）的项，用于「全选本页」与表头半选判定。 */
+  function pageItems(): ImageItem[] {
+    const start = (state.page - 1) * PER_PAGE;
+    return state.items.filter((_, index) => {
+      const absolute = state.offset + index;
+      return absolute >= start && absolute < start + PER_PAGE;
+    });
+  }
+
+  function toggleSelect(id: number, options: { anchor?: boolean } = {}): void {
+    if (state.selected.has(id)) state.selected.delete(id);
+    else state.selected.add(id);
+    if (options.anchor) state.anchor = id;
+    syncSelectionUI();
+  }
+
+  /** 进入多选（触屏长按或点「选择」）：先选上触发的那张，用户能立刻看到反馈。 */
+  function enterMulti(id?: number): void {
+    state.multi = true;
+    if (id !== undefined) {
+      state.selected.add(id);
+      state.anchor = id;
+    }
+    toast("已进入多选模式：点图片勾选，完成后用底部操作条");
+    syncSelectionUI();
+  }
+
+  function cancelSelection(): void {
+    state.selected.clear();
+    state.multi = false;
+    state.anchor = null;
+    syncSelectionUI();
+  }
+
+  function selectPage(): void {
+    for (const item of pageItems()) state.selected.add(item.id);
+    syncSelectionUI();
+  }
+
+  function clearPageSelection(): void {
+    for (const item of pageItems()) state.selected.delete(item.id);
+    syncSelectionUI();
+  }
+
+  /**
+   * Shift 范围选择。
+   *
+   * 网格：先按列数把下标折成行；同一行内取连续区间，跨行则整行整段选中——
+   * 原型里的说法是「中间四行整段选中」，跨行时按整行取才符合「整段」。
+   * 列表：行就是项，直接取连续区间。
+   */
+  function selectRange(targetId: number): void {
+    const anchorId = state.anchor;
+    if (anchorId === null) {
+      toggleSelect(targetId, { anchor: true });
+      return;
+    }
+    const from = indexOfId(anchorId);
+    const to = indexOfId(targetId);
+    if (from < 0 || to < 0) return;
+    const start = Math.min(from, to);
+    const end = Math.max(from, to);
+
+    if (state.view === "list") {
+      for (let index = start; index <= end; index += 1) state.selected.add(state.items[index]!.id);
+      syncSelectionUI();
+      return;
+    }
+
+    const grid = listHost.querySelector<HTMLElement>(".igrid");
+    const columns = grid ? countColumns(grid) : 1;
+    const isSameRow = Math.floor(start / columns) === Math.floor(end / columns);
+    const firstIndex = isSameRow ? start : Math.floor(start / columns) * columns;
+    const lastIndex = isSameRow ? end : Math.floor(end / columns) * columns + columns - 1;
+    for (let index = firstIndex; index <= Math.min(lastIndex, state.items.length - 1); index += 1) {
+      state.selected.add(state.items[index]!.id);
+    }
+    syncSelectionUI();
+  }
+
+  function handleTileSelect(item: ImageItem, event: MouseEvent): void {
+    if (event.shiftKey && state.anchor !== null) selectRange(item.id);
+    else toggleSelect(item.id, { anchor: true });
+  }
+
+  /** 从 computed style 里数网格列数：布局随断点变，只有浏览器知道现在是几列。 */
+  function countColumns(element: HTMLElement): number {
+    const template = window.getComputedStyle(element).gridTemplateColumns;
+    const tracks = template.split(" ").filter((track) => track && track !== "none");
+    return tracks.length > 0 ? tracks.length : 1;
+  }
+
+  /** 触屏长按进入多选：pointerdown 起计时，移动超过 10px 或抬手即取消。 */
+  function attachLongPress(container: HTMLElement, selector: string): void {
+    let timer: number | undefined;
+    let candidate: HTMLElement | null = null;
+    let startX = 0;
+    let startY = 0;
+    const cancel = (): void => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+      candidate = null;
+    };
+    container.addEventListener("pointerdown", (event) => {
+      if (event.pointerType !== "touch" || state.multi) return;
+      const node = (event.target as HTMLElement).closest<HTMLElement>(selector);
+      if (!node) return;
+      candidate = node;
+      startX = event.clientX;
+      startY = event.clientY;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        const target = candidate;
+        if (!target) return;
+        suppressClick = true;
+        const id = Number(target.dataset.imageId);
+        enterMulti(Number.isFinite(id) ? id : undefined);
+        if (typeof navigator.vibrate === "function") navigator.vibrate(10);
+      }, LONG_PRESS_MS);
+    });
+    container.addEventListener("pointermove", (event) => {
+      if (timer === undefined) return;
+      if (Math.abs(event.clientX - startX) > 10 || Math.abs(event.clientY - startY) > 10) cancel();
+    });
+    container.addEventListener("pointerup", cancel);
+    container.addEventListener("pointercancel", cancel);
+    container.addEventListener("pointerleave", cancel);
+  }
+
+  /** 选择变化后只改受影响的 DOM：切 class、同步勾选框与工具栏。 */
+  function syncSelectionUI(): void {
+    const count = state.selected.size;
+    const has = count > 0;
+
+    for (const tile of listHost.querySelectorAll<HTMLElement>(".tile[data-image-id]")) {
+      tile.classList.toggle("sel", state.selected.has(Number(tile.dataset.imageId)));
+    }
+    for (const row of listHost.querySelectorAll<HTMLElement>("tr[data-image-id]")) {
+      const id = Number(row.dataset.imageId);
+      const on = state.selected.has(id);
+      row.classList.toggle("pick", on);
+      const box = row.querySelector<HTMLInputElement>("input[type=checkbox]");
+      if (box) box.checked = on;
+    }
+    if (selectAllRef) {
+      const page = pageItems();
+      const selectedOnPage = page.filter((item) => state.selected.has(item.id)).length;
+      selectAllRef.checked = page.length > 0 && selectedOnPage === page.length;
+      // 半选状态：表头勾选框支持全选 / 全不选 / 部分选
+      selectAllRef.indeterminate = selectedOnPage > 0 && selectedOnPage < page.length;
+    }
+
+    normalToolbar.style.display = has ? "none" : "";
+    wideBatch.classList.toggle("on", has);
+    narrowBatch.classList.toggle("on", has);
+    selbar.classList.toggle("on", has && isNarrow());
+    wideCount.replaceChildren(
+      document.createTextNode("已选 "),
+      h("b", { text: String(count) }),
+      document.createTextNode(" 张"),
+    );
+    narrowCount.textContent = `已选 ${count} 张`;
+  }
+
+  // ---------- 批量操作 ----------
+
+  async function runBatch(
+    action: "delete" | "move" | "tag",
+    extra: Record<string, unknown>,
+  ): Promise<number> {
+    const ids = [...state.selected];
+    const result = await request<{ affected: number }>("/images/batch", {
+      json: { action, ids, ...extra },
+      query: { uid: viewingUid ?? undefined },
+    });
+    return result.affected ?? ids.length;
+  }
+
+  async function afterBatch(message: string): Promise<void> {
+    toastOk(message);
+    cancelSelection();
+    await Promise.all([loadImages(state.page), loadAlbums()]);
+  }
+
+  async function batchTag(): Promise<void> {
+    const count = state.selected.size;
+    if (count === 0) return;
+    const input = await promptDialog({
+      title: "批量打标签",
+      label: `给选中的 ${count} 张图片追加标签（逗号分隔）`,
+      placeholder: "风景,旅行",
+      confirmText: "追加标签",
+    });
+    if (!input) return;
+    const tags = input
+      .split(/[,，\s]+/)
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+    if (tags.length === 0) return;
+    try {
+      const affected = await runBatch("tag", { tags });
+      await afterBatch(`已为 ${affected} 张图片追加标签`);
+    } catch (err) {
+      toastError(err);
+    }
+  }
+
+  async function batchMove(): Promise<void> {
+    const count = state.selected.size;
+    if (count === 0) return;
+    const albums = state.albums?.albums ?? [];
+    const selectEl = h(
+      "select.f",
+      null,
+      h("option", { value: "", text: "移出相册（未分类）" }),
+      ...albums.map((album) => h("option", { value: String(album.id), text: album.name })),
+    );
+    if (state.albumId !== null) selectEl.value = "";
+
+    const handle = openModal({
+      title: `移动 ${count} 张图片`,
+      body: h("div.fld", null, h("label.f", { text: "目标相册" }), selectEl),
+      footer: [
+        h("button.btn", { type: "button", text: "取消", on: { click: () => handle.close() } }),
+        h("button.btn.pri", {
+          type: "button",
+          text: "移动",
+          on: {
+            click: async () => {
+              const albumId = selectEl.value ? Number(selectEl.value) : null;
+              handle.close();
+              try {
+                const affected = await runBatch("move", { album_id: albumId });
+                await afterBatch(`已移动 ${affected} 张图片`);
+              } catch (err) {
+                toastError(err);
+              }
+            },
+          },
+        }),
+      ],
+    });
+  }
+
+  async function batchCopy(): Promise<void> {
+    const urls = state.items.filter((item) => state.selected.has(item.id)).map((item) => item.url);
+    if (urls.length === 0) return;
+    const ok = await copyText(urls.join("\n"));
+    if (ok) toastWithCode(`✓ 已复制 ${urls.length} 条直链`, urls[0] ?? "");
+    else toastError(new Error("复制失败，请检查浏览器剪贴板权限"));
+  }
+
+  async function batchDelete(): Promise<void> {
+    const count = state.selected.size;
+    if (count === 0) return;
+    const ok = await confirmDanger(
+      `删除选中的 ${count} 张图片？`,
+      "图片会从列表移除；物理文件在引用计数归零后由后台回收，删除不可撤销。",
+      `删除 ${count} 张`,
+    );
+    if (!ok) return;
+    try {
+      const affected = await runBatch("delete", {});
+      await afterBatch(`已删除 ${affected} 张图片`);
+    } catch (err) {
+      toastError(err);
+    }
+  }
+
+  async function copyLink(item: ImageItem, event: MouseEvent): Promise<void> {
+    event.stopPropagation();
+    const ok = await copyText(item.url);
+    if (ok) toastWithCode("✓ 已复制直链", item.url);
+  }
+
+  async function deleteOne(item: ImageItem, event: MouseEvent): Promise<void> {
+    event.stopPropagation();
+    const ok = await confirmDanger(
+      "删除这张图片？",
+      `「${titleOf(item)}」删除后不可撤销。`,
+      "删除",
+    );
+    if (!ok) return;
+    try {
+      await request(`/images/${item.id}`, { method: "DELETE", query: { uid: viewingUid ?? undefined } });
+      toastOk("已删除 1 张图片");
+      state.selected.delete(item.id);
+      await Promise.all([loadImages(state.page), loadAlbums()]);
+    } catch (err) {
+      toastError(err);
+    }
+  }
+
+  // ---------- 预览浮层 ----------
+
+  /** 加载相邻页：浮层里 ← → 翻到已加载窗口之外时按需取下一页/上一页。 */
+  async function ensureAbsolute(target: number): Promise<void> {
+    if (target >= state.offset && target < state.offset + state.items.length) return;
+    const page = Math.floor(target / PER_PAGE) + 1;
+    if (page < 1 || page > state.totalPages) return;
+    const firstLoadedPage = Math.floor(state.offset / PER_PAGE) + 1;
+    await loadImages(page, {
+      append: page > firstLoadedPage,
+      prepend: page < firstLoadedPage,
+    });
+  }
+
+  function openLightbox(index: number): void {
+    if (state.lightboxOpen) return;
+    const item = state.items[index];
+    if (!item) return;
+    state.lightboxOpen = true;
+
+    let current = index;
+    let scale = 1;
+    let tx = 0;
+    let ty = 0;
+    let mode: "idle" | "pan" | "swipe" | "pinch" | "pull" = "idle";
+    let touchStart: { x: number; y: number } | null = null;
+    let dragOrigin = { x: 0, y: 0 };
+    let pinchDistance = 0;
+    let moveX = 0;
+    let moveY = 0;
+
+    const img = h("img", { alt: "", draggable: false });
+    img.addEventListener("dragstart", (event) => event.preventDefault());
+
+    const titleEl = h("b");
+    const countEl = h("span.cnt");
+    const closeBtn = h("button.lb-x", { type: "button", text: "×", "aria-label": "关闭预览" });
+    const prevBtn = h("button.lb-nav", { type: "button", text: "‹", "aria-label": "上一张" });
+    const nextBtn = h("button.lb-nav", { type: "button", text: "›", "aria-label": "下一张" });
+    const stage = h("div.lb-stage", null, prevBtn, img, nextBtn);
+    const side = h("div.lb-side");
+    const actions = h("div.lb-actions");
+    const thumbs = h("div.lb-thumbs");
+    const hint = h("span.lb-hint", {
+      style: { color: "#94a3b8", fontSize: "12px" },
+      text: "← → 切换 · Esc 关闭 · 滚轮缩放",
+    });
+
+    const overlay = h(
+      "div.lb",
+      { role: "dialog", "aria-modal": "true" },
+      h("div.lb-top", null, titleEl, countEl, h("span.spacer"), hint, closeBtn),
+      h("div.lb-main", null, stage, side),
+      actions,
+      thumbs,
+    );
+
+    function apply(animate = false): void {
+      img.style.transition = animate ? "transform .16s ease, opacity .16s ease" : "none";
+      img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+      img.style.opacity = "1";
+      // 光标跟着缩放态走：1× 是「点开」，放大后是「拖动」
+      img.classList.toggle("zoomed", scale > 1);
+    }
+
+    function resetZoom(): void {
+      scale = 1;
+      tx = 0;
+      ty = 0;
+      apply();
+    }
+
+    function setScale(next: number): void {
+      scale = Math.min(6, Math.max(1, next));
+      // 缩回原始比例时把平移一起归零，否则图会飘在角落
+      if (scale === 1) {
+        tx = 0;
+        ty = 0;
+      }
+      apply();
+    }
+
+    function currentItem(): ImageItem | null {
+      return state.items[current] ?? null;
+    }
+
+    function show(): void {
+      const target = currentItem();
+      if (!target) return;
+      const absolute = state.offset + current;
+      titleEl.textContent = titleOf(target);
+      countEl.textContent = `${formatNumber(absolute + 1)} / ${formatNumber(state.total)}`;
+      img.src = target.url;
+      img.alt = titleOf(target);
+      resetZoom();
+      renderSide(target);
+      renderActions(target);
+      renderThumbs();
+    }
+
+    async function step(delta: number): Promise<void> {
+      const target = state.offset + current + delta;
+      if (target < 0 || target >= state.total) return;
+      await ensureAbsolute(target);
+      current = target - state.offset;
+      show();
+    }
+
+    function copyDirectLink(item: ImageItem): void {
+      void copyText(item.url).then((ok) => {
+        if (ok) toastWithCode("✓ 已复制直链", item.url);
+      });
+    }
+
+    function renderSide(item: ImageItem): void {
+      const line = (label: string, value: string, mono = false): HTMLElement =>
+        h(
+          "div",
+          { style: { display: "flex", justifyContent: "space-between", gap: "10px", padding: "2px 0" } },
+          h("span", { text: label, style: { color: "var(--muted)" } }),
+          h("span", { class: mono ? "mono" : "", text: value, style: { textAlign: "right" } }),
+        );
+      mount(
+        side,
+        h("div", { style: { fontWeight: "700", marginBottom: "6px" }, text: titleOf(item) }),
+        line("尺寸", formatDimensions(item.width, item.height)),
+        line("大小", formatBytes(item.size)),
+        line("格式", item.ext.toUpperCase()),
+        line("相册", item.album_name ?? "未分类"),
+        line("上传", formatDateTime(item.upload_time)),
+        line("可见性", item.visibility === "public" ? "公开" : "私有"),
+        h("div", { style: { marginTop: "10px", color: "var(--muted)" }, text: "SHA-256" }),
+        h("div.mono", {
+          style: { fontSize: "10px", color: "var(--faint)", wordBreak: "break-all" },
+          text: item.sha256,
+        }),
+        // 宽屏的复制/下载放在信息卡里（窄屏走底部按钮条，见 renderActions）
+        h(
+          "div.flexline",
+          { style: { marginTop: "12px", gap: "6px" } },
+          h("button.btn.sm.pri", {
+            type: "button",
+            style: { flex: "1" },
+            text: "复制直链",
+            on: { click: () => copyDirectLink(item) },
+          }),
+          h("a.btn.sm", {
+            href: downloadUrl(item),
+            download: "",
+            style: { flex: "1" },
+            text: "下载",
+          }),
+        ),
+      );
+    }
+
+    /** 窄屏底部三个按钮：信息卡默认收起，靠「信息」展开。 */
+    function renderActions(item: ImageItem): void {
+      mount(
+        actions,
+        h("button.btn.sm.pri", {
+          type: "button",
+          text: "复制直链",
+          on: { click: () => copyDirectLink(item) },
+        }),
+        h("a.btn.sm", { href: downloadUrl(item), download: "", text: "下载" }),
+        h("button.btn.sm", {
+          type: "button",
+          text: "信息",
+          on: {
+            click: () => {
+              side.hidden = !side.hidden;
+            },
+          },
+        }),
+      );
+    }
+
+    function renderThumbs(): void {
+      const from = Math.max(0, current - 20);
+      const to = Math.min(state.items.length, current + 21);
+      const nodes: Node[] = [];
+      for (let index = from; index < to; index += 1) {
+        const item = state.items[index];
+        if (!item) continue;
+        const node = h("button.ph", {
+          type: "button",
+          class: `${index === current ? "cur" : ""} c${(item.id % 6) + 1}`,
+          "aria-label": titleOf(item),
+          on: { click: () => void step(index - current) },
+        });
+        node.append(
+          h("img", {
+            src: item.has_thumb && item.thumb_url ? item.thumb_url : item.url,
+            alt: "",
+            loading: "lazy",
+            decoding: "async",
+          }),
+        );
+        nodes.push(node);
+      }
+      thumbs.replaceChildren(...nodes);
+    }
+
+    function close(): void {
+      document.removeEventListener("keydown", onKey);
+      overlay.remove();
+      document.body.style.overflow = "";
+      state.lightboxOpen = false;
+    }
+
+    function onKey(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        close();
+        return;
+      }
+      if (event.key === "ArrowLeft") void step(-1);
+      if (event.key === "ArrowRight") void step(1);
+    }
+
+    // ---- 鼠标：滚轮缩放、缩放后拖拽平移、双击 1×/2× ----
+    stage.addEventListener(
+      "wheel",
+      (event) => {
+        event.preventDefault();
+        setScale(scale * Math.exp(-event.deltaY * 0.0015));
+      },
+      { passive: false },
+    );
+    img.addEventListener("dblclick", () => {
+      if (scale > 1) resetZoom();
+      else setScale(2);
+      apply(true);
+    });
+    stage.addEventListener("mousedown", (event) => {
+      if (scale <= 1 || event.button !== 0) return;
+      event.preventDefault();
+      const originX = event.clientX - tx;
+      const originY = event.clientY - ty;
+      const onMove = (move: MouseEvent): void => {
+        tx = move.clientX - originX;
+        ty = move.clientY - originY;
+        apply(false);
+      };
+      const onUp = (): void => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+
+    // ---- 触屏：左右滑切换、双指缩放、下拉关闭 ----
+    const touchDistance = (touches: TouchList): number => {
+      const [a, b] = [touches[0]!, touches[1]!];
+      return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    };
+    stage.addEventListener(
+      "touchstart",
+      (event) => {
+        if (event.touches.length === 2) {
+          mode = "pinch";
+          pinchDistance = touchDistance(event.touches);
+          return;
+        }
+        const touch = event.touches[0];
+        if (!touch) return;
+        touchStart = { x: touch.clientX, y: touch.clientY };
+        dragOrigin = { x: touch.clientX - tx, y: touch.clientY - ty };
+        moveX = 0;
+        moveY = 0;
+        mode = scale > 1 ? "pan" : "idle";
+      },
+      { passive: true },
+    );
+    stage.addEventListener(
+      "touchmove",
+      (event) => {
+        if (mode === "pinch" && event.touches.length === 2) {
+          const distance = touchDistance(event.touches);
+          if (pinchDistance > 0) setScale(scale * (distance / pinchDistance));
+          pinchDistance = distance;
+          event.preventDefault();
+          return;
+        }
+        const touch = event.touches[0];
+        if (!touch || !touchStart) return;
+        moveX = touch.clientX - touchStart.x;
+        moveY = touch.clientY - touchStart.y;
+
+        if (mode === "pan") {
+          tx = touch.clientX - dragOrigin.x;
+          ty = touch.clientY - dragOrigin.y;
+          apply(false);
+        } else if (mode === "idle") {
+          if (Math.abs(moveY) > Math.abs(moveX) && moveY > 0) mode = "pull";
+          else if (Math.abs(moveX) > Math.abs(moveY)) mode = "swipe";
+        }
+        if (mode === "pull") {
+          img.style.transition = "none";
+          img.style.transform = `translate(0px, ${Math.max(0, moveY)}px) scale(1)`;
+          img.style.opacity = String(Math.max(0.35, 1 - moveY / 320));
+        } else if (mode === "swipe") {
+          img.style.transition = "none";
+          img.style.transform = `translate(${moveX * 0.35}px, 0) scale(1)`;
+        }
+        if (mode !== "idle") event.preventDefault();
+      },
+      { passive: false },
+    );
+    stage.addEventListener("touchend", () => {
+      if (mode === "pinch") {
+        pinchDistance = 0;
+        mode = "idle";
+        return;
+      }
+      if (mode === "pull") {
+        if (moveY > 90) {
+          close();
+          return;
+        }
+        apply(true);
+      } else if (mode === "swipe") {
+        apply(true);
+        if (moveX < -60) void step(1);
+        else if (moveX > 60) void step(-1);
+      }
+      mode = "idle";
+      touchStart = null;
+      moveX = 0;
+      moveY = 0;
+    });
+    stage.addEventListener("touchcancel", () => {
+      mode = "idle";
+      touchStart = null;
+      apply(true);
+    });
+
+    prevBtn.addEventListener("click", () => void step(-1));
+    nextBtn.addEventListener("click", () => void step(1));
+    closeBtn.addEventListener("click", () => close());
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) close();
+    });
+    document.addEventListener("keydown", onKey);
+
+    // 窄屏默认收起信息卡，靠底部「信息」按钮展开，避免挤占看图空间
+    side.hidden = isNarrow();
+    document.body.append(overlay);
+    document.body.style.overflow = "hidden";
+    show();
+  }
+
+  // ---------- 启动 ----------
+
+  await Promise.all([loadAlbums(), loadImages(1)]);
+}
+
+/** 用户视图横幅：先显示 uid，拿到邮箱后再补全文案（不阻塞页面渲染）。 */
+function buildViewBanner(uid: string, onExit: () => void): HTMLElement {
+  const banner = userViewBanner(uid, `u_${uid}`, () => {
+    navigate("/admin/users");
+  }, onExit);
+  const label = banner.querySelector("b");
+  if (!label) return banner;
+  void requestPage<AdminUserRow>("/admin/users", { query: { query: uid, per_page: 1 } })
+    .then((page) => {
+      const row = page.items.find((entry) => entry.uid === uid) ?? page.items[0];
+      if (row?.email) label.textContent = `正在查看用户 u_${uid}（${row.email}）的空间`;
+    })
+    .catch(() => {
+      /* 邮箱拿不到就保留 uid */
+    });
+  return banner;
+}

@@ -1,0 +1,20 @@
+[package]
+name = "pixora-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pixora 的哈希、口令、加密与令牌原语"
+
+[dependencies]
+sha2.workspace = true
+sha1.workspace = true
+hmac.workspace = true
+argon2.workspace = true
+aes-gcm.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+base64.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+chrono.workspace = true

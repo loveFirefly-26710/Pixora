@@ -1,0 +1,26 @@
+[package]
+name = "pixora-repo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pixora 仓储层：SQL 方言差异收敛在这一层"
+
+[dependencies]
+pixora-crypto.workspace = true
+
+sqlx.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+ipnet.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true
+sqlx = { workspace = true }

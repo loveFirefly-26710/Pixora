@@ -1,0 +1,35 @@
+[package]
+name = "pixora-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pixora 存储驱动微内核：核心只认 StorageDriver 接口"
+
+[dependencies]
+pixora-crypto.workspace = true
+
+async-trait.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+base64.workspace = true
+hex.workspace = true
+percent-encoding.workspace = true
+sqlx.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+
+# 容量探测读 statfs 的 f_type，只有 Unix 需要
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true

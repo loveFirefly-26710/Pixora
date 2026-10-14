@@ -1,0 +1,151 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pixora-crypto",
+    "crates/pixora-storage",
+    "crates/pixora-mail",
+    "crates/pixora-repo",
+    "crates/pixora-core",
+    "crates/pixora-queue",
+    "crates/pixora-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+
+[workspace.dependencies]
+# 内部 crate（统一在这里声明路径与版本，成员清单只写 `workspace = true`）
+pixora-crypto = { path = "crates/pixora-crypto", version = "0.1.0" }
+pixora-storage = { path = "crates/pixora-storage", version = "0.1.0" }
+pixora-mail = { path = "crates/pixora-mail", version = "0.1.0" }
+pixora-repo = { path = "crates/pixora-repo", version = "0.1.0" }
+pixora-core = { path = "crates/pixora-core", version = "0.1.0" }
+pixora-queue = { path = "crates/pixora-queue", version = "0.1.0" }
+
+# 异步运行时与 HTTP
+tokio = { version = "1.43", features = [
+    "rt-multi-thread",
+    "macros",
+    "fs",
+    "io-util",
+    "time",
+    "signal",
+    "sync",
+    "net",
+] }
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "json",
+    "query",
+    "form",
+    "multipart",
+    "tokio",
+    "macros",
+    "matched-path",
+] }
+axum-extra = { version = "0.10", features = ["cookie", "typed-header"] }
+tower = { version = "0.5", features = ["limit", "timeout", "util"] }
+tower-http = { version = "0.6", default-features = false, features = [
+    "trace",
+    "limit",
+    "compression-gzip",
+    "set-header",
+    "request-id",
+    "timeout",
+] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+tokio-util = { version = "0.7", features = ["io"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+
+# 数据库：sqlx 覆盖 PostgreSQL / MySQL，SQLite 走同一套异步层（bundled，无系统依赖）
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "any",
+    "postgres",
+    "mysql",
+    "sqlite",
+    "chrono",
+    "json",
+    "migrate",
+    "macros",
+] }
+
+# 加密、哈希、编码
+sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+argon2 = { version = "0.5", features = ["std"] }
+aes-gcm = { version = "0.10", features = ["aes", "std"] }
+getrandom = "0.3"
+hex = "0.4"
+base64 = "0.22"
+subtle = "2"
+
+# 序列化与时间
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
+
+# 错误处理与日志
+thiserror = "2"
+anyhow = "1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+
+# 邮件
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "hostname",
+    "pool",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls-tls",
+] }
+
+# 远端存储后端
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "stream",
+    "multipart",
+] }
+
+# 其他
+async-trait = "0.1"
+governor = "0.8"
+ipnet = "2"
+rust-embed = { version = "8", features = ["mime-guess"] }
+mimalloc = "0.1"
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+    "tiff",
+    "ico",
+] }
+percent-encoding = "2"
+tempfile = "3"
+
+# 发布配置：减体积、提性能，代价是编译更慢（工期不计入）
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# 开发配置：依赖按 O2 编译（运行速度够用），本包保持默认，增量编译最快
+[profile.dev]
+opt-level = 0
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2

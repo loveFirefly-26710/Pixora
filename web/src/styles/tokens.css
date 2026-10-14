@@ -1,0 +1,134 @@
+/* 设计令牌与基础样式。
+   取值直接来自 UI 原型，改这里等于改全站观感。 */
+
+:root {
+  --bg: #f6f7f9;
+  --surface: #fff;
+  --border: #e5e7eb;
+  --border2: #d1d5db;
+  --text: #1f2328;
+  --muted: #6b7280;
+  --faint: #9ca3af;
+  --primary: #2563eb;
+  --primary-soft: #eff6ff;
+  --success: #16a34a;
+  --success-soft: #f0fdf4;
+  --warning: #d97706;
+  --warning-soft: #fffbeb;
+  --danger: #dc2626;
+  --danger-soft: #fef2f2;
+  --purple: #7c3aed;
+  --purple-soft: #f5f3ff;
+  --r: 10px;
+
+  /* 五个断点，移动优先，统一用 min-width 往上增强 */
+  --bp-sm: 480px;
+  --bp-md: 768px;
+  --bp-lg: 1024px;
+  --bp-xl: 1440px;
+
+  --content-max: 100%;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font:
+    14px/1.6 system-ui,
+    -apple-system,
+    "Segoe UI",
+    "Microsoft YaHei",
+    sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  /* 任何断点下都不该出现横向滚动条，这是最基础的验收项 */
+  overflow-x: hidden;
+}
+
+a {
+  color: inherit;
+}
+
+/* 长哈希不加这条会把布局撑破，直接顶出横向滚动条 */
+.mono,
+.hash,
+code,
+kbd {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.app {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-main {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 内容区限宽：LG 1200px、XL 1400px 居中 */
+.pad {
+  padding: 14px;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  width: 100%;
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --content-max: 1200px;
+  }
+  .pad {
+    padding: 18px 22px 60px;
+  }
+}
+
+@media (min-width: 1440px) {
+  :root {
+    --content-max: 1400px;
+  }
+}
+
+@media (max-width: 479px) {
+  /* XS：卡片内边距收紧到 10px */
+  .card {
+    padding: 10px;
+  }
+  .pad {
+    padding: 10px;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 触屏设备不依赖 hover 才显示的操作 */
+@media (hover: none) {
+  .hover-only {
+    display: none !important;
+  }
+}
