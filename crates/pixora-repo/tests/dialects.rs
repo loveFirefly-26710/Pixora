@@ -184,12 +184,18 @@ async fn same_repository_code_runs_on_every_configured_dialect() {
         );
 
         // ---- 5. 批量哈希预检：占位符改写是这一处最容易出错的地方 ----
-        let check = repo
-            .existing_hashes(&[sha.clone(), format!("{:064x}", 9999)])
+        // 此时实体还在、但没有任何活着的引用（第 4 步把计数减到了 0，
+        // 图片是下一步才建的）：预检必须报「不存在」——
+        // 用户删光图片后重传同一批时，靠的就是这个判定，不能只看 blobs 表
+        let before_image = repo
+            .existing_hashes(user.id, &[sha.clone(), format!("{:064x}", 9999)])
             .await
             .unwrap();
-        assert_eq!(check.exist, vec![sha.clone()], "{driver:?}：预检命中");
-        assert_eq!(check.missing.len(), 1, "{driver:?}：预检漏报");
+        assert!(
+            before_image.exist.is_empty(),
+            "{driver:?}：没有活着的引用时预检不该命中"
+        );
+        assert_eq!(before_image.missing.len(), 2, "{driver:?}：预检漏报");
 
         // ---- 6. 相册与图片引用：多表 JOIN、可空外键、CAS 路径 ----
         let album = repo
@@ -212,6 +218,28 @@ async fn same_repository_code_runs_on_every_configured_dialect() {
             )
             .await
             .unwrap();
+
+        // 有了活着的引用，预检这才该命中（同一个哈希，前后两种结论）
+        let after_image = repo
+            .existing_hashes(user.id, &[sha.clone(), format!("{:064x}", 9999)])
+            .await
+            .unwrap();
+        assert_eq!(
+            after_image.exist,
+            vec![sha.clone()],
+            "{driver:?}：有活引用时预检命中"
+        );
+        assert_eq!(after_image.missing.len(), 1, "{driver:?}：预检漏报");
+
+        // 别人家的图不算数：预检按调用者自己的图库判
+        let other = repo
+            .existing_hashes(user.id + 9999, &[sha.clone()])
+            .await
+            .unwrap();
+        assert!(
+            other.exist.is_empty(),
+            "{driver:?}：别的账号的图不该让本账号的预检命中"
+        );
 
         let view = repo.find_image_view(image.id).await.unwrap().unwrap();
         assert_eq!(view.sha256, sha, "{driver:?}：视图里的哈希");

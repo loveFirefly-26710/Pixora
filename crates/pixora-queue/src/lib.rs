@@ -46,7 +46,10 @@ impl Default for QueueConfig {
     fn default() -> Self {
         Self {
             // 宽限期给足：上传是先写实体再建引用的，太短会误删正在上传的文件
-            gc_grace_minutes: 60,
+            // 宽限期是「登记实体 → 建引用」那道时间窗的余量，不是「文件该留多久」。
+            // 拿它当留存期是个误会：上传请求里这两步相隔毫秒，10 分钟已经非常宽裕，
+            // 而 60 分钟会让「删完图文件还在」看着像没删掉。
+            gc_grace_minutes: 10,
             gc_batch: 200,
             mail_poll_seconds: 30,
             reconcile_seconds: 3600,
@@ -106,7 +109,13 @@ pub fn spawn(state: Arc<AppState>, config: QueueConfig) -> Vec<tokio::task::Join
                     Ok(removed) => tracing::info!(removed, "回收无引用的物理文件"),
                     Err(err) => tracing::warn!(error = %err, "Blob 回收失败"),
                 }
-                tokio::time::sleep(Duration::from_secs(1800)).await;
+                // 定时扫描保证「没人催也会回收」；删除类操作会踢一下通知，
+                // 让刚失去引用的文件当场就走一轮，而不是等下一个整点窗口。
+                // 回收本身仍然是「只在这里删物理文件」这一条不变量。
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+                    _ = state.wait_gc_kick() => {}
+                }
             }
         }
     }));

@@ -591,6 +591,8 @@ impl AppState {
         }
 
         if removed > 0 {
+            // 最后一张引用可能刚刚消失：催一次回收，别让文件在磁盘上多躺半小时
+            self.kick_gc();
             self.audit_detail(
                 actions::DELETE_IMAGE,
                 actor_id,

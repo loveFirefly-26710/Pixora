@@ -120,4 +120,11 @@ pub trait StorageDriver: Send + Sync {
     async fn unlink_view(&self, _view_rel: &str) -> Result<()> {
         Ok(())
     }
+
+    /// 清掉镜像树里已经空了的目录（如 `users/{uid}/{相册}`）。
+    /// 只有本地磁盘有真实目录；远端驱动维护的是数据库虚拟树，删相册时自动消失，
+    /// 所以这里默认什么都不做。
+    async fn remove_view_dir(&self, _view_rel: &str) -> Result<()> {
+        Ok(())
+    }
 }

@@ -21,7 +21,12 @@ use crate::error::{Result, StorageError};
 /// 本地目录后端。
 pub struct LocalDriver {
     root: PathBuf,
-    /// 硬链接镜像树的根（通常是 `{root}/users`）。
+    /// 镜像树的挂载点。逻辑路径本身已经带了 `users/` 这一级
+    /// （见 `cas::view_rel_path`），所以这里就是数据根目录本身。
+    ///
+    /// 早期版本在这里又拼了一次 `users`，结果镜像树落到了
+    /// `{root}/users/users/{uid}/{相册}/…`——多一层嵌套，
+    /// 对账时会顺手把那批残留清掉（见 queue 的 reconcile）。
     /// 置空则不维护镜像树，只保留 CAS 实体。
     view_root: Option<PathBuf>,
 }
@@ -30,7 +35,7 @@ impl LocalDriver {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         Self {
-            view_root: Some(root.join("users")),
+            view_root: Some(root.clone()),
             root,
         }
     }
@@ -219,6 +224,38 @@ impl StorageDriver for LocalDriver {
             Err(err) => Err(StorageError::Io(err)),
         }
     }
+
+    /// 删掉已经空了的镜像目录，一路向上直到 view_root 或第一个非空目录。
+    /// 只删空目录：里面还有别人的文件时 `remove_dir` 会失败，那就停下——
+    /// 绝不递归删（递归删等于绕过引用计数删物理文件，那是 GC 的活）。
+    async fn remove_view_dir(&self, view_rel: &str) -> Result<()> {
+        let Some(view_root) = self.view_root.as_ref() else {
+            return Ok(());
+        };
+        let mut current = self.resolve_view(view_rel)?;
+        while current.starts_with(view_root) && current != *view_root {
+            match fs::remove_dir(&current).await {
+                Ok(()) => {}
+                // 非空（还有别的图）或本来就没有：到此为止
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::DirectoryNotEmpty
+                            | std::io::ErrorKind::Other
+                    ) =>
+                {
+                    return Ok(());
+                }
+                Err(err) => return Err(StorageError::Io(err)),
+            }
+            match current.parent() {
+                Some(parent) if parent.starts_with(view_root) => current = parent.to_path_buf(),
+                _ => return Ok(()),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 硬链接不受支持时的错误特征。跨平台判断，认不出来就当普通错误抛出。
@@ -337,28 +374,45 @@ mod tests {
             .await
             .unwrap();
 
-        // 同一份数据挂到两个用户的相册目录下
-        let linked_a = driver
-            .link_view(&key, "1001/旅行/aaaabbbbccccdddd.jpg")
-            .await
-            .unwrap();
-        let linked_b = driver
-            .link_view(&key, "1002/头像/aaaabbbbccccdddd.jpg")
-            .await
-            .unwrap();
+        // 同一份数据挂到两个用户的相册目录下。
+        // 路径一律走 cas::view_rel_path 生成（带 `users/` 那一级）——
+        // 手写过相对路径的测试正好漏掉了它多套一层的问题。
+        let sha = "aaaabbbbccccdddd";
+        let rel_a = crate::cas::view_rel_path("1001", "旅行", sha, "jpg");
+        let rel_b = crate::cas::view_rel_path("1002", "头像", sha, "jpg");
+        let linked_a = driver.link_view(&key, &rel_a).await.unwrap();
+        let linked_b = driver.link_view(&key, &rel_b).await.unwrap();
 
         if linked_a && linked_b {
-            let view_a = dir.path().join("users/1001/旅行/aaaabbbbccccdddd.jpg");
-            let view_b = dir.path().join("users/1002/头像/aaaabbbbccccdddd.jpg");
-            assert!(view_a.exists() && view_b.exists());
+            let view_a = dir.path().join(&rel_a);
+            let view_b = dir.path().join(&rel_b);
+            assert!(
+                view_a.exists() && view_b.exists(),
+                "镜像链接应当落在 users/{{uid}}/{{相册}}/ 下（实际找的是 {}）",
+                view_a.display()
+            );
             // 硬链接共享同一个 inode
             let meta_a = std::fs::metadata(&view_a).unwrap();
             let meta_b = std::fs::metadata(&view_b).unwrap();
             assert_eq!(meta_a.len(), meta_b.len());
 
-            driver.unlink_view("1001/旅行/aaaabbbbccccdddd.jpg").await.unwrap();
+            driver.unlink_view(&rel_a).await.unwrap();
             assert!(!view_a.exists());
             assert!(view_b.exists(), "删一个视图不影响另一个");
+
+            // 目录收尾：清空了就该把空目录删掉（删相册/删到没图时走这里）
+            driver
+                .remove_view_dir(&crate::cas::view_rel_path("1001", "旅行", "", "").trim_end_matches('/'))
+                .await
+                .unwrap();
+            assert!(
+                !dir.path().join("users/1001/旅行").exists(),
+                "空了的相册目录应当被收掉"
+            );
+            assert!(
+                dir.path().join("users/1002/头像").exists(),
+                "还有链接的目录不许动"
+            );
         }
     }
 

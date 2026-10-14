@@ -23,11 +23,19 @@ pub async fn collect_blobs(state: &Arc<AppState>, grace_minutes: i64, batch: i64
     let mut removed = 0u64;
 
     for blob in candidates {
-        // 再确认一次：并发上传可能在这一瞬间给它加上了引用
+        // 再确认一次：并发上传可能在这一瞬间给它加上上了引用
         let Some(fresh) = state.repo.find_blob_by_id(blob.id).await? else {
             continue;
         };
         if fresh.ref_count > 0 {
+            continue;
+        }
+
+        // 先摘掉指向它的软删行：外键挡着实体行不让删，不清的话物理文件永远回收不掉。
+        // 单条出问题只跳过这一条——原来的写法会让一个「删不掉」的实体
+        // 拖垮整轮回收，其它几十个孤儿文件跟着一起走不掉。
+        if let Err(err) = state.repo.purge_tombstones_for_blob(fresh.id).await {
+            tracing::warn!(blob_id = fresh.id, error = %err, "清理软删引用失败，跳过这个实体");
             continue;
         }
 
@@ -51,16 +59,39 @@ pub async fn collect_blobs(state: &Arc<AppState>, grace_minutes: i64, batch: i64
         }
 
         // 只删引用计数仍为 0 的行，防止「删物理文件」与「新建引用」之间被插队
-        let affected = state.repo.delete_blob_if_unreferenced(fresh.id).await?;
-        if affected > 0 {
-            removed += 1;
+        match state.repo.delete_blob_if_unreferenced(fresh.id).await {
+            Ok(affected) if affected > 0 => removed += 1,
+            // 0 行说明这一瞬间有人新建了引用：文件已经删了，只能下一轮再看
+            Ok(_) => tracing::warn!(blob_id = fresh.id, "实体行删除时已被重新引用"),
+            Err(err) => {
+                tracing::warn!(blob_id = fresh.id, error = %err, "实体行删除失败，留到下一轮");
+            }
         }
     }
     Ok(removed)
 }
 
 /// 对账：重算用量与相册计数。修正是幂等的，跑多少次结果一样。
+/// 清掉旧版镜像树的残留：`{data_dir}/users/users/…`。
+///
+/// 早期版本的镜像路径解析多拼了一层 `users`，于是硬链接落进了 `users/users/`。
+/// 修好路径之后那批目录就成了没人认领的残骸，而且删图/删相册都不会再碰它们。
+/// 里面的文件都是硬链接，删链接不动 CAS 里的正本，所以整棵清掉是安全的。
+/// 清过一次之后这就是个 no-op（`users/users` 不可能是正常路径：uid 是数字，
+/// 相册 slug 夹在 uid 后面）。
+async fn clean_legacy_view_tree(state: &Arc<AppState>) {
+    let legacy = state.config.data_dir.join("users").join("users");
+    if !legacy.exists() {
+        return;
+    }
+    match tokio::fs::remove_dir_all(&legacy).await {
+        Ok(()) => tracing::info!(path = %legacy.display(), "清掉了旧版遗留的镜像目录"),
+        Err(err) => tracing::warn!(error = %err, path = %legacy.display(), "清理旧版镜像目录失败"),
+    }
+}
+
 pub async fn reconcile(state: &Arc<AppState>) -> pixora_core::Result<u64> {
+    clean_legacy_view_tree(state).await;
     let users = state.repo.reconcile_all_used_bytes().await?;
     let albums = state.repo.recount_all_album_images().await?;
     // 引用计数也要对账。删除账号走的是外键级联，少了「递减计数」那一步，

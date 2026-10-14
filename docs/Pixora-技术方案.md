@@ -162,7 +162,7 @@ Pixora 的做法是：把缩略图和哈希计算推到浏览器，服务端只�
 
 几个刻意的设计点：
 
-- **API 与 Worker 同进程**。后台任务（远端后端推送、缩略图兜底、Blob 垃圾回收、邮件重试）跑在进程内的有界异步任务池里，不引入 Redis 或独立 worker 容器。少一个进程就少一份内存和一套运维。
+- **API 与 Worker 同进程**。后台任务（远端后端推送、缩略图兜底、Blob 垃圾回收与删除后即时催收、邮件重试）跑在进程内的有界异步任务池里，不引入 Redis 或独立 worker 容器。少一个进程就少一份内存和一套运维。
 - **前端构建产物用 `rust-embed` 打进二进制**。部署时只有一个文件，不用挂载静态目录。
 - **仓储层用 trait 隔离 SQL 方言**。PostgreSQL 和 MySQL 走 `sqlx`，SQLite 走 `rusqlite`（bundled 特性自带 SQLite 源码，免系统依赖，静态编译友好）。上层服务只调仓储 trait，不写方言 SQL。
 
@@ -228,6 +228,8 @@ users ──┬── albums ──┬── images ──── blobs（内容�
   disposable_domains   一次性邮箱域名清单
   audit_logs           操作与安全事件日志
 ```
+
+**软删只是打标记，不构成引用。** 删除图片是给 `images.deleted_at` 写时间戳，`ref_count` 按「活着的引用」算；回收时连指向同一实体的墓碑行一起清掉——否则外键会把物理文件永远钉在磁盘上（没有回收站功能，内容没了，行也没有留的意义）。
 
 **blobs 与 images 分离是去重的核心。** 一张物理文件在 `blobs` 里只有一行，`sha256` 唯一。任何用户、任何相册引用它，都在 `images` 里生成一行指向 `blob_id`。`blobs.ref_count` 记录被引用次数，删除图片时递减，归零才真正删物理文件。这样用户 A 删掉自己那张图，用户 B 的同一张图毫发无损。
 
@@ -421,7 +423,7 @@ https://img.example.com/images/a3f9c1b8...e7.webp
 | GET | `/api/v1/images` | 图片列表，支持分页与标签筛选 | read |
 | GET | `/api/v1/images/{id}` | 单张图片详情 | read |
 | PATCH | `/api/v1/images/{id}` | 改标签、可见性、所属相册 | write |
-| DELETE | `/api/v1/images/{id}` | 删除图片，引用计数归零才删物理文件 | write |
+| DELETE | `/api/v1/images/{id}` | 删除图片；引用归零后由 GC 回收物理文件（删除会立即催一次） | write |
 | GET | `/api/v1/albums` | 相册列表 | read |
 | POST | `/api/v1/albums` | 新建相册 | write |
 | PATCH | `/api/v1/albums/{id}` | 改相册名称、可见性、排序 | write |

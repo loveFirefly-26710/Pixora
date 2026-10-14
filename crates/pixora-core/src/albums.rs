@@ -177,7 +177,41 @@ impl AppState {
             ));
         }
         let count = album.image_count;
+
+        // 相册目录是给人看的镜像视图，删相册要连它一起收掉：
+        // 里面的图片会被外键置空落到「未分类」（未分类没有镜像目录），
+        // 旧目录留着就成了指向一批已经不在这个相册里的图的残骸。
+        // 远端驱动维护的是数据库虚拟树，卸掉引用即消失，unlink 是空操作。
+        if let Ok(Some(owner)) = self.repo.find_user_by_id(album.owner_id).await {
+            for blob in self.repo.album_original_blobs(album_id).await? {
+                let view = pixora_storage::cas::view_rel_path(
+                    &owner.uid,
+                    &album.slug,
+                    &blob.sha256,
+                    &blob.ext,
+                );
+                if let Err(err) = self
+                    .storage
+                    .unlink_view(&blob.storage_driver, blob.backend_id, &view)
+                    .await
+                {
+                    tracing::debug!(error = %err, "删除相册时移除镜像链接失败");
+                }
+            }
+            // 只有本地磁盘有真实目录；只删空目录，里面还有东西就留着
+            self.prune_view_dir(
+                pixora_storage::names::LOCAL,
+                None,
+                &owner.uid,
+                &album.slug,
+            )
+            .await;
+        }
+
         self.repo.delete_album(album_id).await?;
+        // 删相册把一批图片交给「未分类」，它们的实体可能就此没人引用了：
+        // 催一次回收，别让用户等下一个整点半
+        self.kick_gc();
         Ok(count)
     }
 

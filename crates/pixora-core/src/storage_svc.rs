@@ -365,6 +365,20 @@ impl StorageService {
         driver.unlink_view(view_rel).await.map_err(AppError::from)
     }
 
+    /// 清掉已经空了的镜像目录（本地磁盘才有真实目录，远端驱动是空实现）。
+    pub async fn remove_view_dir(
+        &self,
+        driver_name: &str,
+        backend_id: Option<i64>,
+        view_rel: &str,
+    ) -> Result<()> {
+        let driver = self.resolve(driver_name, backend_id)?;
+        driver
+            .remove_view_dir(view_rel)
+            .await
+            .map_err(AppError::from)
+    }
+
     /// 本地文件系统路径。有它就能让 Caddy 直接发文件，进程不碰数据。
     pub async fn local_path(&self, driver_name: &str, backend_id: Option<i64>, key: &str) -> Option<PathBuf> {
         let driver = self.resolve(driver_name, backend_id).ok()?;

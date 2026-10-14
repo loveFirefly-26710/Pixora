@@ -91,7 +91,11 @@ impl AppState {
     /// 批量预检：客户端一次发上千个哈希，服务端只回哪些已存在。
     ///
     /// 这是省带宽的关键一步——重复文件连上传请求都不发。
-    pub async fn check_hashes(&self, hashes: &[String]) -> Result<HashCheckOutcome> {
+    /// 预检：这些哈希里哪些在**这个账号的图库里**已经有活着的图。
+    ///
+    /// 客户端据此跳过重复上传，所以判定口径必须跟着「活着的引用」走：
+    /// 只看 blobs 表的话，用户删光图片后重传同一批会被整批跳过。
+    pub async fn check_hashes(&self, owner_id: i64, hashes: &[String]) -> Result<HashCheckOutcome> {
         if hashes.is_empty() {
             return Ok(HashCheckOutcome {
                 exist: Vec::new(),
@@ -107,7 +111,7 @@ impl AppState {
             }
         }
         let normalized: Vec<String> = hashes.iter().map(|hash| hash.to_lowercase()).collect();
-        let check = self.repo.existing_hashes(&normalized).await?;
+        let check = self.repo.existing_hashes(owner_id, &normalized).await?;
         Ok(HashCheckOutcome {
             exist: check.exist,
             missing: check.missing,
@@ -502,6 +506,26 @@ impl AppState {
         let view = view_rel_path(uid, album_slug, sha256, ext);
         if let Err(err) = self.storage.unlink_view(driver, backend_id, &view).await {
             tracing::debug!(error = %err, "删除镜像链接失败（可能本来就没有）");
+        }
+        // 最后一张删掉之后目录会空着：顺手收掉，别让磁盘上留一串空壳目录
+        self.prune_view_dir(driver, backend_id, uid, album_slug).await;
+    }
+
+    /// 清掉已经空了的镜像目录（只删空目录，绝不递归）。
+    pub async fn prune_view_dir(
+        &self,
+        driver: &str,
+        backend_id: Option<i64>,
+        uid: &str,
+        album_slug: &str,
+    ) {
+        let view = format!("users/{uid}/{album_slug}");
+        if let Err(err) = self
+            .storage
+            .remove_view_dir(driver, backend_id, &view)
+            .await
+        {
+            tracing::debug!(error = %err, "清理镜像空目录失败");
         }
     }
 

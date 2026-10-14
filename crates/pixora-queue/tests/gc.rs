@@ -285,3 +285,240 @@ async fn deleting_a_user_does_not_strand_physical_files() {
     assert_eq!(removed, 1);
     assert!(!path.exists(), "删账号不该把物理文件永久留在盘上");
 }
+
+/// 建一个用户 + 一个真实文件 + 相册里的图片引用，并把镜像链接建好。
+/// 返回 (用户, 相册, blob_id, 物理文件, 镜像链接路径)。
+async fn seed_album_image(
+    state: &Arc<AppState>,
+    marker: char,
+    uid: &str,
+) -> (
+    pixora_repo::model::User,
+    pixora_repo::model::Album,
+    i64,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let user = state
+        .repo
+        .create_user(&pixora_repo::repo::users::NewUser {
+            uid: uid.to_string(),
+            email: format!("{uid}@example.com"),
+            password_hash: "$argon2id$placeholder".to_string(),
+            role: "user".to_string(),
+            status: "active".to_string(),
+            quota_bytes: 1024 * 1024,
+            email_verified: true,
+        })
+        .await
+        .unwrap();
+    let album = state
+        .repo
+        .create_album(&pixora_repo::repo::albums::NewAlbum {
+            owner_id: user.id,
+            name: "旅行".to_string(),
+            slug: "旅行".to_string(),
+            description: None,
+            visibility: "private".to_string(),
+            sort_order: 0,
+        })
+        .await
+        .unwrap();
+
+    let (blob_id, path) = seed_blob(state, marker).await;
+    let blob = state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap();
+    state
+        .repo
+        .create_image_reference(
+            &pixora_repo::repo::images::NewImage {
+                owner_id: user.id,
+                album_id: Some(album.id),
+                blob_id,
+                thumb_blob_id: None,
+                original_name: "in-album.png".to_string(),
+                title: None,
+                visibility: "private".to_string(),
+            },
+            21,
+            &[],
+        )
+        .await
+        .unwrap();
+
+    // 镜像树：与上传路径一致，给本地驱动的实体建硬链接
+    state
+        .link_view_for(
+            &blob.storage_driver,
+            blob.backend_id,
+            &blob.storage_key,
+            &user.uid,
+            &album.slug,
+            &blob.sha256,
+            &blob.ext,
+        )
+        .await;
+    let view = state
+        .config
+        .data_dir
+        .join("users")
+        .join(&user.uid)
+        .join(&album.slug)
+        .join(format!("{}.{}", blob.sha256, blob.ext));
+    (user, album, blob_id, path, view)
+}
+
+#[tokio::test]
+async fn deleting_an_album_clears_its_mirror_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+    let (user, album, blob_id, path, view) = seed_album_image(&state, 'm', "3003").await;
+    assert!(view.exists(), "上传进相册后镜像树里应当有链接");
+    let album_dir = view.parent().unwrap().to_path_buf();
+
+    // 删相册：图片落到「未分类」，镜像目录与链接都要收掉
+    let detached = state
+        .delete_album(&pixora_core::images::Viewer::User(user.clone()), album.id)
+        .await
+        .unwrap();
+    assert_eq!(detached, 1, "应当解除 1 张图片的关联");
+    assert!(!view.exists(), "删相册后镜像链接不该还在");
+    assert!(
+        !album_dir.exists(),
+        "空了的相册目录也该收掉，别在磁盘上留空壳"
+    );
+    assert!(path.exists(), "物理文件不归删相册管——引用还在（未分类），由 GC 处理");
+    assert_eq!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
+        1,
+        "图片只是换了归属，引用计数不该变"
+    );
+}
+
+#[tokio::test]
+async fn default_album_cannot_be_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+    let user = state
+        .repo
+        .create_user(&pixora_repo::repo::users::NewUser {
+            uid: "3004".to_string(),
+            email: "keeper@example.com".to_string(),
+            password_hash: "$argon2id$placeholder".to_string(),
+            role: "user".to_string(),
+            status: "active".to_string(),
+            quota_bytes: 1024 * 1024,
+            email_verified: true,
+        })
+        .await
+        .unwrap();
+    let album = state
+        .repo
+        .insert_default_album(user.id, "默认相册")
+        .await
+        .unwrap();
+
+    let refused = state
+        .delete_album(&pixora_core::images::Viewer::User(user), album.id)
+        .await;
+    assert!(refused.is_err(), "默认相册是上传的落脚点，不该允许删除");
+    assert!(
+        state.repo.find_album_by_id(album.id).await.unwrap().is_some(),
+        "拒绝之后相册要还在"
+    );
+}
+
+#[tokio::test]
+async fn legacy_nested_view_tree_is_cleaned_by_reconcile() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+
+    // 旧版 bug 的产物：users/users/{uid}/{相册}/…（硬链接到 CAS 正本）
+    let legacy = state.config.data_dir.join("users").join("users").join("1000").join("旅行");
+    tokio::fs::create_dir_all(&legacy).await.unwrap();
+    let link = legacy.join("deadbeef.png");
+    tokio::fs::write(&link, b"legacy-link").await.unwrap();
+
+    gc::reconcile(&state).await.unwrap();
+    assert!(
+        !state.config.data_dir.join("users").join("users").exists(),
+        "对账应当把旧版多套一层的镜像树清掉"
+    );
+
+    // 正常路径（users/{uid}/…）不受影响，别顺手把好的也删了
+    let good = state.config.data_dir.join("users").join("1000").join("旅行");
+    tokio::fs::create_dir_all(&good).await.unwrap();
+    tokio::fs::write(good.join("keep.png"), b"keep").await.unwrap();
+    gc::reconcile(&state).await.unwrap();
+    assert!(good.join("keep.png").exists(), "正常镜像树不该被清理动到");
+}
+
+/// 软删的墓碑不能把物理文件钉死。
+///
+/// 老版本里 `images.blob_id` 的外键挡着实体的行不让删，而软删行（deleted_at
+/// 非空）会一直留着，于是「最后一张引用删了」之后文件永远回收不掉——
+/// 用户看到的就是「删完了磁盘上还有一堆缩略图」。
+#[tokio::test]
+async fn soft_deleted_rows_do_not_pin_physical_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+    let (blob_id, path) = seed_blob(&state, 't').await;
+
+    let user = state
+        .repo
+        .create_user(&pixora_repo::repo::users::NewUser {
+            uid: "3005".to_string(),
+            email: "tombstone@example.com".to_string(),
+            password_hash: "$argon2id$placeholder".to_string(),
+            role: "user".to_string(),
+            status: "active".to_string(),
+            quota_bytes: 1024 * 1024,
+            email_verified: true,
+        })
+        .await
+        .unwrap();
+    let image = state
+        .repo
+        .create_image_reference(
+            &pixora_repo::repo::images::NewImage {
+                owner_id: user.id,
+                album_id: None,
+                blob_id,
+                thumb_blob_id: None,
+                original_name: "gone.png".to_string(),
+                title: None,
+                visibility: "private".to_string(),
+            },
+            21,
+            &[],
+        )
+        .await
+        .unwrap();
+
+    // 走真实的删除路径：软删行留下、引用计数归零
+    state
+        .delete_image(&pixora_core::images::Viewer::User(user.clone()), image.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
+        0,
+        "软删之后引用计数应当归零"
+    );
+    assert!(
+        state.repo.find_image(image.id).await.unwrap().is_some(),
+        "软删只是打标记，行还在——这正是它挡住外键的地方"
+    );
+
+    age_blob(&state, blob_id, 3).await;
+    let removed = gc::collect_blobs(&state, 10, 10).await.unwrap();
+    assert_eq!(removed, 1, "过宽限期后应当回收");
+    assert!(!path.exists(), "物理文件要真删掉");
+    assert!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().is_none(),
+        "实体行也要删掉"
+    );
+    assert!(
+        state.repo.find_image(image.id).await.unwrap().is_none(),
+        "墓碑跟着内容一起消失（没有回收站，留着没有意义）"
+    );
+}

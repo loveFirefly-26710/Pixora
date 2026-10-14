@@ -487,6 +487,8 @@ impl AppState {
         )
         .await;
         self.repo.delete_user(user_id).await?;
+        // 级联删掉的内容对应的实体可能直接归零：催一次回收
+        self.kick_gc();
         Ok(())
     }
 

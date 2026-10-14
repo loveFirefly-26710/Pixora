@@ -270,6 +270,34 @@ impl Repo {
     }
 
     /// 相册维度的文件数与字节数，`fs/tree` 与容量展示都要。
+    /// 相册里还活着的图片引用的实体（删除相册时用来清镜像树）。
+    ///
+    /// 列名统一加 `b.` 前缀并 `AS` 回裸名：JOIN 之后 `id` 会撞名，
+    /// 而 `from_row` 是按裸列名读的。
+    pub async fn album_original_blobs(&self, album_id: i64) -> Result<Vec<crate::model::Blob>> {
+        const COLS: &str = "b.id AS id, b.sha256 AS sha256, b.kind AS kind, b.size AS size,              b.mime_type AS mime_type, b.ext AS ext, b.width AS width, b.height AS height,              b.storage_driver AS storage_driver, b.storage_key AS storage_key,              b.backend_id AS backend_id, b.ref_count AS ref_count, b.created_at AS created_at";
+        let sql = format!(
+            "SELECT {COLS} FROM blobs b JOIN images i ON i.blob_id = b.id              WHERE i.album_id = ? AND i.deleted_at IS NULL AND b.kind = 'original'"
+        );
+        let rows = self.db.fetch_all(&sql, Args::new().int(album_id)).await?;
+        rows.iter().map(crate::model::Blob::from_row).collect()
+    }
+
+    /// 清掉指向某个实体的软删行（墓碑）。
+    ///
+    /// 软删只是打标记，行还在；而 `images.blob_id` 的外键挡着实体的行不让删，
+    /// 于是「最后一张引用删了」之后物理文件永远回收不掉——墓碑把内容钉死了。
+    /// 这里没有回收站功能，内容都要删了，留一行指向不存在的实体没有意义。
+    /// 只删 `deleted_at` 非空的：活着的引用在调用方已经确认不存在。
+    pub async fn purge_tombstones_for_blob(&self, blob_id: i64) -> Result<u64> {
+        self.db
+            .execute(
+                "DELETE FROM images WHERE deleted_at IS NOT NULL AND (blob_id = ? OR thumb_blob_id = ?)",
+                Args::new().int(blob_id).int(blob_id),
+            )
+            .await
+    }
+
     pub async fn album_aggregates(&self, owner_id: i64) -> Result<Vec<AlbumAggregate>> {
         let rows = self
             .db
