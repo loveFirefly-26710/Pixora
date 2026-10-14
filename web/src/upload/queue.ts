@@ -96,6 +96,14 @@ export interface IncomingFile {
 }
 
 const MAX_RETRIES = 3;
+/**
+ * 网络类失败给更多次机会。
+ *
+ * 「连接被中断」多半是服务端在重启（换构建、崩了重拉）：等十几秒就恢复了，
+ * 按普通上限 3 次（累计不到 6 秒）会当场判死，用户回来看到的是一排失败。
+ * 网络类失败按 8 次、退避到 8 秒封顶，总共能等半分钟左右。
+ */
+const MAX_NETWORK_RETRIES = 8;
 /** 预检一批最多发多少个哈希。契约上限 1000，留出余量防止哈希串太长。 */
 const PREFLIGHT_BATCH = 400;
 /** Worker 单任务超时：超过就认定 Worker 坏了，terminate 后走降级路径。 */
@@ -974,13 +982,15 @@ class UploadQueue {
       });
     }
 
-    if (!permanent && item.retries < MAX_RETRIES) {
+    // 网络类失败（服务端不可达、连接被切）多给几次机会：多半是重启，等一会儿就好
+    const limit = apiError?.code === "NETWORK" ? MAX_NETWORK_RETRIES : MAX_RETRIES;
+    if (!permanent && item.retries < limit) {
       item.retries += 1;
       const delay = backoffDelay(item.retries, apiError?.retryAfter);
       item.retryAt = Date.now() + delay;
       item.status = "ready";
       item.progress = 0;
-      item.note = `第 ${item.retries}/${MAX_RETRIES} 次重试将在 ${Math.max(1, Math.round(delay / 1000))} 秒后开始`;
+      item.note = `第 ${item.retries}/${limit} 次重试将在 ${Math.max(1, Math.round(delay / 1000))} 秒后开始`;
       item.error = apiError?.message ?? (err instanceof Error ? err.message : "上传失败");
       return;
     }
