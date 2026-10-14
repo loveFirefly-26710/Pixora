@@ -610,27 +610,22 @@ textarea.f::placeholder {
   grid-template-columns: repeat(8, 1fr);
 }
 
-/* 图片网格列数按断点：XS/SM 2 列 → MD 3 → LG 4 → XL 5 */
+/* 广场图片网格：每行几列由后台配置（--plaza-cols，见 plaza.ts）。
+   写法上不直接写死列数，而是把它换算成「单张图的最小宽度」交给 auto-fill：
+   容器放得下就正好排 --plaza-cols 列，放不下（手机）就自动少几列，
+   这样列数配置和响应式不再互相打架。末尾那 1px 是给浏览器取整留的余量，
+   没有它偶尔会算出「差 0.5px 放不下」而少排一列。 */
 .igrid {
-  grid-template-columns: repeat(2, 1fr);
-}
-
-@media (min-width: 768px) {
-  .igrid {
-    grid-template-columns: repeat(3, 1fr);
-  }
-}
-
-@media (min-width: 1024px) {
-  .igrid {
-    grid-template-columns: repeat(4, 1fr);
-  }
-}
-
-@media (min-width: 1440px) {
-  .igrid {
-    grid-template-columns: repeat(5, 1fr);
-  }
+  --plaza-cols: 3;
+  --plaza-gap: 10px;
+  gap: var(--plaza-gap);
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(
+      max(160px, calc((100% - (var(--plaza-cols) - 1) * var(--plaza-gap) - 1px) / var(--plaza-cols))),
+      1fr
+    )
+  );
 }
 
 .tile {

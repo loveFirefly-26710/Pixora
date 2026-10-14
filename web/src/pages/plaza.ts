@@ -8,13 +8,13 @@
  * 已登录：上传区在广场上方，同屏可见，传完立刻能在下面看到自己的图（如果设为公开）。
  */
 
-import { request, requestPage } from "../core/api";
-import { debounce, h } from "../core/dom";
+import { requestPage } from "../core/api";
+import { h } from "../core/dom";
 import { relativeTime } from "../core/format";
 import { navigate, type PageContext } from "../core/router";
 import { currentUser, getState } from "../core/state";
 import { toastError } from "../core/toast";
-import type { ImageItem, TagRow } from "../core/types";
+import type { ImageItem } from "../core/types";
 import { createUploadPanel } from "../upload/panel";
 import { openLightbox } from "../ui/lightbox";
 import {
@@ -40,6 +40,19 @@ function readQuery(ctx: PageContext): PlazaQuery {
     sort: ctx.query.get("sort") === "hot" ? "hot" : "new",
     page: Number(ctx.query.get("page") ?? "1") || 1,
   };
+}
+
+/**
+ * 广场每行放几张图，由管理员在后台配置（默认 3 列）。
+ *
+ * 这里只把列数作为 CSS 变量交给样式表：真正的列数还要看窗口够不够宽，
+ * 窄屏放不下时自动少放几列，这件事用 CSS 的 auto-fill 做掉，
+ * 免得为了响应式在 JS 里监听窗口尺寸。
+ */
+function gridColumnsStyle(): string {
+  const columns = getState().site?.plaza_grid_columns ?? 3;
+  const clamped = Math.min(6, Math.max(2, columns));
+  return `--plaza-cols: ${clamped};`;
 }
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -84,21 +97,8 @@ export async function render(ctx: PageContext): Promise<void> {
     ctx.outlet.append(panel.root);
   }
 
-  // 搜索框只在顶栏那一个（原型就是这样，页面里不再重复一个）
-  const search = h("input", {
-    placeholder: "搜索标签、关键词…",
-    value: query.q ?? "",
-    "aria-label": "搜索广场",
-  });
-  search.addEventListener(
-    "input",
-    debounce(() => update({ q: search.value.trim() || null, page: null }), 350),
-  );
-  ctx.outlet.append(
-    h("div.flexline", { style: { marginBottom: "14px" } }, search),
-  );
-
-  // 标签与排序同处一行：标签靠左、排序靠右，与原型一致
+  // 搜索只在顶栏那一个输入框里（页面里不再重复），标签筛选也交给它——
+  // 后端的关键词匹配本来就同时命中标题与标签
   const tagRow = h("div.flexline", { style: { marginBottom: "14px" } });
   ctx.outlet.append(tagRow, gridHost, pagerHost);
 
@@ -116,30 +116,11 @@ export async function render(ctx: PageContext): Promise<void> {
       on: { click: () => update({ sort: "hot", page: null }) },
     }),
   ];
+  tagRow.append(h("span.spacer"), ...sortChips());
 
-  tagRow.append(h("button.chip", { type: "button", class: "on", text: "全部" }), h("span.spacer"), ...sortChips());
-  void request<TagRow[]>("/plaza/tags", { query: { limit: 24 } })
-    .then((tags) => {
-      tagRow.replaceChildren(
-        h("button.chip", {
-          type: "button",
-          class: query.tag === null ? "on" : "",
-          text: "全部",
-          on: { click: () => update({ tag: null, page: null }) },
-        }),
-        ...tags.map((tag) =>
-          h("button.chip", {
-            type: "button",
-            class: query.tag === tag.name ? "on" : "",
-            text: tag.name,
-            on: { click: () => update({ tag: tag.name, page: null }) },
-          }),
-        ),
-        h("span.spacer"),
-        ...sortChips(),
-      );
-    })
-    .catch(() => tagRow.replaceChildren());
+  // 顶栏搜索框显示当前关键词（从别处带着 ?q= 进来时也对得上）
+  const headerSearch = document.querySelector<HTMLInputElement>(".navbar .search input");
+  if (headerSearch) headerSearch.value = query.q ?? "";
 
   async function load(): Promise<void> {
     if (loading) return;
@@ -173,7 +154,7 @@ export async function render(ctx: PageContext): Promise<void> {
           ),
         );
       } else {
-        const grid = h("div.grid.igrid");
+        const grid = h("div.grid.igrid", { style: gridColumnsStyle() });
         for (const item of page.items) {
           grid.append(
             imageTile(item, {

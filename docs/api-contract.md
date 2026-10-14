@@ -113,7 +113,8 @@ API 客户端：
   "name": "Pixora", "base_url": "https://img.example.com",
   "upload_prefix": "images",
   "registration_open": true, "registration_closed_reason": null,
-  "plaza_public": true, "formats": ["jpg","png","gif","webp","avif","heic","tiff","bmp","svg"],
+  "plaza_public": true, "plaza_grid_columns": 3,
+  "formats": ["jpg","png","gif","webp","avif","heic","tiff","bmp","svg"],
   "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
   "thumb_client": true, "thumb_server_fallback": false,
   "appeal_email": "admin@example.com", "background": null,
@@ -346,7 +347,7 @@ API 客户端：
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `file` | 是 | 图片本体（字段名固定 `file`；兼容端点用 `image`） |
+| `file` | 是 | 图片本体（字段名固定 `file`） |
 | `sha256` | 否 | 客户端算好的哈希，带上可省一次服务端计算 |
 | `thumb` | 否 | 客户端生成的 WebP 缩略图，服务端只存不缩放 |
 | `album_id` | 否 | 目标相册 |
@@ -370,16 +371,6 @@ API 客户端：
 
 `{ "data": { "id": 991, "status": "done", "dedup": false, "image_id": 88214, "error": null } }`
 
-### `POST /upload` — 兼容旧版图床
-
-multipart，文件字段名 `image`，可选 `tags`。响应结构固定为：
-
-```json
-{ "success": true, "message": "上传成功", "url": "…", "storage_type": "local", "tags": "风景,旅行" }
-```
-
-失败时 `success: false` 并带 `message`。`?format=picgo` 或 `Accept: application/json` 时返回标准信封。
-
 ## 6. 广场
 
 ### `GET /api/v1/plaza` — 公开
@@ -387,6 +378,28 @@ multipart，文件字段名 `image`，可选 `tags`。响应结构固定为：
 `q`、`tag`、`sort`（`new` / `hot`）、`page`、`per_page`（默认 24，上限 100）。
 响应：分页信封，`data` 为 `[ImageItem]`（`original_name` 为 null）。
 若站点关闭广场公开浏览（`plaza_public=false`），未登录调用返回 `FORBIDDEN`。
+
+### `GET /api/v1/random` — 公开
+
+随机取一张公开图片，用来做「随机壁纸 / 每日一图」这类接入。
+
+| 参数 | 说明 |
+|---|---|
+| `tag` | 只在某个标签里挑 |
+| `q` | 关键词过滤，规则同广场搜索 |
+| `uid` | 只看某个用户（`u_` 开头的公开 UID）的图片 |
+| `format` | 填 `json` 返回 JSON，省略则 302 跳转到图片直链 |
+
+默认行为是 **302 跳转**（不是 301：随机结果不该被浏览器永久缓存；响应带 `Cache-Control: no-store`）。
+`?format=json` 时返回：
+
+```json
+{ "data": { "url": "https://…/images/a3f9….webp", "thumb_url": "https://…/images/a3f9….webp?thumb=1",
+            "id": 88214, "width": 1600, "height": 900, "size": 2411724,
+            "ext": "webp", "tags": ["风景"], "owner_uid": "u_1042" } }
+```
+
+挑不到符合条件的图片时返回 `NOT_FOUND`。`plaza_public=false` 时端点对未登录调用关闭，与广场一致。
 
 ## 7. 服务条款
 
@@ -609,7 +622,9 @@ GET /{upload_prefix}/{sha256}.{ext}?thumb=1    # 缩略图（没有则回落到�
 GET /{upload_prefix}/{sha256}.{ext}?download=1 # 强制下载（Content-Disposition: attachment）
 ```
 
-- 响应头带 `Cache-Control: public, max-age=31536000, immutable`（内容寻址，永不变化）
+- **还挂着公开引用**的图片可以匿名取，响应头带 `Cache-Control: public, max-age=31536000, immutable`（内容寻址，永不变化）
+- **只被私有内容引用**的图片：直链只对「本人（含管理员）」放行，其余返回 404；拿到链接不等于有权限
+  本人取到时带 `Cache-Control: private, max-age=300`，避免私人图片在共享缓存里停留
 - 响应头带 `ETag: "<sha256>"` 与 `X-Content-Type-Options: nosniff`
 - `ext` 与库中记录不一致时返回 404（防止用伪造扩展名探测）
 - SVG 额外带 `Content-Security-Policy: sandbox`；不可信来源（非本人且非公开）强制 `attachment`

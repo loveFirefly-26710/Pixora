@@ -33,7 +33,6 @@ const USER_NAV: NavItem[] = [
   { path: "/account/api", label: "API Token", icon: "🔑", match: ["/account/api"] },
   { path: "/account/terms", label: "服务调整 · 服务条款", icon: "📄", match: ["/account/terms"] },
   { path: "/docs/api", label: "API 文档", icon: "📘", match: ["/docs"] },
-  { path: "/account/my-albums", label: "我的相册", icon: "▤", match: ["/account/my-albums"] },
 ];
 
 const ADMIN_NAV: NavItem[] = [
@@ -49,7 +48,6 @@ const ADMIN_NAV: NavItem[] = [
 let refs: {
   shell: HTMLElement;
   navbar: HTMLElement;
-  sidebar: HTMLElement;
   tabbar: HTMLElement;
   drawer: HTMLElement;
   outlet: HTMLElement;
@@ -78,16 +76,13 @@ export function renderNavbar(): HTMLElement {
 
   navbar.append(
     h("a.logo", { href: "#/", html: `Pi<em>x</em>ora` }),
-    h(
-      "button.btn.sm.gho.only-mobile",
-      {
-        type: "button",
-        text: "☰",
-        "aria-label": "菜单",
-        style: { display: "none" },
-        on: { click: () => toggleDrawer(true) },
-      },
-    ),
+    // 导航收进抽屉后，这个按钮是所有页面唯一的入口，所以不分断点、始终显示
+    h("button.btn.sm.gho", {
+      type: "button",
+      text: "☰",
+      "aria-label": "打开导航菜单",
+      on: { click: () => toggleDrawer(true) },
+    }),
   );
 
   // 搜索框只在广场与相册页出现
@@ -131,29 +126,6 @@ export function renderNavbar(): HTMLElement {
 
   return navbar;
 }
-
-export function renderSidebar(): HTMLElement {
-  const sidebar = h("nav.sidebar", { "aria-label": "侧边导航" });
-  const user = getState().user;
-
-  if (user) {
-    sidebar.append(h("div.grp", { text: "用户中心" }));
-    for (const item of USER_NAV) sidebar.append(navLink(item));
-  } else {
-    sidebar.append(h("div.grp", { text: "浏览" }));
-    sidebar.append(navLink(PLAZA));
-  }
-
-  if (isAdmin()) {
-    sidebar.append(h("div.grp", { text: "管理后台" }));
-    for (const item of ADMIN_NAV) sidebar.append(navLink(item));
-  }
-
-  sidebar.append(h("div.grp", { text: "关于" }));
-  sidebar.append(navLink({ path: "/docs/api", label: "API 文档", icon: "📘" }));
-  return sidebar;
-}
-
 export function renderTabbar(): HTMLElement {
   const tabbar = h("nav.tabbar", { "aria-label": "主导航" });
   const user = getState().user;
@@ -218,15 +190,15 @@ export function toggleDrawer(open: boolean): void {
 /** 建外壳并返回页面内容挂载点。 */
 export function mountShell(root: HTMLElement): HTMLElement {
   const navbar = renderNavbar();
-  const sidebar = renderSidebar();
   const tabbar = renderTabbar();
   const drawer = renderDrawer();
   const outlet = h("main.app-main");
 
-  const shell = h("div.shell", null, sidebar, outlet);
+  // 按 UI 原型：界面里没有常驻侧边栏，导航全部走顶栏的菜单抽屉
+  const shell = h("div.shell", null, outlet);
   root.replaceChildren(navbar, shell, tabbar, drawer);
 
-  refs = { shell, navbar, sidebar, tabbar, drawer, outlet };
+  refs = { shell, navbar, tabbar, drawer, outlet };
   subscribe(() => refreshNav());
   return outlet;
 }
@@ -242,10 +214,6 @@ export function refreshNav(): void {
   const navbar = renderNavbar();
   refs.navbar.replaceWith(navbar);
   refs.navbar = navbar;
-
-  const sidebar = renderSidebar();
-  refs.sidebar.replaceWith(sidebar);
-  refs.sidebar = sidebar;
 
   const tabbar = renderTabbar();
   refs.tabbar.replaceWith(tabbar);

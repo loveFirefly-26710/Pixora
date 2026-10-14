@@ -123,6 +123,15 @@ ROUTE_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/albums")"
 [[ "${ROUTE_CODE}" == "200" ]] || fail "SPA 路由回落失败（${ROUTE_CODE}）"
 ok "SPA 路由回落到 index.html"
 
+# 产物是固定文件名（main.js），绝不能长缓存：换了二进制用户得能直接刷出新前端。
+# 做法是 no-cache + 内容 ETag——第二次请求应当拿 304，而不是又下一遍 300KB。
+# 不依赖 %{etag}（老版本 curl 没有这个变量），直接解析响应头
+JS_ETAG="$(curl -s -D - -o /dev/null "${BASE}/main.js" | tr -d '\r' | awk 'tolower($1) == "etag:" { print $2 }')"
+[[ -n "${JS_ETAG}" ]] || fail "main.js 没有 ETag"
+CACHE_CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: ${JS_ETAG}" "${BASE}/main.js")"
+[[ "${CACHE_CODE}" == "304" ]] || fail "带 ETag 再取 main.js 返回了 ${CACHE_CODE}"
+ok "静态资源带 ETag，重复请求拿 304"
+
 step "安装向导"
 STATUS="$(curl -s "${BASE}/api/v1/install/status")"
 expect_json "${STATUS}" "d['data']['installed']" "False" "未安装状态"
@@ -285,6 +294,28 @@ expect_json "${PLAZA}" "d['data'][0]['original_name']" "None" "未登录时原�
 TAGS="$(api GET "/api/v1/tags?uid=${ADMIN_UID}")"
 expect_json "${TAGS}" "len(d['data'])" "2" "标签词表有 2 项"
 
+# 随机图：默认 302 跳直链（不缓存），?format=json 给元数据，挑不到就 404
+RANDOM_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/api/v1/random")"
+[[ "${RANDOM_CODE}" == "302" ]] || fail "随机图没有跳转（${RANDOM_CODE}）"
+RANDOM_LOC="$(curl -s -o /dev/null -w '%{redirect_url}' "${BASE}/api/v1/random")"
+[[ "${RANDOM_LOC}" == *"/images/"* ]] || fail "随机图跳转地址不对：${RANDOM_LOC}"
+ok "随机图 302 到直链"
+
+RANDOM_JSON="$(curl -s "${BASE}/api/v1/random?format=json")"
+expect_json "${RANDOM_JSON}" "d['data']['ext']" "png" "随机图 JSON 带扩展名"
+RANDOM_FOLLOW="$(curl -s -L -o "${WORK}/random.png" -w '%{http_code}' "${BASE}/api/v1/random")"
+[[ "${RANDOM_FOLLOW}" == "200" ]] || fail "跟随随机图跳转没拿到图片（${RANDOM_FOLLOW}）"
+RANDOM_BYTES="$(wc -c < "${WORK}/random.png")"
+[[ "${RANDOM_BYTES}" -gt 100 ]] || fail "随机图拿到的是空文件"
+ok "随机图跟随跳转拿到图片（${RANDOM_BYTES} 字节）"
+
+RANDOM_MISS="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/api/v1/random?q=zzz_no_such_keyword")"
+[[ "${RANDOM_MISS}" == "404" ]] || fail "随机图挑不到图片时返回了 ${RANDOM_MISS}"
+ok "随机图挑不到图片时返回 404"
+
+SITE_INFO="$(curl -s "${BASE}/api/v1/site")"
+expect_json "${SITE_INFO}" "d['data']['plaza_grid_columns']" "3" "站点信息带广场列数（默认 3）"
+
 TREE="$(api GET "/api/v1/fs/tree")"
 expect_json "${TREE}" "d['data']['files']" "2" "目录树统计到 2 个文件"
 
@@ -329,6 +360,18 @@ expect_json "${QUOTA}" "d['data']['default_quota_bytes'] > 0" "True" "配额总�
 
 SETTINGS="$(api GET /api/v1/admin/settings)"
 expect_json "${SETTINGS}" "d['data']['site']['name']" "Pixora" "系统设置：站点名"
+
+# 广场列数：改 5 再读回来，确认真的落了库（越界值由后端钳到 2..=6）
+api PUT /api/v1/admin/settings -H 'Content-Type: application/json' \
+    -d '{"site":{"plaza_grid_columns":5}}' >/dev/null
+SETTINGS2="$(api GET /api/v1/admin/settings)"
+expect_json "${SETTINGS2}" "d['data']['site']['plaza_grid_columns']" "5" "广场列数改为 5"
+SITE5="$(curl -s "${BASE}/api/v1/site")"
+expect_json "${SITE5}" "d['data']['plaza_grid_columns']" "5" "前台 /site 同步到 5"
+api PUT /api/v1/admin/settings -H 'Content-Type: application/json' \
+    -d '{"site":{"plaza_grid_columns":99}}' >/dev/null
+SETTINGS3="$(api GET /api/v1/admin/settings)"
+expect_json "${SETTINGS3}" "d['data']['site']['plaza_grid_columns']" "6" "越界的列数被钳到上限 6"
 
 # 直链前缀改名后旧链依然有效（映射在数据库里，不在 URL 结构里）
 api PUT /api/v1/admin/storage/prefix -H 'Content-Type: application/json' -d '{"upload_prefix":"i"}' >/dev/null

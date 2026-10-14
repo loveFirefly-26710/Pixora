@@ -34,6 +34,15 @@ import {
 /** 白名单里可选的格式，与后端的解码器一一对应。 */
 const ALL_FORMATS = ["jpg", "png", "gif", "webp", "avif", "heic", "tiff", "bmp", "svg", "jxl", "ico"];
 
+/** 广场每行几张图。列数越少，单张预览越大。 */
+const GRID_COLUMN_OPTIONS = [
+  { value: "2", label: "2 列 · 最大" },
+  { value: "3", label: "3 列 · 推荐" },
+  { value: "4", label: "4 列" },
+  { value: "5", label: "5 列" },
+  { value: "6", label: "6 列 · 最小" },
+];
+
 const SECURITY_OPTIONS = [
   { value: "ssl", label: "SSL（465，隐式加密）" },
   { value: "starttls", label: "STARTTLS（587）" },
@@ -45,6 +54,7 @@ interface SettingsDraft {
   siteName: HTMLInputElement;
   baseUrl: HTMLInputElement;
   plazaPublic: boolean;
+  plazaColumns: HTMLSelectElement;
   requireLogin: boolean;
   registerEnabled: boolean;
   maxFileBytes: HTMLInputElement;
@@ -130,6 +140,7 @@ function view(reload: () => void, data: AdminSettings): Node[] {
     siteName: textInput({ value: data.site.name }),
     baseUrl: textInput({ value: data.site.base_url, mono: true }),
     plazaPublic: data.site.plaza_public,
+    plazaColumns: select(GRID_COLUMN_OPTIONS, String(data.site.plaza_grid_columns ?? 3)),
     requireLogin: data.site.require_login_to_upload,
     registerEnabled: data.site.register_enabled,
     maxFileBytes: textInput({ value: formatBytes(data.upload.max_file_bytes), mono: true }),
@@ -172,10 +183,10 @@ function view(reload: () => void, data: AdminSettings): Node[] {
         text: "重新生成缩略图",
         on: { click: (event) => void rebuildThumbs(event.target as HTMLButtonElement) },
       }),
-      h("button.btn.pri", {
+  h("button.btn.pri", {
         type: "button",
         text: "保存设置",
-        on: { click: (event) => void save(reload, draft, event.target as HTMLButtonElement) },
+        on: { click: (event) => void save(reload, draft, data, event.target as HTMLButtonElement) },
       }),
     ),
     note(
@@ -194,6 +205,11 @@ function siteCard(draft: SettingsDraft): HTMLElement {
     switchRow("广场开放浏览", "未登录用户可以看到公开图片", draft.plazaPublic, (next) => {
       draft.plazaPublic = next;
     }),
+    field(
+      "广场每行列数",
+      draft.plazaColumns,
+      "决定广场预览图的大小：列数越少，单张图越大。窄屏（手机）会自动少放几列，不受这里影响。",
+    ),
     switchRow("拒绝游客上传", "上传必须登录", draft.requireLogin, (next) => {
       draft.requireLogin = next;
     }),
@@ -374,6 +390,9 @@ function mailCard(draft: SettingsDraft): HTMLElement {
     }),
     h("div.flexline", { style: { marginTop: "10px" } }, testBtn),
     result,
+    h("div.tip", {
+      text: "这一栏只有改动过才会提交：没配邮件也不影响保存其他设置。要让邮箱验证真正发得出去，SMTP 服务器、发信账号、密码、发信邮箱四项都要填对。",
+    }),
   );
 }
 
@@ -452,8 +471,33 @@ async function rebuildThumbs(button: HTMLButtonElement): Promise<void> {
   }
 }
 
+/// 邮件那一栏动过没有。邮箱/密码这类字段为空是常态（还没配邮件），
+/// 不能拿「填没填」当「改没改」——只有和加载时的值不一致才算动过。
+function mailDirty(draft: SettingsDraft, loaded: AdminSettings): boolean {
+  const mail = loaded.mail;
+  return (
+    draft.smtpHost.value.trim() !== mail.smtp_host ||
+    draft.smtpPort.value.trim() !== String(mail.smtp_port) ||
+    draft.smtpSecurity.value !== (mail.smtp_security || "ssl") ||
+    draft.smtpUser.value.trim() !== mail.smtp_user ||
+    draft.fromName.value.trim() !== mail.from_name ||
+    draft.fromEmail.value.trim() !== mail.from_email ||
+    draft.appealEmail.value.trim() !== mail.appeal_email ||
+    draft.disposableCheck !== mail.disposable_check ||
+    draft.mxCheck !== mail.mx_check ||
+    draft.thirdPartyCheck !== mail.third_party_check ||
+    // 密码框永远是空的；有内容就说明要改密码
+    draft.smtpPassword.value.trim() !== ""
+  );
+}
+
 /** 保存设置：只提交页面上这几个子对象；格式白名单走自己的接口，不在这里提交。 */
-async function save(reload: () => void, draft: SettingsDraft, button: HTMLButtonElement): Promise<void> {
+async function save(
+  reload: () => void,
+  draft: SettingsDraft,
+  loaded: AdminSettings,
+  button: HTMLButtonElement,
+): Promise<void> {
   const maxFile = sizeOf(draft.maxFileBytes, "MB");
   if (maxFile <= 0) {
     toastError("单文件大小上限填不对：可以写 20 MB、2 GB");
@@ -464,16 +508,28 @@ async function save(reload: () => void, draft: SettingsDraft, button: HTMLButton
     toastError("像素上限填不对：单位是万，填 8000 表示 8000 万像素");
     return;
   }
-  if (!draft.fromEmail.value.trim() || !draft.smtpHost.value.trim()) {
-    toastError("SMTP 服务器与发信邮箱不能为空");
+
+  // 邮件段单独判断：只有真的动过才提交。
+  // 以前是无条件校验「SMTP 服务器与发信邮箱都要填」，结果是邮件没配好的站
+  // 连广场列数、上传上限这类无关设置都保存不了——报错还指向邮件字段，莫名其妙。
+  const mailChanged = mailDirty(draft, loaded);
+  if (mailChanged && (!draft.fromEmail.value.trim() || !draft.smtpHost.value.trim())) {
+    toastError("要启用邮件功能，SMTP 服务器与发信邮箱都要填。只想改其他设置的话，别动邮件这一栏。");
     return;
   }
 
-  const body = {
+  const body: {
+    site: Record<string, unknown>;
+    upload: Record<string, unknown>;
+    thumb: Record<string, unknown>;
+    appearance: Record<string, unknown>;
+    mail?: Record<string, unknown>;
+  } = {
     site: {
       name: draft.siteName.value.trim(),
       base_url: draft.baseUrl.value.trim().replace(/\/+$/, ""),
       plaza_public: draft.plazaPublic,
+      plaza_grid_columns: Number(draft.plazaColumns.value) || 3,
       require_login_to_upload: draft.requireLogin,
       register_enabled: draft.registerEnabled,
     },
@@ -484,7 +540,10 @@ async function save(reload: () => void, draft: SettingsDraft, button: HTMLButton
       queue_depth: intOf(draft.queueDepth),
     },
     thumb: { client: draft.thumbClient, server_fallback: draft.thumbFallback },
-    mail: {
+    appearance: { background: draft.background.value.trim() || null },
+  };
+  if (mailChanged) {
+    body.mail = {
       smtp_host: draft.smtpHost.value.trim(),
       smtp_port: intOf(draft.smtpPort),
       smtp_security: draft.smtpSecurity.value,
@@ -495,12 +554,11 @@ async function save(reload: () => void, draft: SettingsDraft, button: HTMLButton
       disposable_check: draft.disposableCheck,
       mx_check: draft.mxCheck,
       third_party_check: draft.thirdPartyCheck,
-    },
-    appearance: { background: draft.background.value.trim() || null },
-  };
-  // 密码留空＝不修改：带上空字符串会把已存的密文覆盖掉
-  const password = draft.smtpPassword.value.trim();
-  if (password) (body.mail as Record<string, unknown>).password = password;
+    };
+    // 密码留空＝不修改：带上空字符串会把已存的密文覆盖掉
+    const password = draft.smtpPassword.value.trim();
+    if (password) body.mail.password = password;
+  }
 
   button.disabled = true;
   button.textContent = "保存中…";

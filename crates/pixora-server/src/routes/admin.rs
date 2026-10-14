@@ -21,7 +21,7 @@ use axum::Json;
 use pixora_core::admin::Disposition;
 use pixora_core::audit::actions;
 use pixora_core::quota::QuotaInput;
-use pixora_core::settings::{keys, normalize_prefix};
+use pixora_core::settings::{defaults as settings_defaults, keys, normalize_prefix};
 use pixora_core::stats::BackendView;
 use pixora_core::{AppError, AppState};
 use pixora_repo::model::{now, RateLimitPolicy};
@@ -1444,6 +1444,7 @@ pub async fn settings_get(
             "plaza_public": site.plaza_public,
             "require_login_to_upload": site.require_login_to_upload,
             "register_enabled": site.register_enabled,
+            "plaza_grid_columns": site.plaza_grid_columns,
         },
         "upload": {
             "max_file_bytes": upload.max_file_bytes,
@@ -1505,7 +1506,7 @@ pub async fn settings_put(
 
     if let Some(site) = body.get("site").and_then(|value| value.as_object()) {
         let site = serde_json::Value::Object(site.clone());
-        let writes: [(&str, Option<String>); 5] = [
+        let writes: [(&str, Option<String>); 6] = [
             (keys::SITE_NAME, field_opt_str(&site, "name")),
             (keys::SITE_BASE_URL, field_opt_str(&site, "base_url")),
             (
@@ -1519,6 +1520,17 @@ pub async fn settings_put(
             (
                 keys::REGISTER_ENABLED,
                 field_opt_bool(&site, "register_enabled").map(|value| value.to_string()),
+            ),
+            (
+                keys::PLAZA_GRID_COLUMNS,
+                field_opt_i64(&site, "plaza_grid_columns").map(|value| {
+                    value
+                        .clamp(
+                            settings_defaults::GRID_COLUMNS_MIN,
+                            settings_defaults::GRID_COLUMNS_MAX,
+                        )
+                        .to_string()
+                }),
             ),
         ];
         if let Err(resp) = write_settings(&state, &writes, &mut touched).await {

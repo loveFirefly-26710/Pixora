@@ -31,10 +31,10 @@ const ENDPOINTS: Endpoint[] = [
   { method: "GET", path: "/api/v1/albums", purpose: "相册列表", scope: "read" },
   { method: "POST", path: "/api/v1/albums", purpose: "新建相册", scope: "write" },
   { method: "GET", path: "/api/v1/plaza", purpose: "广场搜索，公开端点不需要鉴权", scope: "公开" },
+  { method: "GET", path: "/api/v1/random", purpose: "随机一张公开图片，302 跳直链", scope: "公开" },
   { method: "GET", path: "/api/v1/fs/tree", purpose: "数据目录递归查询", scope: "read" },
   { method: "GET", path: "/api/v1/queue/{job_id}", purpose: "查询队列任务状态", scope: "read" },
   { method: "GET", path: "/api/v1/me", purpose: "当前用户信息与配额用量", scope: "read" },
-  { method: "POST", path: "/upload", purpose: "兼容旧版图床的调用方式", scope: "upload" },
 ];
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -269,16 +269,20 @@ curl -X POST "${uploadUrl}" \\
       h(
         "div.card",
         null,
-        h("h4", { text: "兼容旧调用方式" }),
-        h("div", { style: { fontSize: "12.5px", color: "var(--muted)", marginBottom: "8px" }, text: "沿用原来的字段名和响应结构，老脚本不用改。" }),
+        h("h4", { text: "随机图" }),
+        h("div", { style: { fontSize: "12.5px", color: "var(--muted)", marginBottom: "8px" }, text: "每次请求都挑一张公开图片。可以直接当图片地址用（302 跳直链），也可以要 JSON 元数据。" }),
         codeBlock(
           null,
-          `curl -X POST "${base}/upload" \\
-  -H "X-API-Key: $TOKEN" \\
-  -F "image=@./photo.jpg" \\
-  -F "tags=风景"`,
+          `# 直接当 <img src> 用：每次刷新换一张
+${base}/api/v1/random
+
+# 只要某个标签的
+${base}/api/v1/random?tag=风景
+
+# 要元数据（url / 尺寸 / 标签）就加 format=json
+curl "${base}/api/v1/random?format=json"`,
         ),
-        h("div.tip", { text: "响应 {success, message, url, storage_type, tags}，和旧版一致。" }),
+        h("div.tip", { text: "302 而非 301：随机结果不该被缓存。挑不到图片时返回 404；站点关闭广场公开浏览后，未登录调用会一并关闭。" }),
       ),
     ),
   );

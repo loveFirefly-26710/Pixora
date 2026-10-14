@@ -193,6 +193,16 @@ try {
     ExpectStatus "$script:Base/main.css" 200 "样式表可访问"
     ExpectStatus "$script:Base/albums" 200 "SPA 路由回落到 index.html"
 
+    # 产物是固定文件名，不能长缓存：no-cache + ETag，第二次应当拿 304
+    # 用 curl 的 --etag-save/--etag-compare：PowerShell 5.1 给原生命令传内嵌引号
+    # 时不做转义（If-None-Match 的值本身必须带引号），走命令行参数必踩坑
+    $etagFile = Join-Path $work "main.js.etag"
+    & curl.exe -s -o NUL --etag-save $etagFile "$script:Base/main.js" | Out-Null
+    if (-not (Test-Path $etagFile)) { Fail "main.js 没有 ETag" }
+    $cacheCode = (& curl.exe -s -o NUL -w "%{http_code}" --etag-compare $etagFile "$script:Base/main.js")
+    if ($cacheCode -ne "304") { Fail "带 ETag 再取 main.js 返回了 $cacheCode" }
+    Ok "静态资源带 ETag，重复请求拿 304"
+
     Step "安装向导"
     $status = HttpText @("$script:Base/api/v1/install/status")
     ExpectJson $status { -not $d.data.installed } "未安装状态"
@@ -323,6 +333,28 @@ try {
 
     $tags = Api GET "/api/v1/tags?uid=1000"
     ExpectJson $tags { @($d.data).Count -ge 1 } "标签词表"
+
+    # 随机图：默认 302 跳直链，?format=json 给元数据，挑不到就 404
+    $randomCode = (& curl.exe -s -o NUL -w "%{http_code}" "$script:Base/api/v1/random")
+    if ($randomCode -ne "302") { Fail "随机图没有跳转（$randomCode）" }
+    $randomLoc = (& curl.exe -s -o NUL -w "%{redirect_url}" "$script:Base/api/v1/random")
+    if ($randomLoc -notmatch "/images/") { Fail "随机图跳转地址不对：$randomLoc" }
+    Ok "随机图 302 到直链"
+
+    $randomJson = HttpText @("$script:Base/api/v1/random?format=json")
+    ExpectJson $randomJson { $d.data.ext -eq "png" } "随机图 JSON 带扩展名"
+    $randomFile = Join-Path $work "random.png"
+    $randomFollow = (& curl.exe -s -L -o $randomFile -w "%{http_code}" "$script:Base/api/v1/random")
+    if ($randomFollow -ne "200") { Fail "跟随随机图跳转没拿到图片（$randomFollow）" }
+    if ((Get-Item $randomFile).Length -le 100) { Fail "随机图拿到的是空文件" }
+    Ok "随机图跟随跳转拿到图片"
+
+    $randomMiss = (& curl.exe -s -o NUL -w "%{http_code}" "$script:Base/api/v1/random?q=zzz_no_such_keyword")
+    if ($randomMiss -ne "404") { Fail "随机图挑不到图片时返回了 $randomMiss" }
+    Ok "随机图挑不到图片时返回 404"
+
+    $siteInfo = HttpText @("$script:Base/api/v1/site")
+    ExpectJson $siteInfo { $d.data.plaza_grid_columns -eq 3 } "站点信息带广场列数（默认 3）"
 
 
     $tree = Api GET "/api/v1/fs/tree"

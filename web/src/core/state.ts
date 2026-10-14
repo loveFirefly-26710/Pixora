@@ -95,6 +95,7 @@ export async function loadSite(): Promise<void> {
       appeal_email: null,
       background: null,
       installed: true,
+      plaza_grid_columns: 3,
       terms: { required: false, version: null, articles: 0 },
     };
   }

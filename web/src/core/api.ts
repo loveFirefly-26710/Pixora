@@ -366,16 +366,6 @@ export async function requestPage<T>(
   throw new ApiError(response.status, { code: "INTERNAL", message: "请求失败" });
 }
 
-/** 表单式编码，给兼容端点的 `application/x-www-form-urlencoded` 用。 */
-export function formEncode(data: Record<string, string | number | undefined>): string {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(data)) {
-    if (value === undefined) continue;
-    params.set(key, String(value));
-  }
-  return params.toString();
-}
-
 /** 直链前缀等站点信息由 /site 提供，这里做一次内存缓存。 */
 let siteCache: Record<string, unknown> | null = null;
 

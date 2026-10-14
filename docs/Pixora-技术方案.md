@@ -409,20 +409,10 @@ https://img.example.com/images/a3f9c1b8...e7.webp
 
 ### 7.6 API 与第三方客户端
 
-**保持与既有图床 API 一致的调用方式**，同时提供标准的 v1 API。
+对外只有这一套 v1 API：统一的信封结构、统一的错误码、统一的 Bearer 鉴权。
+本项目是全新开发，不存在需要迁就的旧版调用方式，也不留「另一副面孔」的兼容端点。
 
-兼容端点（保留原有请求/响应结构）：
-
-```
-POST /upload
-  Content-Type: multipart/form-data
-  image: <file>        # 文件字段名保持 image
-  tags:  风景,旅游      # 可选
-  →
-  { "success": true, "message": "...", "url": "...", "storage_type": "local", "tags": "..." }
-```
-
-标准 v1 端点：
+端点总表：
 
 | 方法 | 路径 | 作用 | 权限 |
 |---|---|---|---|
@@ -437,10 +427,10 @@ POST /upload
 | PATCH | `/api/v1/albums/{id}` | 改相册名称、可见性、排序 | write |
 | DELETE | `/api/v1/albums/{id}` | 删除相册 | write |
 | GET | `/api/v1/plaza` | 广场搜索，公开端点 | 公开 |
+| GET | `/api/v1/random` | 随机一张公开图片：302 跳直链，`?format=json` 返回 JSON | 公开 |
 | GET | `/api/v1/fs/tree` | 数据目录递归查询 | read |
 | GET | `/api/v1/queue/{job_id}` | 查询队列任务状态 | read |
 | GET | `/api/v1/me` | 当前用户信息与配额用量 | read |
-| POST | `/upload` | 兼容旧版图床的调用方式 | upload |
 
 `POST /api/v1/upload` 的字段：`file`（必填）、`sha256`（可选，客户端算好的哈希，带上服务端就不用再算一遍）、`thumb`（可选，客户端生成的缩略图）、`album_id`、`tags`、`visibility`、`original_name`。
 
@@ -460,7 +450,7 @@ POST /upload
 
 暂停和封禁都返回 403，靠 `code` 区分。只给状态码的话，PicGo 这类客户端没法告诉用户到底是「可以申诉」还是「已封禁」，两种情况的提示文案完全不一样。
 
-**PicGo / PicList 支持**：提供"自定义 Web 图床"插件的配置说明，以及 PicGo Server 兼容的响应格式（通过 `?format=picgo` 或 `Accept` 头切换返回结构）。文档里直接给可复制的 JSON 配置片段，用户填 Token 就能用。
+**PicGo / PicList 支持**：用「自定义 Web 图床」插件接标准 v1 API——上传地址填 `/api/v1/upload`，字段名 `file`，请求头带 `Authorization: Bearer <token>`，返回的 URL 从 `data.url` 取。文档里直接给可复制的 JSON 配置片段，用户填 Token 就能用。
 
 ### 7.7 数据目录递归查询
 
@@ -742,7 +732,7 @@ ENTRYPOINT ["/pixora"]
 | M2 上传体验 | 四种上传入口、客户端哈希预检、Worker 缩略图、队列与背压、进度持久化 | 1000 张稳定排队 |
 | M3 用户与安全 | 注册邮箱验证、反临时邮箱、会话表、CSRF、Argon2id、账号状态机 | 可注册可登录 |
 | M4 相册与浏览 | 相册 CRUD、用户视图、预览浮层、Shift 多选、批量操作、格式扩展 | 管理功能完整 |
-| M5 广场与 API | 广场、标签搜索、v1 API 全套端点、错误码、PicGo/PicList 兼容、API Token | 对外开放 |
+| M5 广场与 API | 广场、标签搜索、v1 API 全套端点、错误码、随机图接口、PicGo/PicList 接入说明、API Token | 对外开放 |
 | M6 管理能力 | 用户处置与解封邮件、配额与容量校验、频率限制、IP 黑白名单、服务条款 | 管理员能用 |
 | M7 多端与运维 | 响应式五断点、移动端交互替换、统计、审计、多数据库适配、Docker 硬化 | 可交付生产 |
 

@@ -23,6 +23,8 @@ pub mod keys {
     pub const REGISTER_AUTO_CLOSE_ON: &str = "register.auto_close_on";
     pub const REGISTER_AUTO_CLOSE_OFF: &str = "register.auto_close_off";
     pub const PLAZA_PUBLIC: &str = "plaza.public";
+    /// 广场网格列数（界面上的图大小就由它决定）
+    pub const PLAZA_GRID_COLUMNS: &str = "plaza.grid_columns";
     pub const UPLOAD_MAX_FILE: &str = "upload.max_file_bytes";
     pub const UPLOAD_MAX_BATCH: &str = "upload.max_batch";
     pub const UPLOAD_MAX_PIXELS: &str = "upload.max_pixels";
@@ -82,6 +84,11 @@ pub mod defaults {
     pub const IP_FAIL_THRESHOLD: i64 = 20;
     pub const IP_BAN_MINUTES: i64 = 30;
     pub const UPLOAD_PREFIX: &str = "images";
+    /// 广场网格默认 3 列：比设计稿的 4/5 列大一圈，预览更清楚
+    pub const GRID_COLUMNS: i64 = 3;
+    /// 网格列数的可配置范围。少于 2 列不成网格，多于 6 列缩略图就糊了
+    pub const GRID_COLUMNS_MIN: i64 = 2;
+    pub const GRID_COLUMNS_MAX: i64 = 6;
     pub const SITE_NAME: &str = "Pixora";
     pub const FROM_NAME: &str = "Pixora 管理团队";
     pub const SMTP_HOST: &str = "smtp.qiye.aliyun.com";
@@ -98,6 +105,8 @@ pub struct SiteSettings {
     pub plaza_public: bool,
     pub require_login_to_upload: bool,
     pub register_enabled: bool,
+    /// 广场每行放几张图。已经钳到 `GRID_COLUMNS_MIN..=GRID_COLUMNS_MAX`
+    pub plaza_grid_columns: i64,
 }
 
 /// 一组上传设置。
@@ -245,6 +254,12 @@ impl Settings {
             plaza_public: self.bool(keys::PLAZA_PUBLIC, true).await?,
             require_login_to_upload: self.bool(keys::UPLOAD_REQUIRE_LOGIN, true).await?,
             register_enabled: self.bool(keys::REGISTER_ENABLED, true).await?,
+            // 库里的值可能被手工改坏：钳在合法区间里再出库，
+            // 这样界面永远拿到一个能用的列数
+            plaza_grid_columns: self
+                .integer(keys::PLAZA_GRID_COLUMNS, defaults::GRID_COLUMNS)
+                .await?
+                .clamp(defaults::GRID_COLUMNS_MIN, defaults::GRID_COLUMNS_MAX),
         })
     }
 
@@ -391,5 +406,6 @@ mod tests {
         assert_eq!(defaults::AUTO_CLOSE_OFF, 80);
         assert_eq!(defaults::SMTP_PORT, 465);
         assert_eq!(defaults::SMTP_HOST, "smtp.qiye.aliyun.com");
+        assert_eq!(defaults::GRID_COLUMNS, 3);
     }
 }
