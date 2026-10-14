@@ -364,6 +364,8 @@ class UploadQueue {
   private hashBusy = false;
   private thumbBusy = false;
   private preflightBusy = false;
+  /** 连续网络失败计数：用来判断「服务端是不是不在了」 */
+  private networkFailures = 0;
   private hydrated = false;
   private seq = 0;
   private hashBridge = new WorkerBridge("hash.worker.js");
@@ -952,6 +954,7 @@ class UploadQueue {
 
       item.result = result;
       item.progress = 100;
+      this.networkFailures = 0;
       item.durationMs = Date.now() - startedAt;
       this.durations.push(item.durationMs);
       if (result.dedup) {
@@ -1011,16 +1014,39 @@ class UploadQueue {
 
     item.status = "failed";
     item.retryAt = null;
+    // detail 里带着请求路径与 readyState，是唯一能用来排查的部分，别丢
+    const describe = apiError
+      ? apiError.detail
+        ? `${apiError.message}（${apiError.detail}）`
+        : apiError.message
+      : err instanceof Error
+        ? err.message
+        : "上传失败";
+
+    item.error = describe;
     if (permanent && apiError) {
-      item.error = apiError.detail ? `${apiError.message}（${apiError.detail}）` : apiError.message;
       item.note = "该错误重试也一样，请先处理原因";
     } else if (item.retries > 0) {
-      item.error = apiError?.message ?? "上传失败";
       item.note = `已重试 ${item.retries} 次，可点击重试`;
     } else {
-      item.error = apiError?.message ?? (err instanceof Error ? err.message : "上传失败");
       item.note = "可点击重试";
     }
+
+    // 连续多张网络失败通常不是「这张图有问题」，而是服务端不在了。
+    // 十行一模一样的红字看不出这一点，所以在第 3 张失败时给一条明确的诊断。
+    if (apiError?.code === "NETWORK") {
+      this.networkFailures += 1;
+      if (this.networkFailures === 3) {
+        this.emit({
+          kind: "notice",
+          tone: "err",
+          text: `已连续 ${this.networkFailures} 张因网络失败：${apiError.message}。请确认服务端进程仍在运行（浏览器直接打开 /healthz 应当能看到 {"status":"ok"}），恢复后点「重试全部失败项」。`,
+        });
+      }
+    } else {
+      this.networkFailures = 0;
+    }
+
     this.emit({ kind: "error", error: err });
   }
 
