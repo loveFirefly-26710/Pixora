@@ -290,4 +290,21 @@ impl Repo {
             )
             .await
     }
+
+    /// 按实际引用重算 `ref_count`，返回被修正的行数。
+    ///
+    /// 为什么需要它：引用计数靠服务层加减，但有些路径绕开了服务层——
+    /// 删除账号时 `images` 随外键级联消失（计数没人减）、有人在库里手工删了行、
+    /// 或者事务写到一半进程没了。这些情况下 `ref_count` 会虚高，物理文件于是
+    /// 永远等不到归零、也永远不被 GC 回收，磁盘就这么慢慢漏。
+    ///
+    /// 这条语句把计数拉回「实际引用」的事实：原图引用 + 缩略图引用。
+    /// 逐行执行的是同一条 SQL，代价是一次全表扫描，放在每小时的对账里跑。
+    pub async fn recompute_blob_ref_counts(&self) -> Result<u64> {
+        let actual = "((SELECT COUNT(*) FROM images i WHERE i.blob_id = blobs.id AND i.deleted_at IS NULL)                        + (SELECT COUNT(*) FROM images i WHERE i.thumb_blob_id = blobs.id AND i.deleted_at IS NULL))";
+        let sql = format!(
+            "UPDATE blobs SET ref_count = {actual} WHERE ref_count <> {actual}"
+        );
+        self.db.execute(&sql, Args::new()).await
+    }
 }

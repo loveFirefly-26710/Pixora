@@ -939,12 +939,21 @@ impl AppState {
     }
 
     /// 没有配置 SMTP 时，把验证码写进日志并把码带出来（仅本地开发）。
+    /// 验证码回显。只在显式开了 `PIXORA_DEV_RETURN_CODES=1` 时回显给接口。
+    ///
+    /// 原来只要「没有可用邮件通道」就回显，这有个真实的坑：管理员把 SMTP 配了一半
+    /// （填了服务器和密码，漏了发信地址），邮件发不出去，接口却把验证码返回给任何人——
+    /// 于是别人可以用受害者的邮箱把账号建出来。现在默认只写服务端日志。
     async fn debug_code(&self, code: &str) -> Option<String> {
         if self.mailer().is_some() {
             return None;
         }
-        tracing::info!(code, "未配置 SMTP：验证码已写入日志，请直接用该码验证");
-        Some(code.to_string())
+        tracing::info!(code, "未配置 SMTP：验证码写在这里，本机开发直接用它");
+        if self.config.dev_return_codes {
+            tracing::warn!("PIXORA_DEV_RETURN_CODES 已开启：验证码会出现在接口响应里，请勿用于对外环境");
+            return Some(code.to_string());
+        }
+        None
     }
 
     /// 同 IP 失败次数达到阈值就自动临时封禁。

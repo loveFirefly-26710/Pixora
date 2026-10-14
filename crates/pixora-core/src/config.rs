@@ -68,6 +68,12 @@ pub struct Config {
     pub accel_prefix: Option<String>,
     /// Cookie 是否带 Secure。默认按 base_url 是否 https 决定。
     pub secure_cookies: bool,
+    /// 是否把邮箱验证码放进 API 响应里（仅供本机开发）。默认关。
+    ///
+    /// 默认关是有理由的：只要 SMTP 没配好（比如填了服务器却漏了发信地址），
+    /// 服务端就发不出邮件——如果这时回显验证码，任何能调注册接口的人都能
+    /// 用别人的邮箱把账号建出来。验证码始终会写进服务端日志，本机开发看日志即可。
+    pub dev_return_codes: bool,
     pub log_level: String,
 }
 
@@ -132,6 +138,13 @@ impl Config {
             web_dir: env("PIXORA_WEB_DIR").map(PathBuf::from),
             accel_prefix: env("PIXORA_ACCEL_PREFIX"),
             secure_cookies,
+            dev_return_codes: matches!(
+                env("PIXORA_DEV_RETURN_CODES")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1" | "true" | "yes"
+            ),
             log_level: env("RUST_LOG").unwrap_or_else(|| "info".into()),
         })
     }

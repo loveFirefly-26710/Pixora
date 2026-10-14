@@ -506,6 +506,7 @@ mod tests {
             web_dir: None,
             accel_prefix: None,
             secure_cookies: false,
+            dev_return_codes: false,
             log_level: "error".into(),
         };
         let state = AppState::bootstrap(config).await.expect("装配 AppState");
