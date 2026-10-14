@@ -71,7 +71,16 @@ export async function render(ctx: PageContext): Promise<void> {
   const pad = h("div.pad");
   ctx.outlet.append(pad);
   pad.append(
-    pageHead("用户管理", "配额度、改邮箱密码、暂停或封禁违规账号，以及进入某个用户的相册视图。"),
+    h(
+      "div.flexline",
+      { style: { justifyContent: "space-between", alignItems: "flex-start" } },
+      pageHead("用户管理", "配额度、改邮箱密码、暂停或封禁违规账号，以及进入某个用户的相册视图。"),
+      h("button.btn.pri", {
+        type: "button",
+        text: "新建用户",
+        on: { click: () => openCreateUserDialog() },
+      }),
+    ),
   );
 
   const statsSlot = h("div.stat", { style: { marginBottom: "14px" } });
@@ -156,7 +165,9 @@ export async function render(ctx: PageContext): Promise<void> {
   const bottomNote = h("div.note", {
     text:
       "「暂停」和「封禁」不是一回事，见用户详情页。两者都会让网页登录和 API 同时失效，" +
-      "点确认后由管理员邮箱自动发出通知邮件。管理员账号不能被暂停或封禁，避免把自己锁在外面。",
+      "点确认后由管理员邮箱自动发出通知邮件。管理员账号不能被暂停或封禁，避免把自己锁在外面。" +
+      "「新建用户」建的账号邮箱直接是已验证状态，密码由你告诉对方。" +
+      "「设为管理员」只有另一位管理员能撤销——管理员不能改自己的角色。",
   });
 
   pad.append(statsSlot, toolbar, selectionBar, listSlot, bottomNote);
@@ -398,6 +409,10 @@ export async function render(ctx: PageContext): Promise<void> {
       button.addEventListener("click", () => openDispositionDialog([row], "suspend"));
       box.append(button);
     }
+    // 提权放在最后：它比暂停少见，也不该挨着暂停误点
+    const promote = h("button.btn.sm", { type: "button", text: "设为管理员" });
+    promote.addEventListener("click", () => void promoteUser(row, promote));
+    box.append(promote);
     return box;
   }
 
@@ -532,6 +547,81 @@ export async function render(ctx: PageContext): Promise<void> {
    * 处置确认框（暂停 / 封禁）：单个用户和批量共用同一套参数，
    * 少一套表单就少一处口径不一致。
    */
+  /** 提权：管理员权限很大，先确认一次再发请求。 */
+  async function promoteUser(row: AdminUserRow, button: HTMLButtonElement): Promise<void> {
+    const ok = await confirmDialog({
+      title: "设为管理员",
+      message:
+        `把 ${row.email}（u_${row.uid}）设为管理员？` +
+        "管理员可以看到所有用户的内容与统计、改系统设置、处置账号，且不能被暂停或封禁。",
+      confirmText: "设为管理员",
+    });
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      await request(`/admin/users/${row.id}`, { method: "PATCH", json: { role: "admin" } });
+      toastOk(`${row.email} 已设为管理员`);
+      await loadUsers();
+    } catch (err) {
+      toastError(err);
+      button.disabled = false;
+    }
+  }
+
+  /** 后台直接建号：邮箱直接激活，密码由管理员告诉对方，首次登录后自行修改。 */
+  function openCreateUserDialog(): void {
+    const email = textInput({ value: "", mono: true, placeholder: "user@example.com" });
+    const password = textInput({ type: "password", placeholder: "至少 10 位，要能通过强度校验" });
+    const role = select([
+      { value: "user", label: "普通用户" },
+      { value: "admin", label: "管理员" },
+    ]);
+    const errorLine = h("div", { style: { color: "var(--danger)", fontSize: "12.5px", minHeight: "16px" } });
+    let submitting = false;
+
+    const cancel = h("button.btn", { type: "button", text: "取消" });
+    const confirm = h("button.btn.pri", { type: "button", text: "创建" });
+    const handle = openModal({
+      title: "新建用户",
+      body: h(
+        "div",
+        null,
+        field("邮箱", email, "创建后即为已验证状态，不会再发验证邮件"),
+        field("初始密码", password, "告诉对方后请提醒尽快在「安全」页改掉"),
+        field("角色", role, "管理员权限很大：能看全部用户的内容与统计、改系统设置"),
+        errorLine,
+      ),
+      footer: [cancel, confirm],
+    });
+    cancel.addEventListener("click", () => handle.close());
+    confirm.addEventListener("click", async () => {
+      if (submitting) return;
+      const mail = email.value.trim();
+      if (!mail || !password.value) {
+        errorLine.textContent = "邮箱与密码都要填。";
+        return;
+      }
+      submitting = true;
+      confirm.disabled = true;
+      confirm.textContent = "创建中…";
+      try {
+        await request("/admin/users", {
+          method: "POST",
+          json: { email: mail, password: password.value, role: role.value },
+        });
+        toastOk(`已创建 ${mail}`);
+        handle.close();
+        await loadUsers();
+      } catch (err) {
+        errorLine.textContent = err instanceof ApiError ? err.message : String(err);
+      } finally {
+        submitting = false;
+        confirm.disabled = false;
+        confirm.textContent = "创建";
+      }
+    });
+  }
+
   function openDispositionDialog(targets: AdminUserRow[], preset: "suspend" | "ban"): void {
     let kind: "suspend" | "ban" = preset;
     const disposables = targets.filter((row) => row.role !== "admin");

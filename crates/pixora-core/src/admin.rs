@@ -12,7 +12,7 @@
 
 use chrono::{Duration, Utc};
 use pixora_repo::model::{role, status, User};
-use pixora_repo::repo::users::UserFilter;
+use pixora_repo::repo::users::{NewUser, UserFilter};
 use pixora_repo::{Page, PageRequest};
 
 use crate::audit::actions;
@@ -385,6 +385,78 @@ impl AppState {
             mail_sent,
             mail_error,
         })
+    }
+
+    /// 管理端直接建号。
+    ///
+    /// 与注册流程的区别只有一处：邮箱标记为已验证——管理员手输的地址就是
+    /// 「我确认这个邮箱没问题」，再让对方走一遍验证邮件没有意义。
+    /// 配额用当前默认值，建完可以在详情页单独调。
+    pub async fn admin_create_user(
+        &self,
+        admin: &User,
+        email_input: &str,
+        password: &str,
+        role_value: Option<&str>,
+        ip: Option<&str>,
+    ) -> Result<AdminUserDetail> {
+        let email = crate::auth::normalize_email_input(email_input)?;
+        pixora_crypto::password::check_strength(password)
+            .map_err(|err| AppError::bad_request(err.to_string()))?;
+        if self.repo.email_exists(&email).await? {
+            return Err(AppError::Conflict("该邮箱已经注册过".into()));
+        }
+
+        // 角色只认 admin / user：放任别的字符串写进库，
+        // 之后 is_admin() 之类的判断会给出「谁都不是」的结果
+        let role_value = match role_value.map(str::trim).filter(|value| !value.is_empty()) {
+            None => role::USER.to_string(),
+            Some(value) if value == role::ADMIN || value == role::USER => value.to_string(),
+            Some(value) => {
+                return Err(AppError::bad_request(format!(
+                    "角色只能是 admin 或 user（收到 {value}）"
+                )))
+            }
+        };
+
+        let (default_quota, _) = self.settings.quota_values().await?;
+        let password_hash = pixora_crypto::password::hash_password(password)?;
+        let user = self
+            .create_user_with_uid(NewUser {
+                uid: String::new(),
+                email: email.clone(),
+                password_hash,
+                role: role_value.clone(),
+                status: status::ACTIVE.to_string(),
+                quota_bytes: default_quota,
+                email_verified: true,
+            })
+            .await?;
+
+        // 默认相册：上传不指定相册时的落点，缺了它第一次上传就得报错
+        self.repo.insert_default_album(user.id, "默认相册").await?;
+
+        self.audit_detail(
+            actions::REGISTER,
+            Some(admin.id),
+            &user.uid,
+            serde_json::json!({ "email": email, "role": role_value, "via": "admin" }),
+            ip,
+        )
+        .await;
+        self.repo
+            .insert_user_action(
+                user.id,
+                Some(admin.id),
+                "create",
+                Some("管理员创建账号"),
+                &serde_json::json!({ "role": role_value }),
+                false,
+                Utc::now(),
+            )
+            .await?;
+
+        self.admin_user_detail(user.id).await
     }
 
     /// 删除账号。内容随外键级联删除，物理文件由 GC 按引用计数回收。

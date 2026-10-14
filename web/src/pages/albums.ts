@@ -109,40 +109,13 @@ export async function render(ctx: PageContext): Promise<void> {
     );
   }
   headHost.append(
-    h(
-      "div.flexline",
-      { style: { justifyContent: "space-between", alignItems: "flex-start" } },
-      pageHead(
-        "我的相册",
-        "左键单击图片直接打开预览；Shift 连选一段，Ctrl 点选多张；移动端长按进入多选。",
-      ),
-      h(
-        "div.flexline",
-        null,
-        // 用户视图下隐藏「上传」与「新建相册」：契约里 /upload 与 POST /albums 都没有 uid 参数，
-        // 在这里点下去会悄悄落到管理员自己的账号，不如不给入口
-        viewingUid ? null : uploadButton(),
-        viewingUid
-          ? null
-          : h("button.btn.gho", {
-              type: "button",
-              text: "新建相册",
-              on: { click: () => void createAlbum() },
-            }),
-      ),
+    pageHead(
+      "我的相册",
+      "左键单击图片直接打开预览；Shift 连选一段，Ctrl 点选多张；移动端长按进入多选。",
     ),
   );
 
-  function uploadButton(): HTMLElement {
-    return h("button.btn.pri", {
-      type: "button",
-      text: "＋ 上传图片",
-      on: {
-        click: () =>
-          navigate(state.albumId !== null ? `/upload?album_id=${state.albumId}` : "/upload"),
-      },
-    });
-  }
+
 
   // ---------- 常规工具栏（建一次，避免搜索框每次输入都被重建打断） ----------
 
@@ -420,8 +393,14 @@ export async function render(ctx: PageContext): Promise<void> {
         listHost,
         emptyState(
           "▤",
-          state.q ? `没有找到与「${state.q}」相关的图片。` : "这里还没有图片。",
-          state.q ? undefined : uploadButton(),
+          state.q ? `没有找到与「${state.q}」相关的图片。` : "这里还没有图片，去上传页选几张吧。",
+          state.q
+            ? undefined
+            : h("button.btn.pri", {
+                type: "button",
+                text: "去上传",
+                on: { click: () => navigate("/upload") },
+              }),
         ),
       );
       syncSelectionUI();

@@ -756,7 +756,7 @@ impl AppState {
     ///
     /// UID 是对外可见的短标识，也是物理目录的一级分类，所以冲突必须重试而不是报错。
     /// 4 位数字空间只有 9000 个，用满之后自动加长到 5 位、6 位。
-    async fn create_user_with_uid(&self, mut new: NewUser) -> Result<User> {
+    pub(crate) async fn create_user_with_uid(&self, mut new: NewUser) -> Result<User> {
         for digits in [4usize, 5, 6] {
             for attempt in 0..12 {
                 let uid = crypto_token::new_uid(digits)?;

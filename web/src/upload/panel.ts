@@ -8,12 +8,12 @@
  * 这里只把事件翻成 DOM 更新，避免出现两套互相打架的进度来源。
  */
 
-import { ApiError } from "../core/api";
+import { ApiError, request } from "../core/api";
 import { copyText, h } from "../core/dom";
 import { formatBytes, formatDuration, formatNumber, shortHash } from "../core/format";
 import { getState } from "../core/state";
 import { toastError, toastRateLimited, toastWithCode } from "../core/toast";
-import type { UploadResult } from "../core/types";
+import type { AlbumList, UploadResult } from "../core/types";
 import { badge, qtip, statCard } from "../ui/widgets";
 import {
   CONCURRENCY_OPTIONS,
@@ -22,6 +22,14 @@ import {
   type QueueItem,
   type QueueStats,
 } from "./queue";
+
+/** 目标相册下拉的候选。上传页与广场页共用；`uid` 只在管理员看别人的空间时有值。 */
+export async function loadAlbumOptions(
+  uid?: string | null,
+): Promise<Array<{ id: number; name: string; slug: string }>> {
+  const data = await request<AlbumList>("/albums", { query: { uid: uid ?? undefined } });
+  return data.albums.map((album) => ({ id: album.id, name: album.name, slug: album.slug }));
+}
 
 export interface UploadPanelOptions {
   /** 目标相册候选。广场页可以传空数组，面板会隐藏相册选择。 */
@@ -39,6 +47,18 @@ export interface UploadPanelHandle {
   /** 相册列表异步到手后回填 */
   refreshAlbums(albums: Array<{ id: number; name: string; slug: string }>, albumId?: number | null): void;
   destroy(): void;
+}
+
+/** 支持哪些格式、单张上限多少——都来自 /site，管理员改白名单这里跟着变。 */
+function supportedHint(): string {
+  const site = getState().site;
+  const formats = (site?.formats ?? []).map((ext) => ext.toUpperCase());
+  const size = site?.max_file_bytes ? formatBytes(site.max_file_bytes) : "";
+  if (formats.length === 0) {
+    return size ? `单张最大 ${size}` : "";
+  }
+  const list = formats.join(" · ");
+  return size ? `支持 ${list}；单张最大 ${size}` : `支持 ${list}`;
 }
 
 /** 预览格最多渲染多少张：1000 张全铺出来会把首屏拖垮，剩下的靠汇总数字表达。 */
@@ -182,6 +202,8 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
       h("span.kbd", { text: "V" }),
       " 粘贴剪贴板里的图片",
     ),
+    // 支持哪些格式、单张多大，直接写在这里：进页面就知道，不用先失败一次
+    h("div.tip", { style: { marginTop: "8px" }, text: supportedHint() }),
   );
   const dropButtons = h(
     "div.flexline",
@@ -322,11 +344,10 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     albumId?: number | null,
   ): void => {
     const desired = albumId != null ? albumId : queue.getSettings().albumId;
+    // 只列真实存在的相册。以前这里还有个「未分类」选项代表「不指定相册」，
+    // 它和「默认相册」并排出现时没人分得清该选哪个——现在不指定相册就等于
+    // 进默认相册，下拉里也就只留相册本身。
     albumSelect.replaceChildren(
-      // 「不指定相册」跟相册页里的叫法保持一致：未分类。
-      // 它以前叫「默认相册」，和用户自己那张默认相册重名——
-      // 下拉里于是出现两个「默认相册」，谁都说不清选的是哪一个。
-      h("option", { value: "", text: "未分类" }),
       ...albums.map((album) => h("option", { value: String(album.id), text: album.name })),
     );
 
@@ -335,8 +356,8 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     if (hasWanted) {
       albumSelect.value = wanted;
     } else {
-      // 没选过，或原来选中的相册已经不在了：落到真正的「默认相册」。
-      // 下拉里显示哪张，上传就进哪张——不再出现「显示着默认相册、图却进了未分类」。
+      // 没选过，或原来选中的相册已经不在了：落到「默认相册」。
+      // 下拉里显示哪张，上传就进哪张。
       const fallback = albums.find((album) => album.slug === "default") ?? albums[0] ?? null;
       albumSelect.value = fallback ? String(fallback.id) : "";
     }
@@ -715,10 +736,11 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     exportBtn.disabled = queue.successLinks().length === 0;
     clearBtn.disabled = items.length === 0;
 
+    // 队列不跨刷新保留：刷新后这张清单就该是空的（文件本身浏览器也存不下）
     const hasReselect = stats.needsReselect > 0;
     settingsTip.textContent = hasReselect
-      ? `${stats.needsReselect} 张需要重新选择文件；其余进度已存在本地，刷新不丢。`
-      : "队列状态存在浏览器本地，刷新页面不会丢。";
+      ? `${stats.needsReselect} 张需要重新选择文件（刷新后文件需要重新选）。`
+      : "刷新页面会清空这张清单；相册、标签、并发这些设置会记住。";
   }
 
   function renderAll(): void {
@@ -815,8 +837,6 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
       document.removeEventListener("paste", onPaste);
       document.removeEventListener("dragover", preventDrop);
       document.removeEventListener("drop", preventDrop);
-      // 离开页面时立刻落盘：节流窗口里的状态不能因为一次导航就丢
-      queue.flushSave();
       root.remove();
     },
   };

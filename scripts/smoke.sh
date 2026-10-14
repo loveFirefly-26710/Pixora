@@ -377,6 +377,32 @@ expect_json "${SETTINGS3}" "d['data']['site']['plaza_grid_columns']" "6" "越界
 api PUT /api/v1/admin/storage/prefix -H 'Content-Type: application/json' -d '{"upload_prefix":"i"}' >/dev/null
 ok "直链前缀改为 i"
 
+# 后台建号：邮箱即时可用，建完能登录；角色可以提也能降；最后删掉不留脏数据
+NEW_USER="$(api POST /api/v1/admin/users -H 'Content-Type: application/json' \
+    -d '{"email":"smoke-user@example.com","password":"SmokeUser2026Abc","role":"user"}')"
+expect_json "${NEW_USER}" "d['data']['user']['email']" "smoke-user@example.com" "后台建号：邮箱"
+NEW_ID="$(printf '%s' "${NEW_USER}" | python -c "import json,sys; print(json.load(sys.stdin)['data']['user']['id'])")"
+
+NEW_LOGIN="$(curl -s -X POST "${BASE}/api/v1/auth/login" -H 'Content-Type: application/json' \
+    -d '{"email":"smoke-user@example.com","password":"SmokeUser2026Abc"}')"
+expect_json "${NEW_LOGIN}" "d['data']['user']['email']" "smoke-user@example.com" "新账号能登录（邮箱已激活）"
+
+PROMOTED="$(api PATCH "/api/v1/admin/users/${NEW_ID}" -H 'Content-Type: application/json' \
+    -d '{"role":"admin"}')"
+expect_json "${PROMOTED}" "d['data']['user']['role']" "admin" "普通用户提为管理员"
+
+DEMOTED="$(api PATCH "/api/v1/admin/users/${NEW_ID}" -H 'Content-Type: application/json' \
+    -d '{"role":"user"}')"
+expect_json "${DEMOTED}" "d['data']['user']['role']" "user" "管理员降回普通用户"
+
+DUP="$(api POST /api/v1/admin/users -H 'Content-Type: application/json' \
+    -d '{"email":"smoke-user@example.com","password":"SmokeUser2026Abc"}')"
+expect_json "${DUP}" "d['error']['code']" "CONFLICT" "重复邮箱建号被拒"
+
+api DELETE "/api/v1/admin/users/${NEW_ID}" >/dev/null
+ROWS_AFTER="$(api GET /api/v1/admin/users)"
+expect_json "${ROWS_AFTER}" "d['meta']['total']" "1" "测试账号已删除，用户数回到 1"
+
 BAD_TERMS="$(api DELETE /api/v1/admin/terms/99999)"
 expect_json "${BAD_TERMS}" "d['error']['code']" "NOT_FOUND" "删除不存在的条款返回 NOT_FOUND"
 

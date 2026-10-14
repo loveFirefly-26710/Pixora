@@ -116,7 +116,10 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/queue/{job_id}", get(r::upload::queue_status))
         // ---------- 管理后台 ----------
         .route("/admin/stats", get(r::admin::stats))
-        .route("/admin/users", get(r::admin::users_list))
+        .route(
+            "/admin/users",
+            get(r::admin::users_list).post(r::admin::user_create),
+        )
         .route(
             "/admin/users/{id}",
             get(r::admin::user_detail)

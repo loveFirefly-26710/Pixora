@@ -150,6 +150,53 @@ fn add_user_detail_extras(
     }
 }
 
+/// `POST /api/v1/admin/users` — 管理端直接建号。
+///
+/// 邮箱直接标记为已验证：管理员手输的地址不需要再走一遍验证邮件。
+/// 配额取当前默认值，建完可以在详情页单独调。
+pub async fn user_create(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/users");
+
+    let email = field_opt_str(&body, "email")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let Some(email) = email else {
+        return bad_request("邮箱不能为空");
+    };
+    let password = field_opt_str(&body, "password").filter(|value| !value.is_empty());
+    let Some(password) = password else {
+        return bad_request("密码不能为空");
+    };
+    let role = field_opt_str(&body, "role");
+
+    let detail = match state
+        .admin_create_user(
+            &auth.user,
+            &email,
+            &password,
+            role.as_deref(),
+            rectx.ip.as_deref(),
+        )
+        .await
+    {
+        Ok(detail) => detail,
+        Err(err) => return crate::http::error_response(err),
+    };
+
+    // 与详情/更新同一个形状：补 limits 别名并按契约带上 csrf_token
+    let mut payload = serde_json::to_value(&detail).unwrap_or_else(|_| serde_json::json!({}));
+    add_user_detail_extras(&mut payload, &detail);
+    payload["csrf_token"] = serde_json::to_value(cookie_value(&headers, CSRF_COOKIE))
+        .unwrap_or(serde_json::Value::Null);
+    finish::<serde_json::Value>(Ok(payload))
+}
+
 /// `PATCH /api/v1/admin/users/{id}` — 改邮箱 / 重置密码 / 调角色。
 ///
 /// 三个字段都可选，只写传了的；领域层负责「改邮箱重置验证状态」「重置密码踢下线」
