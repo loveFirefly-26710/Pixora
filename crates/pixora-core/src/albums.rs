@@ -169,6 +169,13 @@ impl AppState {
     /// 删除相册：图片解除关联，不跟着删。
     pub async fn delete_album(&self, viewer: &Viewer, album_id: i64) -> Result<i64> {
         let album = self.require_owned_album(viewer, album_id).await?;
+        // 默认相册是「上传不指定相册」的落脚点，删掉之后没有重建它的入口，
+        // 所以在这里拦住——前端隐藏按钮只是方便，真正的规则在服务端
+        if album.slug == pixora_repo::repo::albums::DEFAULT_ALBUM_SLUG {
+            return Err(AppError::bad_request(
+                "默认相册不能删除：上传不指定相册时就落在它这里",
+            ));
+        }
         let count = album.image_count;
         self.repo.delete_album(album_id).await?;
         Ok(count)

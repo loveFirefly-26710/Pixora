@@ -57,14 +57,33 @@ let refs: {
   outlet: HTMLElement;
 } | null = null;
 
-function active(items: NavItem[]): boolean {
+/**
+ * 当前路径命中的、最长的那条 match。
+ *
+ * 只有它对应的条目该高亮：`/account` 与 `/account/security` 是前缀关系，
+ * 「谁 startsWith 谁」会让「账号信息」和「安全」同时亮着。
+ * 取最长匹配之后，路径越具体，亮的条目就越具体。
+ */
+function bestMatch(): string | null {
   const path = currentPath();
-  return items.some((item) => (item.match ?? [item.path]).some((prefix) => path.startsWith(prefix)));
+  let best: string | null = null;
+  const all = [...USER_NAV, ...ADMIN_NAV, ...ABOUT_NAV, PLAZA, ALBUMS, UPLOAD, MINE];
+  for (const item of all) {
+    for (const prefix of item.match ?? [item.path]) {
+      if (path.startsWith(prefix) && (best === null || prefix.length > best.length)) best = prefix;
+    }
+  }
+  return best;
+}
+
+function active(items: NavItem[]): boolean {
+  const best = bestMatch();
+  return best !== null && items.some((item) => (item.match ?? [item.path]).includes(best));
 }
 
 function navLink(item: NavItem): HTMLElement {
-  const path = currentPath();
-  const isActive = (item.match ?? [item.path]).some((prefix) => path.startsWith(prefix));
+  const best = bestMatch();
+  const isActive = best !== null && (item.match ?? [item.path]).includes(best);
   return h("a", {
     href: `#${item.path}`,
     class: isActive ? "on" : "",

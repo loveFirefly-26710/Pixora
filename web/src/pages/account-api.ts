@@ -23,12 +23,14 @@ import {
   pageHead,
   qtip,
   responsiveTable,
-  select,
   textInput,
 } from "../ui/widgets";
 
 /** 本次页面生命周期内新建的 Token 明文，仅用于填充配置片段。 */
 let lastCreatedToken: string | null = null;
+
+/** Token 过期天数的上限：十年。再长不如直接留空用永不过期。 */
+const MAX_TOKEN_DAYS = 3650;
 
 const SCOPE_OPTIONS: Array<{ key: string; label: string; hint: string }> = [
   { key: "upload", label: "upload", hint: "上传图片" },
@@ -178,12 +180,16 @@ function newTokenCard(nameInput: HTMLInputElement, reload: () => void): HTMLElem
     chips.append(chip);
   }
 
-  const expires = select([
-    { value: "", label: "永不过期" },
-    { value: "30", label: "30 天" },
-    { value: "90", label: "90 天" },
-    { value: "365", label: "1 年" },
-  ]);
+  // 天数手输：固定几个挡位满足不了「先用 7 天试试」这类需求
+  const expires = textInput({
+    value: "",
+    type: "number",
+    mono: true,
+    placeholder: "留空 = 永不过期",
+    min: "1",
+    max: String(MAX_TOKEN_DAYS),
+  });
+  expires.style.maxWidth = "180px";
 
   const submit = h("button.btn.pri", { type: "button", text: "生成 Token" });
   submit.addEventListener("click", async () => {
@@ -197,6 +203,14 @@ function newTokenCard(nameInput: HTMLInputElement, reload: () => void): HTMLElem
       toastError(new Error("至少选择一个权限范围"));
       return;
     }
+    // 天数是手输的，先自己校验一遍，别把「9999 年」这种交给服务端再被拒
+    const daysText = expires.value.trim();
+    const days = daysText ? Number(daysText) : null;
+    if (days !== null && (!Number.isInteger(days) || days < 1 || days > MAX_TOKEN_DAYS)) {
+      toastError(new Error(`过期天数要填 1 到 ${MAX_TOKEN_DAYS} 之间的整数；想永不过期就留空`));
+      expires.focus();
+      return;
+    }
     submit.disabled = true;
     submit.textContent = "生成中…";
     try {
@@ -206,7 +220,7 @@ function newTokenCard(nameInput: HTMLInputElement, reload: () => void): HTMLElem
           name,
           scopes: SCOPE_OPTIONS.filter((scope) => selected.has(scope.key)).map((s) => s.key),
           // 空值表示永不过期；有值就换算成天数交给服务端
-          expires_in_days: expires.value ? Number(expires.value) : null,
+          expires_in_days: days,
         },
       });
       lastCreatedToken = created.token ?? null;
@@ -226,7 +240,13 @@ function newTokenCard(nameInput: HTMLInputElement, reload: () => void): HTMLElem
     "新建 Token",
     h("div.fld", null, h("label.f", { text: "名称" }), nameInput),
     h("div.fld", null, h("label.f", { text: "权限范围" }), chips),
-    h("div.fld", null, h("label.f", { text: "过期时间" }), expires),
+    h(
+      "div.fld",
+      null,
+      h("label.f", { text: "过期时间" }),
+      expires,
+      h("div.tip", { text: `填天数，例如 90；留空表示永不过期（最长 ${MAX_TOKEN_DAYS} 天）` }),
+    ),
     submit,
     h("div.tip", { text: "权限按最小可用给：只上传的客户端不需要 read / write。" }),
   );

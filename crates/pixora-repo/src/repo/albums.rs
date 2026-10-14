@@ -10,7 +10,8 @@ use crate::model::*;
 use crate::repo::{like_pattern, Page, PageRequest, Repo};
 
 /// 注册时自动建的相册，slug 固定，同一用户内至多一个。
-const DEFAULT_ALBUM_SLUG: &str = "default";
+/// 默认相册的 slug。它是「上传不指定相册」的落脚点，别处也要按它判断。
+pub const DEFAULT_ALBUM_SLUG: &str = "default";
 
 /// 新建相册的入参。
 #[derive(Debug, Clone)]

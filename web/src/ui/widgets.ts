@@ -359,6 +359,8 @@ export function imageTile(
     subtitle?: string;
     /** 方格上是否带标签 chip（相册页不显示，广场显示，跟原型一致） */
     showTags?: boolean;
+    /** 左上角带勾选框（相册页用：勾选框常驻，不必先点「选择」进模式） */
+    checkbox?: boolean;
   } = {},
 ): HTMLElement {
   const thumb = h("div.ph", { class: `c${(item.id % 6) + 1}` });
@@ -415,7 +417,24 @@ export function imageTile(
     }
     options.onOpen?.(item, event);
   });
-  return tile;
+
+  if (!options.checkbox) return tile;
+
+  // 勾选框放在 button 外面：交互元素不能嵌套（按钮里塞 input 是非法结构，
+  // 点一下会同时触发两边的行为）。外层 .tile-cell 只负责定位。
+  const pick = h("input", {
+    type: "checkbox",
+    class: "pick",
+    checked: options.selected ?? false,
+    "aria-label": `选择 ${item.title ?? item.original_name ?? item.short_hash}`,
+  });
+  pick.addEventListener("click", (event) => {
+    // 勾选框自己处理选中；Shift 点它同样按范围选
+    event.stopPropagation();
+    options.onSelect?.(item, event);
+  });
+  pick.addEventListener("change", (event) => event.stopPropagation());
+  return h("div.tile-cell", { class: options.selected ? "on" : "" }, pick, tile);
 }
 
 /** 复制直链按钮：点了就提示，失败也提示。 */

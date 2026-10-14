@@ -20,6 +20,9 @@ use axum::Json;
 use pixora_core::AppState;
 use pixora_crypto::token as crypto_token;
 
+/** Token 过期天数上限：十年。再长不如留空用「永不过期」。 */
+const MAX_TOKEN_DAYS: i64 = 3650;
+
 use crate::http::{
     clear_cookies, cookie_value, finish, request_context, rfc3339, with_cookies, CSRF_COOKIE,
 };
@@ -488,11 +491,20 @@ pub async fn tokens_create(
     scopes.sort();
     scopes.dedup();
 
-    // `expires_in_days` 省略或 null 表示永不过期；0 与负数按「立即过期」处理没有意义，
-    // 所以统一折算成「不过期」，与契约里「省略或 null 表示永不过期」保持一致
-    let expires_at = field_opt_i64(&body, "expires_in_days")
-        .filter(|days| *days > 0)
-        .map(|days| pixora_repo::model::now() + chrono::Duration::days(days));
+    // `expires_in_days` 省略或 null 表示永不过期。天数现在是前端手输的，
+    // 手滑填个 0、负数或 99999 要当场报错，不能悄悄折成「永远不过期」——
+    // 那等于把用户以为收窄了的令牌变成永久的，方向正好反了。
+    let expires_at = match field_opt_i64(&body, "expires_in_days") {
+        None => None,
+        Some(days) if days >= 1 && days <= MAX_TOKEN_DAYS => {
+            Some(pixora_repo::model::now() + chrono::Duration::days(days))
+        }
+        Some(days) => {
+            return bad_request(format!(
+                "过期天数要在 1 到 {MAX_TOKEN_DAYS} 之间（收到 {days}）；永不过期请留空"
+            ))
+        }
+    };
 
     let plain = match crypto_token::new_api_token() {
         Ok(token) => token,

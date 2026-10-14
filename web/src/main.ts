@@ -23,6 +23,7 @@ import { render as resetPage } from "./pages/reset-password";
 import { render as suspendedPage } from "./pages/suspended";
 import { render as notFoundPage } from "./pages/not-found";
 import { render as albumsPage } from "./pages/albums";
+import { render as albumsManagePage } from "./pages/albums-manage";
 import { render as uploadPage } from "./pages/upload";
 import { render as docsPage } from "./pages/docs";
 import { render as accountInfoPage } from "./pages/account-info";
@@ -52,6 +53,8 @@ function registerRoutes(): void {
   route("/install", installPage);
 
   route("/albums", albumsPage, { auth: true });
+  // 管理页要排在动态段之前，否则 /albums/manage 会被 :albumId 吃掉
+  route("/albums/manage", albumsManagePage, { auth: true });
   route("/albums/:albumId", albumsPage, { auth: true });
   route("/upload", uploadPage, { auth: true });
   route("/docs/api", docsPage);
