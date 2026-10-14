@@ -84,6 +84,7 @@ export async function render(ctx: PageContext): Promise<void> {
     ctx.outlet.append(panel.root);
   }
 
+  // 搜索框只在顶栏那一个（原型就是这样，页面里不再重复一个）
   const search = h("input", {
     placeholder: "搜索标签、关键词…",
     value: query.q ?? "",
@@ -93,33 +94,30 @@ export async function render(ctx: PageContext): Promise<void> {
     "input",
     debounce(() => update({ q: search.value.trim() || null, page: null }), 350),
   );
-
-  const tagRow = h("div.flexline", { style: { marginBottom: "14px" } });
   ctx.outlet.append(
-    h(
-      "div.flexline",
-      { style: { marginBottom: "14px" } },
-      search,
-      h("span.spacer"),
-      h("button.chip", {
-        type: "button",
-        class: query.sort === "new" ? "on" : "",
-        text: "最新",
-        on: { click: () => update({ sort: "new", page: null }) },
-      }),
-      h("button.chip", {
-        type: "button",
-        class: query.sort === "hot" ? "on" : "",
-        text: "最热",
-        on: { click: () => update({ sort: "hot", page: null }) },
-      }),
-    ),
-    tagRow,
-    gridHost,
-    pagerHost,
+    h("div.flexline", { style: { marginBottom: "14px" } }, search),
   );
 
-  tagRow.append(skeletonGrid(1));
+  // 标签与排序同处一行：标签靠左、排序靠右，与原型一致
+  const tagRow = h("div.flexline", { style: { marginBottom: "14px" } });
+  ctx.outlet.append(tagRow, gridHost, pagerHost);
+
+  const sortChips = () => [
+    h("button.chip", {
+      type: "button",
+      class: query.sort === "new" ? "on" : "",
+      text: "最新",
+      on: { click: () => update({ sort: "new", page: null }) },
+    }),
+    h("button.chip", {
+      type: "button",
+      class: query.sort === "hot" ? "on" : "",
+      text: "最热",
+      on: { click: () => update({ sort: "hot", page: null }) },
+    }),
+  ];
+
+  tagRow.append(h("button.chip", { type: "button", class: "on", text: "全部" }), h("span.spacer"), ...sortChips());
   void request<TagRow[]>("/plaza/tags", { query: { limit: 24 } })
     .then((tags) => {
       tagRow.replaceChildren(
@@ -133,10 +131,12 @@ export async function render(ctx: PageContext): Promise<void> {
           h("button.chip", {
             type: "button",
             class: query.tag === tag.name ? "on" : "",
-            text: `${tag.name} ${tag.usage}`,
+            text: tag.name,
             on: { click: () => update({ tag: tag.name, page: null }) },
           }),
         ),
+        h("span.spacer"),
+        ...sortChips(),
       );
     })
     .catch(() => tagRow.replaceChildren());
@@ -177,7 +177,7 @@ export async function render(ctx: PageContext): Promise<void> {
         for (const item of page.items) {
           grid.append(
             imageTile(item, {
-              subtitle: `${item.title ?? item.short_hash} · u_${item.owner_uid} · ${relativeTime(item.upload_time)}`,
+              subtitle: `u_${item.owner_uid} · ${relativeTime(item.upload_time)}`,
               onOpen: (clicked) =>
                 openLightbox(page.items, clicked, { anonymous: !user }),
             }),

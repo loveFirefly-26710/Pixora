@@ -64,15 +64,12 @@ export async function render(ctx: PageContext): Promise<void> {
       }),
     ),
     submit,
+    // 注册入口放在右下角：游客只剩「登录」一个入口，注册从这里进
     h(
-      "div.tip",
-      { style: { textAlign: "center", marginTop: "16px" } },
-      "还没有账号？",
-      h("a", {
-        href: "#/register",
-        style: { color: "var(--primary)", textDecoration: "none" },
-        text: "注册",
-      }),
+      "div.flexline",
+      { style: { justifyContent: "flex-end", marginTop: "16px" } },
+      h("span", { style: { color: "var(--muted)", fontSize: "12.5px" }, text: "还没有账号？" }),
+      h("a.btn", { href: "#/register", text: "注册" }),
     ),
     site && !site.registration_open
       ? qtip(
