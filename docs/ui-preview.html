@@ -888,10 +888,10 @@ if (res.status === <span class="n">403</span>) {
             <tr><td><span class="m patch">PATCH</span></td><td class="mono">/api/v1/albums/{id}</td><td>改相册名称、可见性、排序</td><td><span class="tag">write</span></td></tr>
             <tr><td><span class="m del">DELETE</span></td><td class="mono">/api/v1/albums/{id}</td><td>删除相册</td><td><span class="tag">write</span></td></tr>
             <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/plaza</td><td>广场搜索，公开端点不需要鉴权</td><td><span class="badge mute">公开</span></td></tr>
+            <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/random</td><td>随机一张公开图片，302 跳直链</td><td><span class="badge mute">公开</span></td></tr>
             <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/fs/tree</td><td>数据目录递归查询</td><td><span class="tag">read</span></td></tr>
             <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/queue/{job_id}</td><td>查询队列任务状态</td><td><span class="tag">read</span></td></tr>
             <tr><td><span class="m get">GET</span></td><td class="mono">/api/v1/me</td><td>当前用户信息与配额用量</td><td><span class="tag">read</span></td></tr>
-            <tr><td><span class="m post">POST</span></td><td class="mono">/upload</td><td>兼容旧版图床的调用方式</td><td><span class="tag">upload</span></td></tr>
           </tbody>
         </table>
       </div>
@@ -1035,13 +1035,17 @@ curl -X POST <span class="s">"https://img.example.com/api/v1/upload"</span> \
           <button class="btn pri sm" style="margin-top:10px">复制配置 JSON</button>
         </div>
         <div class="card">
-          <h4>兼容旧调用方式</h4>
-          <div style="font-size:12.5px;color:var(--muted);margin-bottom:8px">沿用原来的字段名和响应结构，老脚本不用改。</div>
-          <pre class="code">curl -X POST <span class="s">"https://img.example.com/upload"</span> \
-  -H <span class="s">"X-API-Key: $TOKEN"</span> \
-  -F <span class="s">"image=@./photo.jpg"</span> \
-  -F <span class="s">"tags=风景"</span></pre>
-          <div class="tip" style="margin-top:8px">响应 <span class="mono">{success, message, url, storage_type, tags}</span>，和旧版一致。</div>
+          <h4>随机图</h4>
+          <div style="font-size:12.5px;color:var(--muted);margin-bottom:8px">每次请求都挑一张公开图片。可以直接当图片地址用（302 跳直链），也可以要 JSON 元数据。</div>
+          <pre class="code"># 直接当 &lt;img src&gt; 用：每次刷新换一张
+https://img.example.com/api/v1/random
+
+# 只要某个标签的
+https://img.example.com/api/v1/random?tag=风景
+
+# 要元数据（url / 尺寸 / 标签）就加 format=json
+curl <span class="s">"https://img.example.com/api/v1/random?format=json"</span></pre>
+          <div class="tip" style="margin-top:8px">302 而非 301：随机结果不该被缓存。挑不到图片时返回 404；站点关闭广场公开浏览后，未登录调用会一并关闭。</div>
         </div>
       </div>
 

@@ -522,16 +522,6 @@ impl AppState {
         .await;
     }
 
-    /// 兼容旧版本图床调用的响应体，字段名与老脚本对齐。
-    pub fn legacy_response(outcome: &UploadOutcome) -> serde_json::Value {
-        serde_json::json!({
-            "success": true,
-            "message": if outcome.dedup { "服务器已有相同文件，未重复上传" } else { "上传成功" },
-            "url": outcome.url,
-            "storage_type": outcome.storage_type,
-            "tags": outcome.tags.join(","),
-        })
-    }
 }
 
 /// 临时文件的生命周期封装：构造时创建，Drop 时删除。
@@ -689,13 +679,6 @@ pub async fn purge_stale_temp_files(data_root: &std::path::Path, older_than_seco
     removed
 }
 
-/// 兼容旧图床响应体的自由函数入口。
-///
-/// 路由层按 `legacy_response(&outcome)` 引入，实际实现挂在 `AppState` 上
-/// （它要读站点配置拼直链），这里只做转发，避免两套口径。
-pub fn legacy_response(outcome: &UploadOutcome) -> serde_json::Value {
-    AppState::legacy_response(outcome)
-}
 
 #[cfg(test)]
 mod tests {

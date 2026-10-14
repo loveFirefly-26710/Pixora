@@ -665,6 +665,27 @@ impl Repo {
         Ok(())
     }
 
+    /// 随机取一张图。给随机图 API 用：博客头图、桌面壁纸这类场景。
+    ///
+    /// 用 `ORDER BY RANDOM()`（MySQL 是 `RAND()`）而不是自建随机偏移：
+    /// 图床规模下这条语句的代价可以接受，而少一个会漂移的偏移量计算。
+    pub async fn random_image(&self, filter: &ImageFilter) -> Result<Option<ImageView>> {
+        let (where_sql, args) = self.image_where(filter);
+        let order = self.db.sql_v(
+            "ORDER BY RANDOM() LIMIT 1",
+            "ORDER BY RAND() LIMIT 1",
+            "ORDER BY RANDOM() LIMIT 1",
+        );
+        // ORDER BY 里的 ORDER 是方言差异，占位符在 where 里，各自独立拼接
+        let head = self.db.sql(&format!("{IMAGE_VIEW_SQL}{where_sql}"));
+        let sql = format!("{head} {order}");
+        let rows = self.db.fetch_all(&sql, args).await?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        Ok(Some(ImageView::from_row(row)?))
+    }
+
     /// 图片总数（公开面）。
     pub async fn count_all_images(&self) -> Result<i64> {
         self.db

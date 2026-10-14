@@ -17,6 +17,8 @@ export interface SiteInfo {
   background: string | null;
   installed: boolean;
   terms: { required: boolean; version: string | null; articles: number };
+  /** 广场网格列数，管理员可配 */
+  plaza_grid_columns: number;
 }
 
 export interface UserLimits {
@@ -374,6 +376,7 @@ export interface AdminSettings {
     plaza_public: boolean;
     require_login_to_upload: boolean;
     register_enabled: boolean;
+    plaza_grid_columns: number;
   };
   upload: {
     max_file_bytes: number;

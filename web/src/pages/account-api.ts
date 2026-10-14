@@ -317,7 +317,6 @@ async function copyConfig(endpoint: string): Promise<void> {
     "文件字段名：file",
     `请求头：Authorization: Bearer ${tokenLine}`,
     "返回 URL 字段：data.url",
-    "（另支持兼容端点 /upload，文件字段名 image，便于旧版工具直接使用）",
   ].join("\n");
   if (await copyText(text)) toast("✓ 配置已复制到剪贴板");
   else toastError(new Error("复制失败，请手动选中后复制"));

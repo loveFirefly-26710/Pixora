@@ -1,4 +1,4 @@
-//! 上传：批量预检、multipart 收件、任务查询，以及旧图床的兼容端点。
+//! 上传：批量预检、multipart 收件、任务查询。
 //!
 //! ## 字段顺序：不假设，也不依赖
 //!
@@ -24,27 +24,19 @@
 //! 收件过程中内存占用只有一个 64KiB 的块，大小上限在收的时候就开始判
 //! （超了就删掉半成品并回 `FILE_TOO_LARGE`），不会出现「先把超大请求收完再拒绝」。
 //! 多出来的一次同盘顺序写，是换取「任何字段顺序都对」的代价。
-//!
-//! ## 旧图床兼容端点为什么另开一条
-//!
-//! 老的 PicGo/脚本按 `/upload`（没有 `/api/v1` 前缀）+ 字段名 `image` 调用，
-//! 响应的形状也不同（`{success, message, url}` 而不是信封）。把兼容逻辑做成
-//! 「同一路径上的另一副面孔」而不是新路径，是为了让老配置里的 URL 原样可用；
-//! 而 `?format=picgo` / `Accept: application/json` 时回标准信封，让新客户端
-//! 既能复用这个短路径，又不必解析旧结构。
 
 use std::sync::Arc;
 
 use axum::extract::multipart::Field;
-use axum::extract::{Multipart, Path, Query, State};
-use axum::http::{HeaderMap, Method, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::extract::{Multipart, Path, State};
+use axum::http::{HeaderMap, Method};
+use axum::response::Response;
 use axum::Json;
 use pixora_core::uploads::{UploadInput, UploadOutcome};
 use pixora_core::{AppError, AppState};
 use pixora_repo::model::visibility;
 
-use crate::http::{api_token, cookie_value, error_response, finish, request_context, CSRF_COOKIE};
+use crate::http::{cookie_value, error_response, finish, request_context, CSRF_COOKIE};
 
 use super::{require_user, PeerAddr};
 
@@ -239,8 +231,8 @@ pub async fn upload(
     }
 }
 
-/// 上传请求体的字段状态机。标准端点与兼容端点共用它，
-/// 区别只在「缺文件字段时报什么错」由调用方决定。
+/// 上传请求体的字段状态机。`collect_upload` 边读边填，
+/// 返回后由路由判断「文件字段在不在」。
 struct UploadParts {
     album_id: Option<i64>,
     tags: Vec<String>,
@@ -266,8 +258,8 @@ impl UploadParts {
 /// 逐字段读 multipart：普通字段进 `UploadParts`，文件字段先落到临时文件，
 /// 等整个表单读完、元数据齐了再交给领域层。
 ///
-/// 返回 `Ok(None)` 表示「整个表单里没有文件字段」——调用方按各自的
-/// 错误文案处理（标准端点说「缺少 file 字段」，兼容端点说「缺少 image 字段」）。
+/// 返回 `Ok(None)` 表示「整个表单里没有文件字段」，
+/// 由调用方决定报错文案。
 async fn collect_upload(
     state: &Arc<AppState>,
     user: &pixora_repo::model::User,
@@ -459,117 +451,4 @@ pub async fn queue_status(
         "image_id": job.image_id,
         "error": job.error,
     })))
-}
-
-// ============================================================
-// 旧图床兼容端点（挂在 `/upload`，不带 /api/v1 前缀）
-// ============================================================
-
-/// `POST /upload` — 兼容旧版图床。
-///
-/// 三条与标准端点不同的规则：
-///   1. **只认 `X-API-Key` / `Bearer`**。老客户端没有浏览器会话，也不该有；
-///      接受会话 Cookie 等于让这个短路径绕开 CSRF 这道门。
-///   2. 文件字段名 `file` / `image` 都收（老脚本用 `image`）。
-///   3. 响应结构看 `?format=picgo` 或 `Accept: application/json`：
-///      命中就回标准信封，否则回 `{success, message, url, storage_type, tags}`。
-pub async fn upload_legacy(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    peer: PeerAddr,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    mut multipart: Multipart,
-) -> Response {
-    let rectx = request_context(&state, &headers, peer.addr()).await;
-    let standard = wants_standard(&headers, &query);
-
-    // 1) 只认 Token
-    let Some(token) = api_token(&headers) else {
-        return fail_unauthorized(standard);
-    };
-    let (user, record) = match state.authenticate_token(&token).await {
-        Ok(value) => value,
-        Err(err) => return fail(standard, err),
-    };
-    // 复用与会话同一套范围判断：空范围视为全权（与 `Authenticated::require_scope` 一致）
-    let auth = crate::http::Authenticated {
-        user: user.clone(),
-        session_id: None,
-        via_token: true,
-        scopes: record.scopes.clone(),
-    };
-    if let Err(err) = auth.require_scope("upload") {
-        return fail(standard, err);
-    }
-
-    let outcome = match collect_upload(&state, &user, &mut multipart, rectx.ip.as_deref()).await {
-        Ok(Some(outcome)) => outcome,
-        Ok(None) => return fail(standard, AppError::bad_request("请求里没有图片文件（字段名应为 image）")),
-        Err(err) => return fail(standard, err),
-    };
-
-    if standard {
-        return finish::<serde_json::Value>(Ok(upload_payload(&outcome, None)));
-    }
-    // 旧结构不带信封：老客户端的解析代码只认这几个字段
-    (
-        StatusCode::OK,
-        Json(AppState::legacy_response(&outcome)),
-    )
-        .into_response()
-}
-
-/// 判断这次请求要不要回标准信封。
-///
-/// `Accept: application/json` 也认，是因为 PicGo 的「自定义图床」配置里
-/// 通常改不了 query，只能改请求头。
-fn wants_standard(headers: &HeaderMap, query: &std::collections::HashMap<String, String>) -> bool {
-    if query
-        .get("format")
-        .map(|value| value.trim().eq_ignore_ascii_case("picgo"))
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    headers
-        .get(axum::http::header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_ascii_lowercase().contains("application/json"))
-        .unwrap_or(false)
-}
-
-fn fail_unauthorized(standard: bool) -> Response {
-    if standard {
-        return error_response(AppError::Unauthorized);
-    }
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(serde_json::json!({
-            "success": false,
-            "message": "请提供 X-API-Key 或 Authorization: Bearer 令牌",
-        })),
-    )
-        .into_response()
-}
-
-/// 兼容端点的错误响应：标准模式下是信封，旧模式下是 `{success:false, message}`。
-fn fail(standard: bool, err: AppError) -> Response {
-    if standard {
-        return error_response(err);
-    }
-    let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut body = serde_json::json!({
-        "success": false,
-        "message": err.message(),
-    });
-    // 暂停/封禁这类错误带原因与申诉入口，老客户端不认也得给上——
-    // 用户至少能在日志里看到「为什么失败」
-    if let Some(extra) = err.extra() {
-        if let (Some(target), Some(source)) = (body.as_object_mut(), extra.as_object()) {
-            for (key, value) in source {
-                target.insert(key.clone(), value.clone());
-            }
-        }
-    }
-    (status, Json(body)).into_response()
 }

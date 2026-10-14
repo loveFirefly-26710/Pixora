@@ -11,15 +11,18 @@
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use pixora_core::settings::keys;
-use pixora_core::{AppError, AppState};
+use pixora_core::AppState;
+use pixora_core::AppError;
+use pixora_repo::repo::images::ImageFilter;
 use pixora_repo::model::TermsVersion;
 
 use crate::http::{
-    finish, finish_page, parse_i64, parse_str, request_context, rfc3339, Authenticated,
+    error_response, finish, finish_page, parse_i64, parse_str,
+    request_context, rfc3339, Authenticated,
 };
 
 use super::{bad_request, field_i64, PeerAddr};
@@ -78,6 +81,7 @@ pub async fn site(
         "name": site.name,
         "base_url": state.base_url().await,
         "upload_prefix": site.upload_prefix,
+        "plaza_grid_columns": site.plaza_grid_columns,
         "registration_open": registration_open,
         "registration_closed_reason": registration_closed_reason,
         "plaza_public": site.plaza_public,
@@ -371,4 +375,82 @@ pub async fn healthz(State(state): State<Arc<AppState>>) -> Response {
         "uptime_seconds": uptime,
     });
     (axum::http::StatusCode::OK, axum::Json(payload)).into_response()
+}
+
+/// `GET /api/v1/random` — 随机取一张公开图片。
+///
+/// 默认 302 跳到直链，这样 `<img src="/api/v1/random">` 直接能用：浏览器自己去
+/// 取图，服务端不参与传字节。加 `?format=json` 则回一个 JSON（含直链），
+/// 方便脚本里先拿地址再决定怎么用。
+///
+/// 支持的筛选与广场一致：`tag`（精确标签）、`q`（关键词）、`uid`（作者）。
+/// 没有符合条件的图片时回 404，而不是随机糊一张不相关的图给用户。
+pub async fn random_image(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    // 广场关闭公开浏览时，随机图也一并关掉，免得成为绕过开关的后门
+    let site = match state.settings.site(state.config.base_url.as_deref()).await {
+        Ok(site) => site,
+        Err(err) => return error_response(err),
+    };
+    if !site.plaza_public {
+        if let Err(err) = crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await {
+            return error_response(err);
+        }
+    }
+
+    let filter = ImageFilter {
+        public_only: true,
+        tag: params.get("tag").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+        query: params.get("q").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+        owner_id: match params.get("uid") {
+            Some(uid) => match state.repo.find_user_by_uid(uid.trim()).await {
+                Ok(Some(user)) => Some(user.id),
+                Ok(None) => return error_response(AppError::not_found("用户")),
+                Err(err) => return error_response(err.into()),
+            },
+            None => None,
+        },
+        ..Default::default()
+    };
+
+    let picked = match state.repo.random_image(&filter).await {
+        Ok(Some(view)) => view,
+        Ok(None) => return error_response(AppError::not_found("图片")),
+        Err(err) => return error_response(err.into()),
+    };
+    let url = state.direct_url(&picked.sha256, &picked.ext, false).await;
+    let thumb = state.direct_url(&picked.sha256, &picked.ext, true).await;
+
+    if params.get("format").map(|v| v == "json").unwrap_or(false) {
+        return finish(Ok(serde_json::json!({
+            "url": url,
+            "thumb_url": thumb,
+            "id": picked.id,
+            "width": picked.width,
+            "height": picked.height,
+            "size": picked.size,
+            "ext": picked.ext,
+            "tags": picked.tags,
+            "owner_uid": picked.owner_uid,
+        })));
+    }
+
+    // 302 而不是 301：随机结果不该被永久缓存下来。
+    // 不用 `Redirect::temporary`——它是 307，虽然这里只有 GET、语义上都对，
+    // 但契约文档与客户端都按「302 跳转」理解，让实现和文档一致更省事。
+    let mut response = (
+        StatusCode::FOUND,
+        [(header::LOCATION, url)],
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }

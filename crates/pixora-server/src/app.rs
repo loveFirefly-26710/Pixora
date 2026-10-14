@@ -37,8 +37,6 @@ pub fn build(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/healthz", get(crate::routes::public::healthz))
-        // 兼容端点：老脚本用 /upload + `image` 字段
-        .route("/upload", post(crate::routes::upload::upload_legacy))
         .nest("/api/v1", api)
         .fallback(fallback)
         // 中间件由外到内：限体积 → 限时 → 追踪 → 压缩
@@ -62,6 +60,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/site", get(r::public::site))
         .route("/plaza", get(r::public::plaza))
         .route("/plaza/tags", get(r::public::plaza_tags))
+        .route("/random", get(r::public::random_image))
         .route("/terms", get(r::public::terms))
         .route("/terms/consent", post(r::public::terms_consent))
         // ---------- 认证 ----------
@@ -220,7 +219,7 @@ async fn fallback(
         .await;
     }
 
-    assets::serve_asset(&state, &uri).await
+    assets::serve_asset(&state, &headers, &uri).await
 }
 
 /// 判断文件名是否是 `{64位十六进制}.{ext}`。
