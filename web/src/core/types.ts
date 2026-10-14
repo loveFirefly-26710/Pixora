@@ -255,7 +255,11 @@ export interface StorageAdmin {
   capacity: {
     mode: "auto" | "manual" | "hidden";
     total: number | null;
+    /** 本项目占用（库内文件汇总） */
     used: number;
+    /** 宿主机整盘已用 / 可用；只有自动探测可信时才有 */
+    host_used: number | null;
+    host_available: number | null;
     source: string;
     manual_total?: number | null;
     note?: string;
@@ -287,11 +291,17 @@ export interface QuotaAdmin {
   capacity: {
     mode: "auto" | "manual" | "hidden";
     total: number | null;
+    /** 本项目占用（库内文件汇总） */
     used: number;
+    /** 宿主机整盘已用 / 可用；只有自动探测可信时才有，占用率按它算 */
+    host_used: number | null;
+    host_available: number | null;
     source: string;
     note?: string;
     updated_at?: string | null;
   };
+  /** 可分配上限 = 系统总额 − 系统占用；拿不到整盘数字时就是系统总额 */
+  allocatable: number;
   allocated: number;
   allocated_percent: number;
   remaining: number;

@@ -459,6 +459,12 @@ try {
     # 来源降级或总额为 0/null，说明当前平台的探测路径断了。
     ExpectJson (Api GET "/api/v1/admin/quota") { $d.data.capacity.source -eq "auto" } "容量自动探测：来源是 auto"
     ExpectJson (Api GET "/api/v1/admin/quota") { $d.data.capacity.total -gt 0 } "容量自动探测：系统总额 > 0"
+    # 宿主机整盘已用：自动模式下必须给出来（占用率与自动关闭注册按它算），
+    # 且已用 + 可用 = 总额，两个数来自同一次探测
+    ExpectJson (Api GET "/api/v1/admin/quota") { $d.data.capacity.host_used -gt 0 } "容量自动探测：宿主机整盘已用 > 0"
+    ExpectJson (Api GET "/api/v1/admin/quota") { ($d.data.capacity.host_used + $d.data.capacity.host_available) -eq $d.data.capacity.total } "整盘口径：已用 + 可用 = 总额"
+    # 可分配上限 = 总额 − 系统占用：配额校验与分配进度都按它算
+    ExpectJson (Api GET "/api/v1/admin/quota") { $d.data.allocatable -eq ($d.data.capacity.total - $d.data.capacity.host_used) } "可分配上限 = 总额 − 系统占用"
     ExpectJson (Api GET "/api/v1/admin/settings") { $d.data.site.name -eq "Pixora" } "系统设置：站点名"
 
     Api PUT "/api/v1/admin/storage/prefix" @("-H", "Content-Type: application/json",

@@ -1556,7 +1556,7 @@ curl <span class="s">"https://img.example.com/api/v1/random?format=json"</span><
           </div>
           <div class="bar-l" style="margin-top:12px"><i style="width:94%"></i></div>
           <div class="tip">已分配 470 GB / 500 GB，占 94%。</div>
-          <div class="qtip err" style="margin-top:12px"><span class="ic">×</span><div><b>校验规则</b>所有用户配额合计 + 管理员账户配额 ≤ 系统总额。超出的分配会被拒绝保存，并提示还差多少。</div></div>
+          <div class="qtip err" style="margin-top:12px"><span class="ic">×</span><div><b>校验规则</b>所有用户配额合计 + 管理员账户配额 ≤ 可分配上限（系统总额 − 系统占用）。超出的分配会被拒绝保存，并提示还差多少。</div></div>
         </div>
       </div>
 
@@ -1595,7 +1595,7 @@ curl <span class="s">"https://img.example.com/api/v1/random?format=json"</span><
       </div>
     </div>
   </div>
-  <div class="note w">这条校验是硬约束：改任何一个人的配额，都要先算一遍「所有用户配额合计 + 管理员配额」有没有超系统总额。超额时保存按钮置灰并给出还差多少 GB，不要让管理员改完才发现。</div>
+  <div class="note w">这条校验是硬约束：改任何一个人的配额，都要先算一遍「所有用户配额合计 + 管理员配额」有没有超可分配上限（系统总额 − 系统占用）。超额时保存按钮置灰并给出还差多少 GB，不要让管理员改完才发现。</div>
 </section>
 
 <!-- ===== 频率限制 ===== -->

@@ -335,10 +335,13 @@ pub fn describe(probe: &CapacityProbe) -> String {
         return probe.fs_name.clone();
     }
     if probe.fs_kind.capacity_trustworthy() {
+        // 三个数一起给：已用是整盘口径（含宿主机上与本项目无关的占用），
+        // 只看「本项目占了多少」看不出磁盘快满没满
         format!(
-            "{} · 总容量 {:.1} GB · 可用 {:.1} GB",
+            "{} · 总容量 {:.1} GB · 已用 {:.1} GB · 可用 {:.1} GB",
             probe.fs_name,
             gb(probe.total),
+            gb(probe.used()),
             gb(probe.available)
         )
     } else if probe.fs_kind == FsKind::Network {

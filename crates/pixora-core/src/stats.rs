@@ -78,7 +78,11 @@ pub struct BackendView {
 pub struct StorageCapacityView {
     pub mode: String,
     pub total: Option<i64>,
+    /// 本项目占用（库内 blob 汇总）
     pub used: i64,
+    /// 宿主机整盘已用与可用，只有 auto 且探测可信时才有
+    pub host_used: Option<i64>,
+    pub host_available: Option<i64>,
     pub source: String,
     /// 管理员上次手填的总额原值，切回手动模式时用来回显输入框
     pub manual_total: Option<i64>,
@@ -263,6 +267,8 @@ impl AppState {
                 mode: capacity.mode,
                 total: capacity.total,
                 used: capacity.used,
+                host_used: capacity.host_used,
+                host_available: capacity.host_available,
                 source: capacity.source,
                 manual_total: self.manual_total_setting().await?,
                 note: capacity.note,
@@ -365,7 +371,10 @@ impl AppState {
             return Ok(None);
         };
 
-        let percent = occupancy_percent(capacity.used, total);
+        // 分子跟着总额的口径走：auto 模式下总额是磁盘容量，已用就取宿主机
+        // 整盘口径（磁盘被别的东西写满，同样得停注册）；手填/降级时退回本项目占用
+        let (basis, scope) = occupancy_basis(&capacity);
+        let percent = occupancy_percent(basis, total);
         let latched = self.settings.bool(KEY_AUTO_CLOSED, false).await?;
         let closed = auto_close_decision(percent, policy.on, policy.off, latched);
         if closed != latched {
@@ -373,6 +382,7 @@ impl AppState {
             self.settings.set_bool(KEY_AUTO_CLOSED, closed).await?;
             tracing::info!(
                 percent,
+                scope,
                 on = policy.on,
                 off = policy.off,
                 closed,
@@ -383,7 +393,7 @@ impl AppState {
             return Ok(None);
         }
         Ok(Some(format!(
-            "系统占用已达 {percent:.1}%（触发阈值 {}%），注册入口已自动关闭；\
+            "{scope}占用已达 {percent:.1}%（触发阈值 {}%），注册入口已自动关闭；\
              占用降到 {}% 以下会自动重新开放，已注册用户完全不受影响",
             policy.on, policy.off
         )))
@@ -425,6 +435,18 @@ fn backend_view(backend: &pixora_repo::model::StorageBackend) -> BackendView {
         capacity_mode: backend.capacity_mode.clone(),
         capacity_total: backend.capacity_total,
         config: crate::storage_svc::StorageService::mask_config(&backend.config),
+    }
+}
+
+/// 占用率的分子，以及它属于哪个口径（错误信息里要讲清楚是谁占的）。
+///
+/// 自动模式且探测可信时总额就是磁盘容量，已用取宿主机整盘口径——磁盘满没满
+/// 跟是谁占的无关，宿主机上别的数据同样能把盘写满。手填总额（可能只是给本项目
+/// 定的预算）与网络挂载降级时拿不到整盘数字，只能按本项目占用算。
+fn occupancy_basis(capacity: &crate::storage_svc::CapacityInfo) -> (i64, &'static str) {
+    match capacity.host_used {
+        Some(host_used) => (host_used, "宿主机磁盘"),
+        None => (capacity.used, "本项目"),
     }
 }
 
@@ -559,6 +581,11 @@ mod tests {
     #[tokio::test]
     async fn register_open_follows_admin_switch_with_reason() {
         let (state, _dir) = test_state().await;
+        // 这里只验管理员总开关。自动关闭的判定在自动模式下跟宿主机磁盘占用挂钩
+        // （整盘有多满随机器变化），用它验「注册开关」会随环境飘，先把容量那条线
+        // 换成手填模式：本项目占用为 0 就永远算 0%
+        use_manual_capacity(&state, 1000 * GIB).await;
+
         let (open, reason) = state.register_open().await.expect("注册状态");
         assert!(open, "默认是开放的");
         assert!(reason.is_none());
@@ -588,6 +615,7 @@ mod tests {
         assert!(!open, "占用 90% 应该自动关闭注册");
         let reason = reason.expect("自动关闭要带原因");
         assert!(reason.contains("90"), "{reason}");
+        assert!(reason.contains("本项目"), "手填总额时占用口径是本项目：{reason}");
         assert!(reason.contains("不受影响"), "说明要讲清已注册用户不受影响：{reason}");
 
         // 950 / 1000 = 95%：占用继续涨，仍然是关闭态
@@ -637,6 +665,52 @@ mod tests {
         assert!(open, "功能关掉后只看管理员总开关");
     }
 
+    /// 自动模式下占用率必须按宿主机整盘已用算：磁盘满没满跟是谁占的无关，
+    /// 宿主机上别的数据同样能把盘写满，只盯着本项目那点字节会漏判。
+    #[cfg(any(target_os = "linux", windows))]
+    #[tokio::test]
+    async fn auto_mode_occupancy_uses_host_disk_usage() {
+        let (state, _dir) = test_state().await;
+        // 默认就是 auto；加 1 个字节，本项目占用可以忽略不计
+        add_blob(&state, "c1", 1).await;
+
+        let capacity = state.storage.capacity().await.expect("容量");
+        assert_eq!(capacity.source, "auto", "本机（Linux/Windows）应能自动探测");
+        let host_used = capacity.host_used.expect("自动模式要给出宿主机整盘已用");
+        let host_available = capacity.host_available.expect("自动模式要给出宿主机可用");
+        assert_eq!(
+            host_used + host_available,
+            capacity.total.expect("自动模式有总额"),
+            "整盘口径：已用 + 可用 = 总额"
+        );
+
+        let (basis, scope) = occupancy_basis(&capacity);
+        assert_eq!(scope, "宿主机磁盘");
+        assert_eq!(basis, host_used, "占用率的分子要取整盘已用，而不是本项目那 1 字节");
+        assert!(
+            host_used > 1,
+            "宿主机上不可能只有本项目这 1 字节（读到 {host_used}）"
+        );
+    }
+
+    /// 手填总额时拿不到可信的整盘数字，占用率退回本项目占用——
+    /// 手填的值可能只是给本项目定的预算，拿磁盘占用去比它会算出荒唐的百分比。
+    #[tokio::test]
+    async fn manual_mode_occupancy_falls_back_to_our_own_bytes() {
+        let (state, _dir) = test_state().await;
+        use_manual_capacity(&state, 1000).await;
+        add_blob(&state, "d1", 900).await;
+
+        let capacity = state.storage.capacity().await.expect("容量");
+        assert!(capacity.host_used.is_none(), "手填总额时不该报告整盘数字");
+        assert!(capacity.host_available.is_none());
+
+        let (basis, scope) = occupancy_basis(&capacity);
+        assert_eq!(scope, "本项目");
+        assert_eq!(basis, 900);
+        assert!((occupancy_percent(basis, 1000) - 90.0).abs() < f64::EPSILON);
+    }
+
     #[tokio::test]
     async fn storage_payload_masks_secrets_and_names_what_it_shows() {
         let (state, _dir) = test_state().await;
@@ -683,6 +757,9 @@ mod tests {
     #[tokio::test]
     async fn admin_overview_counts_users_and_reports_register_state() {
         let (state, _dir) = test_state().await;
+        // register_open 受自动关闭影响，而自动模式下的判定看宿主机磁盘有多满
+        // （随机器变化）；换成手填模式让这条线只反映管理员开关
+        use_manual_capacity(&state, 1000 * GIB).await;
         add_user(&state, "chenyu@example.com", "1001").await;
         add_user(&state, "design@studio.io", "2044").await;
 
