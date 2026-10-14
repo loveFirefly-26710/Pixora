@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use tower_http::compression::CompressionLayer;
@@ -43,7 +43,11 @@ pub fn build(state: Arc<AppState>) -> Router {
         .fallback(fallback)
         // 中间件由外到内：限体积 → 限时 → 追踪 → 压缩
         .layer(RequestBodyLimitLayer::new(MAX_UPLOAD_BODY))
-        .layer(TimeoutLayer::new(Duration::from_secs(120)))
+        // 超时返回 408：客户端等的是「服务在忙」而不是 500
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(120),
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY))

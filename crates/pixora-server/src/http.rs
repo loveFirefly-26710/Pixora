@@ -11,7 +11,6 @@
 
 use std::net::SocketAddr;
 
-use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -55,12 +54,6 @@ pub struct Meta {
     pub total_pages: i64,
 }
 
-/// 带分页元信息的响应。
-pub struct Paginated<T> {
-    pub items: Vec<T>,
-    pub meta: Meta,
-}
-
 /// 把领域结果包成 HTTP 响应。
 pub struct AppResponse(Result<Response, AppError>);
 
@@ -69,10 +62,6 @@ impl AppResponse {
         envelope_response(StatusCode::OK, Some(data), None, None, None)
     }
 
-    pub fn created<T: Serialize>(data: T) -> Response {
-        #[allow(clippy::needless_borrow)]
-        envelope_response(StatusCode::CREATED, Some(data), None, None, None)
-    }
 
     pub fn paged<T: Serialize>(page: pixora_repo::Page<T>) -> Response {
         let meta = Meta {
@@ -84,15 +73,6 @@ impl AppResponse {
         envelope_response(StatusCode::OK, Some(page.items), None, Some(meta), None)
     }
 
-    pub fn empty() -> Response {
-        envelope_response(
-            StatusCode::OK,
-            Some(serde_json::json!({ "ok": true })),
-            None,
-            None,
-            None,
-        )
-    }
 }
 
 impl IntoResponse for AppResponse {
@@ -451,22 +431,7 @@ pub fn rfc3339(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// 从状态与请求头里同时拿上下文（handler 里常用的组合）。
-pub async fn context_of(
-    state: &AppState,
-    headers: &HeaderMap,
-    addr: Option<SocketAddr>,
-) -> RequestContext {
-    request_context(state, headers, addr).await
-}
 
-/// 让 handler 能直接取到 `State<Arc<AppState>>` 与连接信息。
-pub type ApiState = State<std::sync::Arc<AppState>>;
-
-/// 连接信息的提取辅助（有些 handler 只需要 IP）。
-pub fn peer_addr(info: Option<ConnectInfo<SocketAddr>>) -> Option<SocketAddr> {
-    info.map(|ConnectInfo(addr)| addr)
-}
 
 /// 从查询串里取可选整数。
 pub fn parse_i64(params: &std::collections::HashMap<String, String>, key: &str) -> Option<i64> {

@@ -24,7 +24,7 @@ use pixora_core::settings::keys;
 use pixora_core::install::DbInput;
 use pixora_core::{AppError, AppState};
 use pixora_crypto::password;
-use pixora_repo::db::{Db, DbDriver};
+use pixora_repo::db::DbDriver;
 use pixora_repo::model::{role, status};
 use pixora_repo::repo::users::{NewUser, UserFilter};
 use pixora_repo::{Args, PageRequest};
@@ -175,79 +175,6 @@ fn field_opt_string(body: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-}
-
-/// Windows + Git Bash 的路径写法兼容。
-///
-/// MSYS（Git Bash）会把环境变量与命令行参数里的 POSIX 路径自动转成 Windows 路径，
-/// 但**不会**转换 HTTP 请求体里的字符串。于是同一台机器上可能出现
-/// 「服务用 `C:/Users/…/Temp/tmp.x/pixora.db`，向导里填的却是 `/tmp/tmp.x/pixora.db`」——
-/// 同一条真实路径的两种写法（`scripts/smoke.sh` 就是这么发的）。
-///
-/// 所以第一次连接失败时，把 `/a/b` 再按 `{TEMP}/a/b` 试一次：只在 Windows 上、
-/// 只对 SQLite、只在候选文件确实存在时才尝试，不会掩盖真正写错的地址。
-fn retry_path_for_git_bash(driver: DbDriver, dsn: &str) -> Option<String> {
-    if driver != DbDriver::Sqlite || !cfg!(windows) {
-        return None;
-    }
-    let rest = dsn.strip_prefix('/')?;
-    let candidate = std::env::temp_dir().join(rest);
-    let candidate = candidate.to_string_lossy().replace('\\', "/");
-    if candidate == dsn || !std::path::Path::new(&candidate).exists() {
-        return None;
-    }
-    Some(candidate)
-}
-
-/// 把向导填的字段拼成 DSN。
-///
-/// 密码里的特殊字符要转义：不转义的话一个 `@` 就会把连接串解析到别的主机上，
-/// 界面上只会看到一句「连接失败」。
-///
-/// SQLite 没填路径时沿用当前进程的 DSN（而不是随手造一个相对于启动目录的
-/// `pixora.db`）：向导里「选 SQLite」多半就是「用现在这个文件库」。
-fn build_dsn(driver: DbDriver, body: &serde_json::Value, current_dsn: &str) -> Result<String, Response> {
-    match driver {
-        DbDriver::Sqlite => {
-            let path = field_opt_str(body, "database")
-                .or_else(|| field_opt_str(body, "path"))
-                .unwrap_or_else(|| current_dsn.to_string());
-            if path.trim().is_empty() {
-                return Err(bad_request("SQLite 需要给出数据库文件路径"));
-            }
-            Ok(path)
-        }
-        DbDriver::Postgres | DbDriver::MySql => {
-            let host = field_str(body, "host")?;
-            let port = field_opt_i64(body, "port").unwrap_or(if driver == DbDriver::Postgres {
-                5432
-            } else {
-                3306
-            });
-            let database = field_str(body, "database")?;
-            let username = field_str(body, "username")?;
-            let password = field_opt_str(body, "password").unwrap_or_default();
-            if !(1..=65535).contains(&port) {
-                return Err(bad_request("端口号不合法"));
-            }
-            let scheme = if driver == DbDriver::Postgres {
-                "postgres"
-            } else {
-                "mysql"
-            };
-            Ok(format!(
-                "{scheme}://{}:{}@{host}:{port}/{database}",
-                percent_encoding::utf8_percent_encode(
-                    &username,
-                    percent_encoding::NON_ALPHANUMERIC
-                ),
-                percent_encoding::utf8_percent_encode(
-                    &password,
-                    percent_encoding::NON_ALPHANUMERIC
-                ),
-            ))
-        }
-    }
 }
 
 /// `POST /api/v1/install/admin` — 创建第一个管理员。
