@@ -170,13 +170,46 @@ function xhrSend(
       }
       resolve({ status: xhr.status, text: xhr.responseText, headers });
     };
-    xhr.onerror = () => reject(new ApiError(0, { code: "NETWORK", message: "网络请求失败" }));
-    xhr.ontimeout = () => reject(new ApiError(0, { code: "NETWORK", message: "请求超时" }));
+    xhr.onerror = () => reject(networkError(url, xhr));
+    xhr.ontimeout = () => reject(
+      new ApiError(0, {
+        code: "NETWORK",
+        message: "请求超时",
+        detail: `${options.method ?? "POST"} ${url}：服务端在超时时间内没有响应`,
+      }),
+    );
     if (options.signal) {
       options.signal.addEventListener("abort", () => xhr.abort());
       xhr.onabort = () => reject(new ApiError(0, { code: "NETWORK", message: "请求已取消" }));
     }
     xhr.send(options.form ?? null);
+  });
+}
+
+/**
+ * 把 XHR 的网络失败翻成能查的话。
+ *
+ * 原来只报一句「网络请求失败」，用户看到的就是截图里那 10 行一模一样的红字——
+ * 既看不出是服务器停了、被拦截了，还是设备离线。这里把能拿到的线索都带上：
+ * 请求方法与路径、XHR 的 readyState/status、浏览器的在线状态。
+ *
+ * 最要紧的一句提示是「连接被中断」：那通常意味着服务端进程不在了。图床的前端
+ * 会一直自动重试，所以把原因写清楚比让用户反复点重试有用。
+ */
+function networkError(url: string, xhr: XMLHttpRequest): ApiError {
+  const details: string[] = [`${xhr.status === 0 ? "未收到响应" : `HTTP ${xhr.status}`}`, `readyState=${xhr.readyState}`];
+  let hint = "连接被中断：服务端可能已停止或正在重启";
+
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    hint = "设备当前离线";
+  } else if (xhr.status === 0 && xhr.readyState === 0) {
+    hint = "请求没有发出去：可能被浏览器扩展、代理或安全软件拦截，也可能服务端已停止";
+  }
+
+  return new ApiError(0, {
+    code: "NETWORK",
+    message: `网络请求失败（${hint}）`,
+    detail: `${url} · ${details.join(" · ")}`,
   });
 }
 
