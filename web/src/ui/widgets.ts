@@ -364,6 +364,11 @@ export function imageTile(
   } = {},
 ): HTMLElement {
   const thumb = h("div.ph", { class: `c${(item.id % 6) + 1}` });
+  // 有尺寸就写下真实比例：CSS 用它出高度，瀑布流用它算跨几行。
+  // 不写的话只能按 4:3 兜底，一屏里就会高高低低地对不上
+  if (item.width && item.height) {
+    thumb.style.setProperty("--ratio", `${item.width} / ${item.height}`);
+  }
   if (item.has_thumb && item.thumb_url) {
     const img = h("img", {
       src: item.thumb_url,
@@ -371,10 +376,6 @@ export function imageTile(
       loading: "lazy",
       decoding: "async",
     });
-    if (item.width && item.height) {
-      // 交给 CSS 按图片自身比例出高度（.tile .ph 里的 aspect-ratio）
-      thumb.style.setProperty("--ratio", `${item.width} / ${item.height}`);
-    }
     thumb.append(img);
   } else {
     // 没有缩略图时直接用原图，靠容器缩放，带宽影响有限

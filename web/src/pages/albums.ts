@@ -26,6 +26,7 @@ import { getState, setViewingUid } from "../core/state";
 import { loadViewPreference, saveViewPreference } from "../core/store";
 import { toastError, toastOk, toastWithCode } from "../core/toast";
 import type { AdminUserRow, AlbumList, ImageItem } from "../core/types";
+import { applyMasonry } from "../ui/masonry";
 import { userViewBanner } from "../ui/shell";
 import { emptyState, imageTile, pageHead, pagination, progressBar, qtip, skeletonGrid } from "../ui/widgets";
 
@@ -432,6 +433,7 @@ export async function render(ctx: PageContext): Promise<void> {
       );
     });
     mount(listHost, grid);
+    applyMasonry(grid);
     attachLongPress(grid, ".tile[data-image-id]");
   }
 

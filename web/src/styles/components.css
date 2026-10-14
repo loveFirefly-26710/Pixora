@@ -597,6 +597,20 @@ textarea.f::placeholder {
       1fr
     )
   );
+  /* 行高切成 8px 的小格：每张图按自己的高度跨若干行（见 ui/masonry.ts），
+     这样短图的下面不再留一块空白。 */
+  grid-auto-rows: 8px;
+}
+
+/* 卡片纵向排：图片区吸收跨行取整多出来的几像素，而不是在卡片内部留缝 */
+.tile-cell,
+.igrid > .tile {
+  display: flex;
+  flex-direction: column;
+}
+
+.igrid .tile .ph {
+  flex: 1;
 }
 
 .tile {

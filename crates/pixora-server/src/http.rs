@@ -353,18 +353,29 @@ pub fn verify_csrf(
         return Ok(());
     }
 
-    let cookie = cookie_value(headers, CSRF_COOKIE)
-        .ok_or(AppError::Csrf)?;
+    let cookie = cookie_value(headers, CSRF_COOKIE);
     let header = headers
         .get(CSRF_HEADER)
         .and_then(|value| value.to_str().ok())
-        .ok_or(AppError::Csrf)?;
+        .map(str::to_string);
 
-    if pixora_crypto::token::constant_time_eq(&cookie, header) {
-        Ok(())
-    } else {
-        Err(AppError::Csrf)
+    // 失败要留下可查的线索：这一关卡住了哪一半（Cookie 没带 / 请求头没带 /
+    // 带了但不一样），从前端截图上看不出来，日志里得有
+    let ok = match (cookie.as_deref(), header.as_deref()) {
+        (Some(cookie), Some(header)) => pixora_crypto::token::constant_time_eq(cookie, header),
+        _ => false,
+    };
+    if ok {
+        return Ok(());
     }
+    tracing::warn!(
+        method = %method,
+        has_cookie = cookie.is_some(),
+        has_header = header.is_some(),
+        same_length = matches!((cookie.as_deref(), header.as_deref()), (Some(c), Some(h)) if c.len() == h.len()),
+        "CSRF 校验未通过：Cookie 与请求头对不上（前端会取新令牌重试一次）"
+    );
+    Err(AppError::Csrf)
 }
 
 /// 造登录成功后的两个 Cookie。

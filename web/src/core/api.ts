@@ -107,7 +107,10 @@ export function setCsrfToken(token: string | null): void {
 }
 
 export function currentCsrfToken(): string | null {
-  return csrfToken ?? readCookie("pixora_csrf");
+    // Cookie 是权威来源：它由服务端在响应里设置，永远是最新的。
+    // 内存里那份是「上一次响应体里看到的」——如果期间在别的标签页登录过，
+    // 它会变成上一代的令牌，拿它去写就会一路 CSRF 校验失败。
+    return readCookie("pixora_csrf") ?? csrfToken;
 }
 
 /** 会话续期：任何响应体里带了 csrf_token 就地更新 */
@@ -260,8 +263,37 @@ async function parseResponse(
   );
 }
 
-/** 发一个请求，返回 `data`。 */
+/**
+ * 发一个请求，返回 `data`。
+ *
+ * CSRF 校验失败会自动重取令牌再试一次：令牌漂了通常是「在另一个标签页登录过」
+ * 这类浏览器级原因，属于可自愈的情况，不该让用户对着「请刷新页面后重试」发呆。
+ * 写操作在 CSRF 这一关卡住时什么都不会发生，重试是安全的。
+ */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  try {
+    return await sendRequest<T>(path, options);
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.code !== "CSRF_FAILED") throw err;
+    await refreshCsrfToken();
+    return await sendRequest<T>(path, options);
+  }
+}
+
+/** 取一次最新的 CSRF 令牌：Cookie 是权威来源，再拉一次 /me 把响应里的那份也吃进来。 */
+async function refreshCsrfToken(): Promise<void> {
+  const cookie = readCookie("pixora_csrf");
+  if (cookie) setCsrfToken(cookie);
+  try {
+    const response = await fetch(`${PREFIX}/me`, { credentials: "same-origin" });
+    const payload = await response.json().catch(() => null);
+    absorbCsrf(payload?.data);
+  } catch {
+    // 拿不到就带着 Cookie 里那份重试，还是不行就把原始错误抛回去
+  }
+}
+
+async function sendRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const url = `${PREFIX}${path}${buildQuery(options.query)}`;
   const headers: Record<string, string> = { ...(options.headers ?? {}) };
 
