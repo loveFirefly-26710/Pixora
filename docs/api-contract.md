@@ -207,7 +207,7 @@ API 客户端：
 
 ### `GET /api/v1/me/tokens` / `POST /api/v1/me/tokens` / `DELETE /api/v1/me/tokens/{id}`
 
-创建请求：`{ "name": "PicGo 桌面端", "scopes": ["upload","read"], "expires_in_days": 90 }`（`expires_in_days` 省略或 `null` 表示永不过期）
+创建请求：`{ "name": "PicGo 桌面端", "scopes": ["upload","read"], "expires_in_days": 90 }`（`expires_in_days` 省略或 `null` 表示永不过期；填了就必须是 1–3650 的整数，越界返回 `BAD_REQUEST`）
 创建响应（明文只此一次）：
 
 ```json
@@ -261,6 +261,10 @@ API 客户端：
 错误：`CONFLICT`（slug 重复）。
 
 ### `PATCH /api/v1/albums/{id}` / `DELETE /api/v1/albums/{id}` — write
+
+`DELETE` 删相册不删图片：里面的图片回到「未分类」，响应的 `detached_images` 是解除了多少张。
+**默认相册（slug = `default`）不允许删除**——上传不指定相册时落在它这里，删了没有重建入口，
+返回 `BAD_REQUEST`。
 
 `PATCH` 可改 `name`、`description`、`visibility`、`sort_order`、`cover_blob_id`。
 `DELETE` 会解除图片与相册的关联（图片本身保留，移入「未分类」）。

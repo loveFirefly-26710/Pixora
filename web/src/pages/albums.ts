@@ -24,7 +24,7 @@ import { confirmDanger, openModal, promptDialog } from "../core/modal";
 import { navigate, type PageContext } from "../core/router";
 import { getState, setViewingUid } from "../core/state";
 import { loadViewPreference, saveViewPreference } from "../core/store";
-import { toast, toastError, toastOk, toastWithCode } from "../core/toast";
+import { toastError, toastOk, toastWithCode } from "../core/toast";
 import type { AdminUserRow, AlbumList, ImageItem } from "../core/types";
 import { userViewBanner } from "../ui/shell";
 import { emptyState, imageTile, pageHead, pagination, progressBar, qtip, skeletonGrid } from "../ui/widgets";
@@ -74,7 +74,6 @@ export async function render(ctx: PageContext): Promise<void> {
     albums: null as AlbumList | null,
     selected: new Set<number>(),
     anchor: null as number | null,
-    multi: false,
     lightboxOpen: false,
   };
 
@@ -111,7 +110,7 @@ export async function render(ctx: PageContext): Promise<void> {
   headHost.append(
     pageHead(
       "我的相册",
-      "左键单击图片直接打开预览；Shift 连选一段，Ctrl 点选多张；移动端长按进入多选。",
+      "每张图左上角有勾选框；左键单击图片打开预览，Shift 连选一段、Ctrl 点选多张；移动端长按即选中。",
     ),
   );
 
@@ -153,12 +152,6 @@ export async function render(ctx: PageContext): Promise<void> {
     text: "列表",
     on: { click: () => setView("list") },
   });
-  const selectChip = h("button.chip", {
-    type: "button",
-    text: "选择",
-    on: { click: () => enterMulti() },
-  });
-
   const normalToolbar = h(
     "div.toolbar",
     null,
@@ -167,7 +160,6 @@ export async function render(ctx: PageContext): Promise<void> {
     h("span.spacer"),
     searchInput,
     sortSelect,
-    selectChip,
   );
 
   // ---------- 批量操作条：宽屏完整版，窄屏紧凑版 + 底部固定条 ----------
@@ -220,7 +212,7 @@ export async function render(ctx: PageContext): Promise<void> {
     }
     if (event.key !== "Escape") return;
     if (document.querySelector(".lb")) return; // 浮层自己处理 Esc
-    if (state.multi || state.selected.size > 0) cancelSelection();
+    if (state.selected.size > 0) cancelSelection();
   };
   document.addEventListener("keydown", onKeyDown);
 
@@ -341,6 +333,7 @@ export async function render(ctx: PageContext): Promise<void> {
         text: "＋ 新建相册",
         on: { click: () => void createAlbum() },
       }),
+      h("a.new", { href: "#/albums/manage", text: "管理相册" }),
       h("div.par.album-usage", { text: "用量" }),
       h(
         "div.album-usage",
@@ -431,6 +424,8 @@ export async function render(ctx: PageContext): Promise<void> {
       grid.append(
         imageTile(item, {
           selected: state.selected.has(item.id),
+          // 勾选框常驻：选图不用先点「选择」进模式
+          checkbox: true,
           onOpen: () => openLightbox(state.offset + index),
           onSelect: (target, event) => handleTileSelect(target, event),
         }),
@@ -438,24 +433,6 @@ export async function render(ctx: PageContext): Promise<void> {
     });
     mount(listHost, grid);
     attachLongPress(grid, ".tile[data-image-id]");
-
-    // 多选模式下单击要变成勾选，而不是开预览：在捕获阶段拦掉 tile 自己的 click
-    grid.addEventListener(
-      "click",
-      (event) => {
-        if (!state.multi) return;
-        const tile = (event.target as HTMLElement).closest<HTMLElement>(".tile[data-image-id]");
-        if (!tile) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (suppressClick) {
-          suppressClick = false;
-          return;
-        }
-        toggleSelect(Number(tile.dataset.imageId));
-      },
-      true,
-    );
   }
 
   function renderTable(): void {
@@ -553,10 +530,6 @@ export async function render(ctx: PageContext): Promise<void> {
       const row = target.closest<HTMLElement>("tr[data-image-id]");
       if (!row) return;
       const id = Number(row.dataset.imageId);
-      if (state.multi) {
-        toggleSelect(id);
-        return;
-      }
       const mouse = event as MouseEvent;
       if (mouse.shiftKey) {
         selectRange(id);
@@ -599,20 +572,8 @@ export async function render(ctx: PageContext): Promise<void> {
     syncSelectionUI();
   }
 
-  /** 进入多选（触屏长按或点「选择」）：先选上触发的那张，用户能立刻看到反馈。 */
-  function enterMulti(id?: number): void {
-    state.multi = true;
-    if (id !== undefined) {
-      state.selected.add(id);
-      state.anchor = id;
-    }
-    toast("已进入多选模式：点图片勾选，完成后用底部操作条");
-    syncSelectionUI();
-  }
-
   function cancelSelection(): void {
     state.selected.clear();
-    state.multi = false;
     state.anchor = null;
     syncSelectionUI();
   }
@@ -688,8 +649,19 @@ export async function render(ctx: PageContext): Promise<void> {
       }
       candidate = null;
     };
+    // 长按抬起后浏览器会补发一次 click：吞掉它，别顺手把预览也打开
+    container.addEventListener(
+      "click",
+      (event) => {
+        if (!suppressClick) return;
+        suppressClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+      },
+      true,
+    );
     container.addEventListener("pointerdown", (event) => {
-      if (event.pointerType !== "touch" || state.multi) return;
+      if (event.pointerType !== "touch") return;
       const node = (event.target as HTMLElement).closest<HTMLElement>(selector);
       if (!node) return;
       candidate = node;
@@ -700,9 +672,10 @@ export async function render(ctx: PageContext): Promise<void> {
         timer = undefined;
         const target = candidate;
         if (!target) return;
+        // 长按即勾选/取消（不再有「进多选模式」这一步）
         suppressClick = true;
         const id = Number(target.dataset.imageId);
-        enterMulti(Number.isFinite(id) ? id : undefined);
+        if (Number.isFinite(id)) toggleSelect(id, { anchor: true });
         if (typeof navigator.vibrate === "function") navigator.vibrate(10);
       }, LONG_PRESS_MS);
     });
@@ -721,7 +694,13 @@ export async function render(ctx: PageContext): Promise<void> {
     const has = count > 0;
 
     for (const tile of listHost.querySelectorAll<HTMLElement>(".tile[data-image-id]")) {
-      tile.classList.toggle("sel", state.selected.has(Number(tile.dataset.imageId)));
+      const id = Number(tile.dataset.imageId);
+      const on = state.selected.has(id);
+      tile.classList.toggle("sel", on);
+      // 勾选框也要跟着走：Shift 连选、全选本页这些路径没经过勾选框本身，
+      // 只切 .sel 的话框还是空的，看起来像没选中
+      const box = tile.parentElement?.querySelector<HTMLInputElement>("input.pick");
+      if (box) box.checked = on;
     }
     for (const row of listHost.querySelectorAll<HTMLElement>("tr[data-image-id]")) {
       const id = Number(row.dataset.imageId);

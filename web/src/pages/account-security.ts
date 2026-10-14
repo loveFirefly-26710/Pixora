@@ -11,6 +11,7 @@ import { ApiError, request } from "../core/api";
 import { copyText, h } from "../core/dom";
 import { formatDateTime, relativeTime } from "../core/format";
 import { confirmDialog, openModal } from "../core/modal";
+import { encodeQr, qrSvg } from "../core/qrcode";
 import type { PageContext } from "../core/router";
 import { updateUser } from "../core/state";
 import { toastError, toastOk, toastWithCode, toast } from "../core/toast";
@@ -300,16 +301,31 @@ async function openEnableTotp(hooks: VerifyHooks): Promise<void> {
       confirm.disabled = code.length !== 6;
     });
 
-    // 不引第三方二维码服务：密钥一旦拼进外部 URL 就等于把种子交给了别人。
-    // 手输密钥是验证器 App 都支持的方式，够用且不泄露。
-    body.replaceChildren(
+    // 二维码在本地画：密钥一旦拼进外部 QR 服务就等于把种子交给了别人。
+    // 画不出来（链接过长之类）就退回手输密钥，功能不缺。
+    let qrBlock: HTMLElement | null = null;
+    try {
+      qrBlock = h(
+        "div.qr-box",
+        null,
+        h("div", { html: qrSvg(encodeQr(setup.otpauth_url), { size: 196 }) }),
+        h("div.tip", { style: { marginTop: "6px" }, text: "用验证器 App 扫码即可，不必手输" }),
+      );
+    } catch {
+      qrBlock = null;
+    }
+
+    const blocks: Node[] = [
       h("div.tip", {
         text: "用验证器 App（Google Authenticator / 1Password / 微软验证器等）添加账号，然后输入它显示的动态码。",
       }),
+    ];
+    if (qrBlock) blocks.push(qrBlock);
+    blocks.push(
       h(
         "div.fld",
         { style: { marginTop: "12px" } },
-        h("label.f", { text: "密钥（手动输入）" }),
+        h("label.f", { text: qrBlock ? "密钥（扫码不成时手动输入）" : "密钥（手动输入）" }),
         secretBox(setup.secret, "密钥"),
       ),
       h(
@@ -318,8 +334,9 @@ async function openEnableTotp(hooks: VerifyHooks): Promise<void> {
         h("summary", { text: "显示 otpauth 链接（部分客户端可直接导入）" }),
         h("div", { style: { marginTop: "8px" } }, secretBox(setup.otpauth_url, "otpauth 链接")),
       ),
-      h("div.fld", { style: { marginTop: "14px" } }, h("label.f", { text: "动态码" }), codeInput),
     );
+    blocks.push(h("div.fld", { style: { marginTop: "14px" } }, h("label.f", { text: "动态码" }), codeInput));
+    body.replaceChildren(...blocks);
 
     confirm.addEventListener("click", async () => {
       if (code.length !== 6) return;
