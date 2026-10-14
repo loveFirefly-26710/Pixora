@@ -7,22 +7,19 @@
  *   3. 只对 missing 的生成 WebP 缩略图（thumb.worker）
  *   4. 按并发逐张 POST /upload，失败指数退避，最多 3 次；429 读 Retry-After 尊重服务端节奏
  *
- * 队列状态通过事件广播出去，UI 只订阅不轮询；快照节流写进 IndexedDB（core/store.ts）。
- * 刷新后 File 拿不回来，恢复出的未完成项标成 needs-reselect，由 UI 提示重新选择——
- * 已上传成功的进度（含直链）必须恢复，这样「导出成功清单」在刷新后仍然可用。
+ * 队列状态通过事件广播出去，UI 只订阅不轮询。
+ * 队列本身不跨页面刷新保留：文件本体浏览器存不下，而只留「已完成」的记录
+ * 会在下次打开时堆在待上传预览里，得一张张点叉才能清掉。刷新即从空队列开始，
+ * 上传设置（相册、标签、可见性、并发）另存在 core/store.ts。
  */
 
 import { ApiError, request } from "../core/api";
 import { extOf } from "../core/format";
 import { getState } from "../core/state";
 import {
-  clearQueueSnapshot,
-  loadQueueSnapshot,
   loadUploadSettings,
   loadLocalUploadSettings,
-  saveQueueSnapshot,
   saveUploadSettings,
-  type PersistedQueueItem,
   type StoredUploadSettings,
 } from "../core/store";
 import type { HashCheck, UploadResult } from "../core/types";
@@ -103,8 +100,6 @@ const MAX_RETRIES = 3;
 const PREFLIGHT_BATCH = 400;
 /** Worker 单任务超时：超过就认定 Worker 坏了，terminate 后走降级路径。 */
 const WORKER_TIMEOUT = 30_000;
-/** 快照落盘节流：进度事件很密，不节流会把 IndexedDB 写穿。 */
-const SAVE_THROTTLE = 600;
 
 // ---------- 纯函数（可单测） ----------
 
@@ -360,7 +355,6 @@ class UploadQueue {
   private active = new Map<string, AbortController>();
   private durations: number[] = [];
   private retryTimer: number | undefined;
-  private saveTimer: number | undefined;
   private hashBusy = false;
   private thumbBusy = false;
   private preflightBusy = false;
@@ -515,7 +509,6 @@ class UploadQueue {
       });
     }
     this.emit({ kind: "items" });
-    this.scheduleSave();
     this.pump();
     return accepted.length;
   }
@@ -528,7 +521,6 @@ class UploadQueue {
     this.active.delete(id);
     if (item?.previewUrl) URL.revokeObjectURL(item.previewUrl);
     this.emit({ kind: "items" });
-    this.scheduleSave();
   }
 
   /** 清空：只留成功与跳过项，已完成的进度和直链不丢。 */
@@ -548,7 +540,6 @@ class UploadQueue {
     this.clearRetryTimer();
     this.emit({ kind: "items" });
     this.emit({ kind: "state" });
-    this.scheduleSave();
   }
 
   clearAll(): void {
@@ -563,7 +554,6 @@ class UploadQueue {
     this.clearRetryTimer();
     this.emit({ kind: "items" });
     this.emit({ kind: "state" });
-    void clearQueueSnapshot();
   }
 
   // ---- 设置 ----
@@ -652,7 +642,6 @@ class UploadQueue {
     this.emit({ kind: "items" });
     this.emit({ kind: "state" });
     if (hadActive) this.emit({ kind: "notice", tone: "info", text: "已取消本次上传。" });
-    this.scheduleSave();
   }
 
   retry(id: string): void {
@@ -670,7 +659,6 @@ class UploadQueue {
     item.progress = 0;
     item.status = "ready";
     this.emitItem(id);
-    this.scheduleSave();
     if (!this.running) this.start();
     else this.pump();
   }
@@ -688,7 +676,6 @@ class UploadQueue {
       this.emitItem(item.id);
     }
     this.emit({ kind: "notice", tone: "info", text: `已重新排队 ${failed.length} 张失败项。` });
-    this.scheduleSave();
     if (!this.running) this.start();
     else this.pump();
   }
@@ -702,8 +689,7 @@ class UploadQueue {
     const removed = before - this.items.length;
     if (removed > 0) {
       this.emit({ kind: "items" });
-      this.scheduleSave();
-    }
+      }
     return removed;
   }
 
@@ -711,41 +697,14 @@ class UploadQueue {
     if (this.hydrated) return;
     this.hydrated = true;
 
-    const [settings, saved] = await Promise.all([loadUploadSettings(), loadQueueSnapshot()]);
-    const resolvedSettings = settings ?? loadLocalUploadSettings();
-    if (resolvedSettings) {
-      this.settings = { ...this.settings, ...resolvedSettings };
+    // 只恢复上传设置（相册、标签、可见性、并发），不恢复上一次的条目：
+    // 待上传预览是「这次要传什么」的清单，刷新之后就该是空的。
+    // 传完的记录留在那里只会让人一张张点叉；成功的图本来也已经在相册里。
+    const settings = await loadUploadSettings();
+    const resolved = settings ?? loadLocalUploadSettings();
+    if (resolved) {
+      this.settings = { ...this.settings, ...resolved };
       this.emit({ kind: "state" });
-    }
-
-    if (saved.length === 0) return;
-    const restored: QueueItem[] = [];
-    for (const record of saved) {
-      if (this.items.some((item) => item.id === record.id)) continue;
-      // 上次会话留下的失败项不再带回来：那些错误是当时那一轮的结论（多半是服务端
-      // 停过、网络断过），重启服务后已经不再成立，留着只会让用户一张张叉掉。
-      // 本次会话内新产生的失败照常保留，用户可重试或点「清空失败项」。
-      if (record.status === "failed") continue;
-      restored.push(fromPersisted(record));
-    }
-    if (restored.length === 0) return;
-    this.items = [...restored, ...this.items];
-
-    const done = restored.filter((item) => item.status === "done" || item.status === "skipped").length;
-    const missing = restored.length - done;
-    this.emit({ kind: "items" });
-    if (missing > 0) {
-      this.emit({
-        kind: "notice",
-        tone: "warn",
-        text: `已恢复上次的队列：${done} 张已完成，${missing} 张需要重新选择文件（浏览器不允许保存文件本体）。`,
-      });
-    } else {
-      this.emit({
-        kind: "notice",
-        tone: "info",
-        text: `已恢复上次的队列：${done} 张已完成，可直接导出成功清单。`,
-      });
     }
   }
 
@@ -800,8 +759,7 @@ class UploadQueue {
     } finally {
       this.hashBusy = false;
       this.emitItem(next.id);
-      this.scheduleSave();
-      this.pump();
+        this.pump();
     }
   }
 
@@ -848,8 +806,7 @@ class UploadQueue {
       this.emit({ kind: "error", error: err });
     } finally {
       this.preflightBusy = false;
-      this.scheduleSave();
-      this.pump();
+        this.pump();
     }
   }
 
@@ -1001,8 +958,7 @@ class UploadQueue {
     } finally {
       this.active.delete(item.id);
       this.emitItem(item.id);
-      this.scheduleSave();
-      this.pump();
+        this.pump();
     }
   }
 
@@ -1086,7 +1042,6 @@ class UploadQueue {
       tone: stats.failed > 0 ? "warn" : "ok",
       text: `队列完成：成功 ${stats.success} 张，跳过 ${stats.skipped} 张，失败 ${stats.failed} 张。`,
     });
-    this.scheduleSave();
   }
 
   private clearRetryTimer(): void {
@@ -1095,99 +1050,13 @@ class UploadQueue {
       this.retryTimer = undefined;
     }
   }
-
-  // ---- 持久化 ----
-
-  private scheduleSave(): void {
-    if (this.saveTimer !== undefined) return;
-    this.saveTimer = window.setTimeout(() => {
-      this.saveTimer = undefined;
-      void saveQueueSnapshot(this.items.map(toPersisted));
-    }, SAVE_THROTTLE);
-  }
-
-  /** 立刻落盘（页面隐藏时用，避免节流窗口内刷新丢状态）。 */
-  flushSave(): void {
-    if (this.saveTimer !== undefined) {
-      window.clearTimeout(this.saveTimer);
-      this.saveTimer = undefined;
-    }
-    void saveQueueSnapshot(this.items.map(toPersisted));
-  }
 }
 
-function toPersisted(item: QueueItem): PersistedQueueItem {
-  return {
-    id: item.id,
-    name: item.name,
-    size: item.size,
-    mime: item.mime,
-    sha256: item.sha256,
-    status: item.status === "uploading" ? "ready" : item.status,
-    error: item.error,
-    note: item.note,
-    retries: item.retries,
-    addedAt: item.addedAt,
-    folderTags: item.folderTags,
-    url: item.result?.url ?? null,
-    thumbUrl: item.result?.thumb_url ?? null,
-    dedup: item.status === "skipped",
-  };
-}
-
-function fromPersisted(record: PersistedQueueItem): QueueItem {
-  const settled = record.status === "done" || record.status === "skipped";
-  const result: UploadResult | null = record.url
-    ? {
-        id: 0,
-        job_id: 0,
-        url: record.url,
-        thumb_url: record.thumbUrl,
-        sha256: record.sha256 ?? "",
-        size: record.size,
-        dedup: record.dedup,
-        storage_type: "",
-        fallback_message: null,
-        tags: [],
-      }
-    : null;
-  return {
-    id: record.id,
-    file: null,
-    name: record.name,
-    size: record.size,
-    mime: record.mime,
-    sha256: record.sha256,
-    thumb: null,
-    thumbNote: null,
-    previewUrl: null,
-    // 落盘时只存字符串；读回时已完成的只认 done/skipped，其余一律当成「要重新选」
-    status: settled ? (record.status as QueueStatus) : "needs-reselect",
-    progress: settled ? 100 : 0,
-    error: settled ? null : record.error,
-    note: settled ? record.note : "刷新后文件不再可用，需要重新选择",
-    retries: 0,
-    addedAt: record.addedAt,
-    folderTags: Array.isArray(record.folderTags) ? record.folderTags : [],
-    result,
-    durationMs: null,
-    checked: settled,
-    thumbTried: settled,
-    retryAt: null,
-  };
-}
-
-/** 全局单例：页面之间来回切也只有一个队列，四种入口都进这里。 */
+/** 全局单例：页面之间来回切也只有一个队列，几种入口都进这里。 */
 let instance: UploadQueue | null = null;
 
 export function getUploadQueue(): UploadQueue {
-  if (!instance) {
-    instance = new UploadQueue();
-    // 切后台/关标签时立刻落盘：节流窗口里的最后几个状态不能因为用户直接刷新就丢
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") instance?.flushSave();
-    });
-  }
+  instance ??= new UploadQueue();
   return instance;
 }
 

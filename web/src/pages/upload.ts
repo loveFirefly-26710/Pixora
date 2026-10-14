@@ -6,16 +6,14 @@
  * 这里不重复实现任何流程，避免两个页面的行为慢慢跑偏。
  */
 
-import { request, requestPage } from "../core/api";
+import { requestPage } from "../core/api";
 import { h, mount } from "../core/dom";
 import { navigate, type PageContext } from "../core/router";
 import { getState, setViewingUid } from "../core/state";
-import { toastError, toastOk } from "../core/toast";
-import { promptDialog } from "../core/modal";
-import type { AdminUserRow, AlbumList } from "../core/types";
+import type { AdminUserRow } from "../core/types";
 import { userViewBanner } from "../ui/shell";
 import { emptyState, pageHead, qtip, skeletonGrid } from "../ui/widgets";
-import { createUploadPanel, type UploadPanelHandle } from "../upload/panel";
+import { createUploadPanel, loadAlbumOptions, type UploadPanelHandle } from "../upload/panel";
 
 /** 目标相册下拉的候选形状，与面板的 options.albums 对齐。 */
 interface AlbumOption {
@@ -39,41 +37,7 @@ export async function render(ctx: PageContext): Promise<void> {
 
   mount(
     headHost,
-    h(
-      "div.flexline",
-      { style: { justifyContent: "space-between", marginBottom: "4px" } },
-      pageHead("上传", "拖拽、选文件、选文件夹、粘贴四种入口效果一样，进同一个队列。"),
-      h(
-        "div.flexline",
-        null,
-        h("button.btn", {
-          type: "button",
-          text: "新建相册",
-          on: {
-            click: async () => {
-              const name = await promptDialog({
-                title: "新建相册",
-                label: "相册名称",
-                placeholder: "例如：旅行",
-              });
-              if (!name) return;
-              try {
-                await request("/albums", { json: { name } });
-                toastOk(`已创建相册「${name}」`);
-                await loadAlbums();
-              } catch (err) {
-                toastError(err);
-              }
-            },
-          },
-        }),
-        h("button.btn.gho", {
-          type: "button",
-          text: "我的相册",
-          on: { click: () => navigate("/albums") },
-        }),
-      ),
-    ),
+    pageHead("上传", "拖拽、选文件、选文件夹、粘贴都能进队列，队列逐张上传。"),
   );
 
   const viewingUid = getState().viewingUid;
@@ -94,10 +58,7 @@ export async function render(ctx: PageContext): Promise<void> {
 
   async function loadAlbums(): Promise<AlbumOption[]> {
     // 用户视图下取目标用户的相册，下拉里才能选到他的目标相册
-    const data = await request<AlbumList>("/albums", {
-      query: { uid: viewingUid ?? undefined },
-    });
-    const albums: AlbumOption[] = data.albums.map((album) => ({ id: album.id, name: album.name, slug: album.slug }));
+    const albums = await loadAlbumOptions(viewingUid);
     if (panel) panel.refreshAlbums(albums, initialAlbumId);
     return albums;
   }
@@ -137,7 +98,7 @@ export async function render(ctx: PageContext): Promise<void> {
         qtip(
           "info",
           null,
-          "队列与成功进度保存在浏览器本地（IndexedDB）。未完成的图片刷新后需要重新选择文件——浏览器不允许把文件本身存下来。",
+          "刷新页面会清空待上传清单（浏览器不允许把文件本身存下来）；上传设置（相册、标签、可见性、并发）会记住。传完的图片在「相册」页里，随时能复制直链。",
         ),
       ),
     );

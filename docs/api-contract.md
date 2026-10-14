@@ -436,7 +436,10 @@ API 客户端：
 ```
 
 - `GET /api/v1/admin/users/{id}` → `{ "user": UserRow, "actions": [...], "policy": {...} , "limits": {...} }`
-- `PATCH /api/v1/admin/users/{id}` → `{ "email": "…", "password": "…", "role": "user" }`（改邮箱会重置验证状态并写入处置记录）
+- `POST /api/v1/admin/users` → 管理端直接建号：`{ "email": "…", "password": "…", "role": "user" | "admin" }`
+  （`role` 省略即普通用户；邮箱直接标记为已验证，不再发验证邮件；配额取当前默认值，建完可在详情页调）
+  响应与 `GET /admin/users/{id}` 同一个形状。
+- `PATCH /api/v1/admin/users/{id}` → `{ "email": "…", "password": "…", "role": "user" }`（改邮箱会重置验证状态并写入处置记录；角色改名同时禁止降级最后一个管理员、禁止改自己）
 - `POST /api/v1/admin/users/{id}/quota` → `{ "quota_bytes": 53687091200 }`（超额拒绝并说明还差多少）
 - `POST /api/v1/admin/users/{id}/status` → 处置：
 

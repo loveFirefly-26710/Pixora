@@ -399,6 +399,29 @@ try {
         "-d", (JsonBody "prefix" @{ upload_prefix = "i" })) | Out-Null
     Ok "直链前缀改为 i"
 
+    # 后台建号 → 新账号能登录 → 提权 → 降级 → 删除
+    $newUser = Api POST "/api/v1/admin/users" @("-H", "Content-Type: application/json",
+        "-d", (JsonBody "newuser" @{ email = "smoke-user@example.com"; password = "SmokeUser2026Abc"; role = "user" }))
+    ExpectJson $newUser { $d.data.user.email -eq "smoke-user@example.com" } "后台建号：邮箱"
+    $newId = ($newUser | ConvertFrom-Json).data.user.id
+
+    # 新账号登录用独立请求：不能借用管理员那个 cookie jar，会把它覆盖掉
+    $newLogin = HttpText @("-X", "POST", "$script:Base/api/v1/auth/login", "-H", "Content-Type: application/json",
+        "-d", (JsonBody "newlogin" @{ email = "smoke-user@example.com"; password = "SmokeUser2026Abc" }))
+    ExpectJson $newLogin { $d.data.user.email -eq "smoke-user@example.com" } "新账号能登录（邮箱已激活）"
+
+    $promoted = Api PATCH "/api/v1/admin/users/$newId" @("-H", "Content-Type: application/json",
+        "-d", (JsonBody "promote" @{ role = "admin" }))
+    ExpectJson $promoted { $d.data.user.role -eq "admin" } "普通用户提为管理员"
+
+    $demoted = Api PATCH "/api/v1/admin/users/$newId" @("-H", "Content-Type: application/json",
+        "-d", (JsonBody "demote" @{ role = "user" }))
+    ExpectJson $demoted { $d.data.user.role -eq "user" } "管理员降回普通用户"
+
+    Api DELETE "/api/v1/admin/users/$newId" | Out-Null
+    $rowsAfter = Api GET "/api/v1/admin/users"
+    ExpectJson $rowsAfter { $d.meta.total -eq 1 } "测试账号已删除，用户数回到 1"
+
     ExpectJson (Api DELETE "/api/v1/admin/terms/99999") { $d.error.code -eq "NOT_FOUND" } "删除不存在的条款返回 NOT_FOUND"
 
     Step "错误码"

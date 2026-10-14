@@ -15,7 +15,7 @@ import { navigate, type PageContext } from "../core/router";
 import { currentUser, getState } from "../core/state";
 import { toastError } from "../core/toast";
 import type { ImageItem } from "../core/types";
-import { createUploadPanel } from "../upload/panel";
+import { createUploadPanel, loadAlbumOptions } from "../upload/panel";
 import { openLightbox } from "../ui/lightbox";
 import {
   emptyState,
@@ -99,6 +99,10 @@ export async function render(ctx: PageContext): Promise<void> {
     });
     panel.root.style.marginBottom = "18px";
     ctx.outlet.append(panel.root);
+    // 目标相册下拉要有真清单：拿不到就退回「默认相册」（面板自己的兜底）
+    void loadAlbumOptions(getState().viewingUid)
+      .then((albums) => panel.refreshAlbums(albums))
+      .catch(() => {});
   }
 
   // 搜索只在顶栏那一个输入框里（页面里不再重复），标签筛选也交给它——
