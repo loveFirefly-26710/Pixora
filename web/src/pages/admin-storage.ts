@@ -396,11 +396,21 @@ function capacityCard(reload: () => void, data: StorageAdmin): HTMLElement {
       ),
     );
   } else if (probe) {
+    // 探测可信才有整盘数字；手填/降级时这里只有本项目占用
+    const hostLine =
+      data.capacity.host_used != null
+        ? `整盘已用 ${formatBytes(data.capacity.host_used)}，可用 ${formatBytes(data.capacity.host_available)}（含宿主机上与本项目无关的占用）。`
+        : "";
     nodes.push(
       qtip(
         "ok",
         "容量探测可信",
-        h("span", null, `${probe.fs_name}，当前读到的系统总额是 ${formatBytes(data.capacity.total)}。`),
+        h(
+          "span",
+          null,
+          `${probe.fs_name}，当前读到的系统总额是 ${formatBytes(data.capacity.total)}。`,
+          hostLine,
+        ),
       ),
     );
   }

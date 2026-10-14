@@ -426,6 +426,12 @@ expect_json "${QUOTA}" "d['data']['default_quota_bytes'] > 0" "True" "配额总�
 # 两边都必须读到真实总额。来源降级或总额为 0，说明当前平台的探测路径断了。
 expect_json "${QUOTA}" "d['data']['capacity']['source']" "auto" "容量自动探测：来源是 auto"
 expect_json "${QUOTA}" "(d['data']['capacity']['total'] or 0) > 0" "True" "容量自动探测：系统总额 > 0"
+# 宿主机整盘已用：自动模式下必须给出来（占用率与自动关闭注册按它算），
+# 且已用 + 可用 = 总额，两个数来自同一次探测，不能对不上
+expect_json "${QUOTA}" "(d['data']['capacity']['host_used'] or 0) > 0" "True" "容量自动探测：宿主机整盘已用 > 0"
+expect_json "${QUOTA}" "d['data']['capacity']['host_used'] + d['data']['capacity']['host_available'] == d['data']['capacity']['total']" "True" "整盘口径：已用 + 可用 = 总额"
+# 可分配上限 = 总额 − 系统占用：配额校验与分配进度都按它算
+expect_json "${QUOTA}" "d['data']['allocatable'] == d['data']['capacity']['total'] - d['data']['capacity']['host_used']" "True" "可分配上限 = 总额 − 系统占用"
 
 SETTINGS="$(api GET /api/v1/admin/settings)"
 expect_json "${SETTINGS}" "d['data']['site']['name']" "Pixora" "系统设置：站点名"

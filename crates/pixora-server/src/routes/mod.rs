@@ -598,6 +598,13 @@ mod tests {
     #[tokio::test]
     async fn site_is_reachable_without_login() {
         let (state, _dir) = test_state().await;
+        // 自动关闭注册在自动模式下跟宿主机磁盘占用挂钩，磁盘有多满随机器变化；
+        // 这个用例验的是 /site 本身，把容量那条线换成手填模式（本项目占用 0）保确定性
+        state
+            .settings
+            .set("capacity.mode", "manual")
+            .await
+            .expect("容量模式");
 
         let response = app(state)
             .oneshot(get("/api/v1/site", None))

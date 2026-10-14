@@ -243,7 +243,8 @@ pub async fn user_update(
 
 /// `POST /api/v1/admin/users/{id}/quota` — 单个用户调配额。
 ///
-/// 校验（单用户上限、合计不超系统总额）在领域层，超出时错误里带「还差多少字节」。
+/// 校验（单用户上限、合计不超可分配上限 = 系统总额 − 系统占用）在领域层，
+/// 超出时错误里带「还差多少字节」；已经越界时只拦往上加，调低放行。
 pub async fn user_quota(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

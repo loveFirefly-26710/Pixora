@@ -491,9 +491,11 @@ API 客户端：
                   "enabled": true, "capacity_mode": "auto", "capacity_total": null,
                   "config": { } } ],
   "capacity": { "mode": "auto", "total": 536870912000, "used": 140788645888,
-                "probe": { "fs_kind": "network", "fs_name": "fuse（ossfs …）",
-                           "fs_type": "0x65735546", "trustworthy": false,
-                           "note": "statfs 返回伪值，已降级为手动填写" } },
+                "host_used": 510252462080, "host_available": 26618449920, "source": "auto",
+                "note": "ntfs（固定盘） · 总容量 500.0 GB · 已用 475.2 GB · 可用 24.8 GB",
+                "probe": { "fs_kind": "local", "fs_name": "ntfs（固定盘）",
+                           "fs_type": "0x3", "trustworthy": true,
+                           "note": "ntfs（固定盘） · 总容量 500.0 GB · 已用 475.2 GB · 可用 24.8 GB" } },
   "paths": { "data_dir": "/data", "upload_prefix": "images",
              "layout": "/data/{uid}/{相册}/{hash}.{ext}", "source": "PIXORA_DATA_DIR" },
   "distribution": [ { "driver": "local", "label": "本地磁盘", "count": 1284, "bytes": 138136862720 } ],
@@ -509,15 +511,22 @@ API 客户端：
 - `POST /api/v1/admin/storage/backends/{id}/test` → `{ "data": { "ok": true, "message": "连通 · owner/repo · 分支 main" } }`
   敏感字段在响应里回显为 `"secret_set": true`，不回明文。
 
+`capacity` 里有三个容量数字，口径不同别混用：`total` 是系统总额（自动模式下即磁盘容量）；
+`used` 是本项目占用（库内 blob 汇总，配额那条线用）；`host_used` / `host_available`
+是宿主机整盘已用与真实剩余空间，只有 `mode: "auto"` 且探测可信时才有这两个字段，
+其余情况为 `null`。磁盘满没满看整盘——`host_used` 里包含宿主机上与本项目无关的占用。
+
 ### 8.3 配额与容量
 
 - `GET /api/v1/admin/quota` →
 
 ```json
 { "data": {
-  "capacity": { "mode": "manual", "total": 536870912000, "used": 140788645888,
-                "source": "manual", "note": "总额为手填" },
-  "allocated": 450971566080, "allocated_percent": 84.0, "remaining": 85899345920,
+  "capacity": { "mode": "auto", "total": 536870912000, "used": 140788645888,
+                "host_used": 510252462080, "host_available": 26618449920,
+                "source": "auto", "note": "ntfs（固定盘） · 总容量 500.0 GB · 已用 475.2 GB · 可用 24.8 GB" },
+  "allocatable": 26618449920,
+  "allocated": 21474836480, "allocated_percent": 80.7, "remaining": 5143613440,
   "default_quota_bytes": 10737418240, "per_user_max": 107374182400,
   "auto_close": { "enabled": true, "on": 90, "off": 80, "register_open": true,
                   "closed_reason": null },
@@ -529,7 +538,12 @@ API 客户端：
 
 - `PUT /api/v1/admin/quota` → `{ "capacity_mode": "manual", "manual_total": …, "default_quota_bytes": …,
   "per_user_max": …, "auto_close_enabled": true, "auto_close_on": 90, "auto_close_off": 80 }`
-  校验：`所有用户配额合计 ≤ 系统总额`，超出返回 `BAD_REQUEST` 并在 `detail` 里给出还差多少字节。
+  校验：`所有用户配额合计 ≤ 可分配上限`（`allocatable` = `total` − `host_used`；手填总额或网络挂载
+  降级时 `host_used` 为 `null`，上限就是 `total`），超出返回 `BAD_REQUEST` 并在 `detail` 里给出
+  还差多少字节。已经越界的存量状态下，单用户调配额只拦「往上加」，调低放行——磁盘占用会把
+  上限压低，全拦的话管理员就回不到合规状态了。
+- 自动关闭注册的占用率按 `host_used / total` 判定（`host_used` 为 `null` 时退回 `used / total`），
+  关闭原因里会写明口径（「宿主机磁盘占用」或「本项目占用」）。
 
 ### 8.4 频率限制
 

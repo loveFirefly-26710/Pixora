@@ -1,7 +1,9 @@
 /**
  * 配额与容量（`#/admin/quota`）。
  *
- * 页面围绕一条硬约束：`所有用户配额合计 + 管理员账户配额 ≤ 系统总额`。
+ * 页面围绕一条硬约束：`所有用户配额合计 + 管理员账户配额 ≤ 可分配上限`，
+ * 上限 = 系统总额 − 系统占用（宿主机整盘已用）——磁盘上被别的数据先占住的
+ * 额度分不出去，不扣掉就会出现「配额都发完了、上传却写不进盘」。
  * 校验由服务端兜底，前端负责把「还差多少」说清楚——改完才发现存不进去最让人烦。
  *
  * 系统总额的两种来源要分开看：本地盘用 statfs 的真实值，网络挂载（OSS 等）
@@ -145,7 +147,7 @@ function view(reload: () => void, data: QuotaAdmin, storage: StorageAdmin | null
     topUsersCard(reload, data),
     note(
       "w",
-      "这条校验是硬约束：改任何一个人的配额，都要先算一遍「所有用户配额合计 + 管理员账户配额」有没有超系统总额。超额时服务端会拒绝保存并给出还差多少，不要让管理员改完才发现。",
+      "这条校验是硬约束：改任何一个人的配额，都要先算一遍「所有用户配额合计 + 管理员账户配额」有没有超可分配上限（系统总额减去系统占用——磁盘上别的数据先占住的额度分不出去）。超额时服务端会拒绝保存并给出还差多少，不要让管理员改完才发现。",
     ),
     h(
       "div.flexline",
@@ -203,16 +205,23 @@ function capacityCard(draft: QuotaDraft, data: QuotaAdmin, storage: StorageAdmin
       ),
     );
   }
-  nodes.push(h("div.tip", { text: "如果是本地磁盘，选「自动探测」即可，总额取 statfs 的真实值。" }));
+  nodes.push(
+    h("div.tip", {
+      text: "本地磁盘选「自动探测」即可：占用率按宿主机整盘已用算。手填总额或网络挂载降级时只算本项目占用。",
+    }),
+  );
   return cardNode(null, ...nodes);
 }
 
-/** 分配汇总：总额、已分配、剩余，进度条 + 百分比 + 校验规则。 */
+/** 分配汇总：总额、系统占用、可分配上限、已分配、剩余，进度条 + 百分比 + 校验规则。 */
 function allocationCard(data: QuotaAdmin): HTMLElement {
   const total = data.capacity.total ?? 0;
+  const hostUsed = data.capacity.host_used;
+  // 上限由服务端给（总额 − 系统占用）；字段缺了就按同一口径推一遍
+  const allocatable = data.allocatable ?? Math.max(0, total - (hostUsed ?? 0));
   const allocated = data.allocated ?? 0;
-  const remaining = data.remaining ?? Math.max(0, total - allocated);
-  const ratio = data.allocated_percent ?? percent(allocated, total || 1);
+  const remaining = data.remaining ?? Math.max(0, allocatable - allocated);
+  const ratio = data.allocated_percent ?? percent(allocated, allocatable || 1);
 
   const line = (label: string, value: Node | string, divided = false): HTMLElement =>
     h(
@@ -223,11 +232,15 @@ function allocationCard(data: QuotaAdmin): HTMLElement {
       typeof value === "string" ? h("b", { text: value }) : value,
     );
 
-  const lines = h(
-    "div",
-    { style: { fontSize: "13px", lineHeight: "2.4" } },
-    line("系统总额", formatBytes(total)),
-    line("已分配配额合计（用户 + 管理员）", formatBytes(allocated)),
+  // 系统占用（整盘已用）必须先摆出来：它正是「可分配上限」比系统总额小的原因，
+  // 只显示总额的话，下面的剩余额度会像算错了一样
+  const rows: Node[] = [line("系统总额", formatBytes(total))];
+  if (hostUsed != null) {
+    rows.push(line("系统占用（宿主机整盘已用，不可分配）", formatBytes(hostUsed)));
+    rows.push(line("可分配上限（系统总额 − 系统占用）", formatBytes(allocatable)));
+  }
+  rows.push(line("已分配配额合计（用户 + 管理员）", formatBytes(allocated)));
+  rows.push(
     line(
       "剩余可分配",
       h("b", {
@@ -238,22 +251,19 @@ function allocationCard(data: QuotaAdmin): HTMLElement {
     ),
   );
 
+  const rule =
+    hostUsed != null
+      ? "所有用户配额合计 + 管理员账户配额 ≤ 系统总额 − 系统占用（宿主机整盘已用，磁盘上别的数据先占住的额度分不出去）。超出的分配会被拒绝保存，并提示还差多少。"
+      : "所有用户配额合计 + 管理员账户配额 ≤ 系统总额。超出的分配会被拒绝保存，并提示还差多少。";
+
   return card(
     "配额分配",
-    lines,
-    h("div", { style: { marginTop: "12px" } }, progressBar(allocated, total || 1)),
+    h("div", { style: { fontSize: "13px", lineHeight: "2.4" } }, ...rows),
+    h("div", { style: { marginTop: "12px" } }, progressBar(allocated, allocatable || 1)),
     h("div.tip", {
-      text: `已分配 ${formatBytes(allocated)} / ${formatBytes(total)}，占 ${Math.round(ratio)}%。`,
+      text: `已分配 ${formatBytes(allocated)} / ${formatBytes(allocatable)}，占 ${Math.round(ratio)}%。`,
     }),
-    h(
-      "div",
-      { style: { marginTop: "12px" } },
-      qtip(
-        "err",
-        "校验规则",
-        "所有用户配额合计 + 管理员账户配额 ≤ 系统总额。超出的分配会被拒绝保存，并提示还差多少。",
-      ),
-    ),
+    h("div", { style: { marginTop: "12px" } }, qtip("err", "校验规则", rule)),
   );
 }
 
@@ -277,16 +287,23 @@ function defaultsCard(draft: QuotaDraft): HTMLElement {
 function autoCloseCard(draft: QuotaDraft, data: QuotaAdmin): HTMLElement {
   const state = h("div", { style: { marginTop: "10px" } });
 
+  // 占用率的口径与服务端一致：自动探测可信时按宿主机整盘已用算
+  // （磁盘被谁占满都一样会停注册），手填/降级时退回本项目占用。
+  const total = data.capacity.total ?? 0;
+  const basis = data.capacity.host_used ?? data.capacity.used;
+  const scope = data.capacity.host_used != null ? "宿主机磁盘占用" : "本项目占用";
+  // 阈值是整数百分比，这里保留一位小数，免得显示「90%」却还没触发
+  const usedRatio = total > 0 ? Math.min(100, (basis / total) * 100) : 0;
+  const usedText = `${scope} ${formatBytes(basis)} / ${formatBytes(total)}，约 ${usedRatio.toFixed(1)}%`;
+
   const refreshState = (): void => {
-    const total = data.capacity.total ?? 0;
-    const usedRatio = total > 0 ? percent(data.capacity.used, total) : 0;
     if (!draft.autoEnabled) {
       mount(
         state,
         qtip(
           "info",
           "未启用自动关闭",
-          `系统实际占用 ${formatBytes(data.capacity.used)} / ${formatBytes(total)}，约 ${usedRatio}%。注册入口由「系统设置」里的开关控制。`,
+          `${usedText}。注册入口由「系统设置」里的开关控制。`,
         ),
       );
       return;
@@ -300,7 +317,7 @@ function autoCloseCard(draft: QuotaDraft, data: QuotaAdmin): HTMLElement {
           h(
             "span",
             null,
-            `系统实际占用 ${formatBytes(data.capacity.used)} / ${formatBytes(total)}，约 ${usedRatio}%，未触及 ${draft.autoOn.value}% 阈值。`,
+            `${usedText}，未触及 ${draft.autoOn.value}% 阈值。`,
             h("br"),
             h("b", { text: "已注册用户完全不受影响" }),
             "，照常上传。",
@@ -317,7 +334,7 @@ function autoCloseCard(draft: QuotaDraft, data: QuotaAdmin): HTMLElement {
         h(
           "span",
           null,
-          data.auto_close.closed_reason || `系统占用约 ${usedRatio}%，已触及 ${draft.autoOn.value}% 阈值。`,
+          data.auto_close.closed_reason || `${usedText}，已触及 ${draft.autoOn.value}% 阈值。`,
           h("br"),
           `降到 ${draft.autoOff.value}% 以下会自动重新开放；已注册用户不受影响。`,
         ),
@@ -330,10 +347,15 @@ function autoCloseCard(draft: QuotaDraft, data: QuotaAdmin): HTMLElement {
 
   return cardNode(
     cardHead("容量触顶自动关闭注册"),
-    switchRow("启用自动关闭", "系统占用超过阈值时，自动停掉注册入口", data.auto_close.enabled, (next) => {
-      draft.autoEnabled = next;
-      refreshState();
-    }),
+    switchRow(
+      "启用自动关闭",
+      "自动探测模式下按宿主机磁盘占用判定（整盘写满就停），手填/降级时按本项目占用",
+      data.auto_close.enabled,
+      (next) => {
+        draft.autoEnabled = next;
+        refreshState();
+      },
+    ),
     h(
       "div.row",
       { style: { marginTop: "10px" } },

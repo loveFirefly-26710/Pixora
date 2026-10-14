@@ -32,7 +32,14 @@ pub const SECRET_FIELDS: &[&str] = &["token", "password", "bot_token", "secret_k
 pub struct CapacityInfo {
     pub mode: String,
     pub total: Option<i64>,
+    /// 本项目占用：库里 blob 的大小汇总，配额那条线的口径
     pub used: i64,
+    /// 宿主机整盘已用（总额 − 可用）。只有 auto 模式且探测可信时才有这个数——
+    /// 磁盘满没满取决于整盘，跟是谁占的无关；手填总额或网络挂载降级时
+    /// 拿不到可信的整盘数字，留空由上层退回「本项目占用」
+    pub host_used: Option<i64>,
+    /// 宿主机整盘可用（真实剩余空间），与 `host_used` 同时出现
+    pub host_available: Option<i64>,
     pub source: String,
     pub note: String,
     pub probe: CapacityProbeLike,
@@ -387,7 +394,13 @@ impl StorageService {
 
     /// 容量三模式。这里是设计稿点名要修的那个坑：
     /// `auto` 模式下探测到网络挂载就不给数字，`manual` 用手填总额，
-    /// `hidden` 干脆不显示。已用量一律由库里的 blob 汇总，不依赖文件系统。
+    /// `hidden` 干脆不显示。
+    ///
+    /// 两个「已用」口径别混淆：`used` 是本项目自己占的（库内 blob 汇总，
+    /// 配额那条线用）；`host_used` 是宿主机整盘已用（总额 − 可用），
+    /// 磁盘满没满看的是它——宿主机上与本项目无关的占用同样会把盘写满。
+    /// 只有 auto 且探测可信时总额才是磁盘容量，这时才给整盘数字；
+    /// 手填总额（可能是给本项目定的预算）与网络挂载降级下留空。
     pub async fn capacity(&self) -> Result<CapacityInfo> {
         let mode = self.settings.capacity_mode().await?;
         let used = self.repo.sum_blob_bytes().await?;
@@ -397,6 +410,8 @@ impl StorageService {
                 mode,
                 total: None,
                 used,
+                host_used: None,
+                host_available: None,
                 source: "hidden".into(),
                 note: "容量展示已关闭".into(),
                 probe: CapacityProbeLike {
@@ -425,6 +440,8 @@ impl StorageService {
                 mode,
                 total,
                 used,
+                host_used: None,
+                host_available: None,
                 source: "manual".into(),
                 note: updated_at
                     .map(|at| format!("系统总额为管理员手填（{at}），已用量按库内文件实时汇总"))
@@ -440,6 +457,8 @@ impl StorageService {
                 mode,
                 total: manual,
                 used,
+                host_used: None,
+                host_available: None,
                 source: if manual.is_some() {
                     "auto→manual"
                 } else {
@@ -463,6 +482,8 @@ impl StorageService {
             mode,
             total: Some(probe.total as i64),
             used,
+            host_used: Some(probe.used() as i64),
+            host_available: Some(probe.available as i64),
             source: "auto".into(),
             note: pixora_storage::capacity::describe(&probe),
             probe: probe.into(),

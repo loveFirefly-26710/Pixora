@@ -1,9 +1,15 @@
 //! 配额与容量：系统总额、用户配额分配、注册默认额度，以及上传前的准入。
 //!
-//! 设计稿把「配额总额是硬约束」写成一句话：**所有已注册用户的配额合计 ≤ 系统总额**。
-//! 它必须由服务端把关——管理员随手给几个人加到几百 GB，总额早就超了也不知道，
+//! 「配额总额是硬约束」这句话在本项目里的完整形态是：
+//! **所有已注册用户的配额合计 ≤ 可分配上限 = 系统总额 − 宿主机整盘已用**。
+//! 磁盘上被别的数据先占住的那部分额度是分不出去的，把它算进来才不会出现
+//! 「配额都发出去了、上传却写不进盘」。自动模式下这个减数就是探测到的整盘
+//! 已用；手填总额或网络挂载降级时拿不到整盘数字，上限退回系统总额。
+//! 它必须由服务端把关——管理员随手给几个人加到几百 GB，上限早就超了也不知道，
 //! 等磁盘写满时已经来不及。所以本文件里每一处改动配额的路径，改完之前都要
 //! 先算一遍合计，超出就拒绝，并把「还差多少」直接说在错误里（界面上要显示这句）。
+//! 已经越界时（磁盘占用会把上限压下来）「只减不增」的调整必须放行，
+//! 否则管理员连调低配额都做不到，回不到合规状态。
 //!
 //! 另一条容易踩的规矩：**接口与库里一律用字节数**，格式化只发生在展示层
 //! （[`human_bytes`] 只服务于错误文案与界面提示，不进任何存储或比较逻辑）。
@@ -19,6 +25,9 @@ use crate::AppState;
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaPayload {
     pub capacity: QuotaCapacity,
+    /// 可分配上限（系统总额 − 宿主机整盘已用）。拿不到总额或整盘数字时
+    /// 退回总额；两者都没有按 0 给，界面显示「上限未知」
+    pub allocatable: i64,
     pub allocated: i64,
     pub allocated_percent: f64,
     pub remaining: i64,
@@ -32,7 +41,12 @@ pub struct QuotaPayload {
 pub struct QuotaCapacity {
     pub mode: String,
     pub total: Option<i64>,
+    /// 本项目占用（库内 blob 汇总）
     pub used: i64,
+    /// 宿主机整盘已用与可用，只有 auto 且探测可信时才有；占用率与自动关闭
+    /// 注册按它算（磁盘满没满跟是谁占的无关），没有时退回本项目占用
+    pub host_used: Option<i64>,
+    pub host_available: Option<i64>,
     pub source: String,
     pub note: String,
 }
@@ -94,15 +108,25 @@ impl AppState {
         let (register_open, closed_reason) = self.register_open().await?;
 
         let total = capacity.total;
-        let (allocated_percent, remaining, note) = match total.filter(|total| *total > 0) {
-            Some(total) => (
-                round1(allocated as f64 / total as f64 * 100.0),
-                (total - allocated).max(0),
+        let ceiling = allocatable_ceiling(total, capacity.host_used);
+        let (allocatable, allocated_percent, remaining, note) = match ceiling {
+            Some(ceiling) if ceiling > 0 => (
+                ceiling,
+                round1(allocated as f64 / ceiling as f64 * 100.0),
+                (ceiling - allocated).max(0),
                 capacity.note,
+            ),
+            // 上限为 0（磁盘被占满）：没有分子可算，说清是磁盘满而不是「还没分配」
+            Some(_) => (
+                0,
+                0.0,
+                0,
+                format!("{}（磁盘已满，没有可分配的额度）", capacity.note),
             ),
             // 总额未知时进度条没有分母：百分比与剩余都按 0 给，
             // 并在说明里讲清楚原因，否则界面上的 0% 会被当成「还没分配」
             None => (
+                0,
                 0.0,
                 0,
                 format!("{}（系统总额未知，占用率与剩余可分配额度按 0 展示）", capacity.note),
@@ -122,9 +146,12 @@ impl AppState {
                 mode: capacity.mode,
                 total,
                 used: capacity.used,
+                host_used: capacity.host_used,
+                host_available: capacity.host_available,
                 source: capacity.source,
                 note,
             },
+            allocatable,
             allocated,
             allocated_percent,
             remaining,
@@ -208,27 +235,44 @@ impl AppState {
             )));
         }
 
-        // 系统总额的来源随模式变：manual 用手填值（没填就沿用库里已有的），
-        // auto 用容量探测，hidden 不设上限。注意 capacity() 读的是库里当下的模式，
+        // 可分配上限的来源随模式变：manual 用手填值（没填就沿用库里已有的），
+        // auto 用容量探测的「总额 − 宿主机整盘已用」——磁盘上被别的数据先占住的
+        // 额度是分不出去的；hidden 不设上限。注意 capacity() 读的是库里当下的模式，
         // 同一请求里从 manual 切到 auto 时它回的还是旧模式的总数——宁可保守拒绝，
         // 也不能放过一次超额分配。
         let manual_total = input.manual_total.or(manual_before);
-        let total = match mode.as_str() {
-            "manual" => manual_total,
-            "hidden" => None,
-            _ => self.storage.capacity().await?.total,
+        let (total, host_used) = match mode.as_str() {
+            "manual" => (manual_total, None),
+            "hidden" => (None, None),
+            _ => {
+                let capacity = self.storage.capacity().await?;
+                (capacity.total, capacity.host_used)
+            }
         };
+        let ceiling = allocatable_ceiling(total, host_used);
 
         let mut check_skipped = false;
-        if let Some(total) = total {
+        if let Some(ceiling) = ceiling {
             let allocated = self.repo.sum_allocated_quota(None).await?;
-            if allocated > total {
+            if allocated > ceiling {
+                let gap = allocated - ceiling;
+                // 讲清上限是怎么算出来的：手填/降级时它等于总额，自动模式下
+                // 总额要先减掉磁盘占用，不说明白管理员会以为数字算错了
+                let how = match host_used {
+                    Some(host_used) => format!(
+                        "系统总额 {} 先减去磁盘占用 {}，剩下的才是可分配额度",
+                        human_bytes(total.unwrap_or(ceiling)),
+                        human_bytes(host_used)
+                    ),
+                    None => format!("系统总额 {}", human_bytes(total.unwrap_or(ceiling))),
+                };
                 return Err(AppError::bad_request(format!(
-                    "所有用户配额合计（{}）超出系统总额（{}），还差 {}（{} 字节）。请先调低部分用户的配额，或把系统总额改大。",
+                    "所有用户配额合计（{}）超出可分配上限（{}）：{}；还差 {}（{} 字节）。请先调低部分用户的配额，或改用「手动配置」给出更大的总额。",
                     human_bytes(allocated),
-                    human_bytes(total),
-                    human_bytes(allocated - total),
-                    allocated - total
+                    human_bytes(ceiling),
+                    how,
+                    human_bytes(gap),
+                    gap
                 )));
             }
         } else {
@@ -336,22 +380,38 @@ impl AppState {
             )));
         }
 
-        let total = self.storage.capacity().await?.total;
-        if let Some(total) = total {
-            // 把这个人换成新额度后合计不能破总额：先算「其他人 + 新的他」
+        let capacity = self.storage.capacity().await?;
+        let ceiling = allocatable_ceiling(capacity.total, capacity.host_used);
+        if let Some(ceiling) = ceiling {
+            // 把这个人换成新额度后合计不能破上限：先算「其他人 + 新的他」
             let others = self.repo.sum_allocated_quota(Some(user.id)).await?;
             let projected = others + quota_bytes;
-            if projected > total {
+            let allocated_now = self.repo.sum_allocated_quota(None).await?;
+            // 已经越界时只拦「往上加」：磁盘占用会把上限压低，若连调低都拒绝，
+            // 管理员就再也回不到合规状态了
+            if projected > ceiling && projected > allocated_now {
+                let gap = projected - ceiling;
+                let cap_note = if capacity.host_used.is_some() {
+                    "（系统总额减去磁盘占用）"
+                } else {
+                    ""
+                };
                 return Err(AppError::bad_request(format!(
-                    "给 {} 分配 {} 后，所有用户配额合计将达 {}，超出系统总额 {}，还差 {}（{} 字节）",
+                    "给 {} 分配 {} 后，所有用户配额合计将达 {}，超出可分配上限 {}{cap_note}，还差 {}（{} 字节）",
                     user.email,
                     human_bytes(quota_bytes),
                     human_bytes(projected),
-                    human_bytes(total),
-                    human_bytes(projected - total),
-                    projected - total
+                    human_bytes(ceiling),
+                    human_bytes(gap),
+                    gap
                 )));
             }
+        }
+        if ceiling.is_none() {
+            tracing::info!(
+                user = %user.email,
+                "可分配上限取不到（总额未知），单用户配额校验已跳过"
+            );
         }
 
         self.repo.update_user_quota(user.id, quota_bytes).await?;
@@ -381,7 +441,7 @@ impl AppState {
         .await;
 
         let allocated = self.repo.sum_allocated_quota(None).await?;
-        let remaining = total.map(|total| (total - allocated).max(0)).unwrap_or(0);
+        let remaining = ceiling.map(|ceiling| (ceiling - allocated).max(0)).unwrap_or(0);
         Ok(UserQuotaChange {
             uid: user.uid,
             email: user.email,
@@ -452,6 +512,19 @@ fn user_row(user: &pixora_repo::model::UserSummary) -> UserRow {
 /// 百分比保留一位小数。界面上的一位数就够了，多出来的位数只会让行宽跳动。
 fn round1(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
+}
+
+/// 可分配上限：系统总额刨掉宿主机整盘已用。
+///
+/// 磁盘上被别的数据先占住的那部分额度分不出去，自动模式下必须减掉；
+/// 手填总额（可能只是给本项目定的预算、或 OSS 场景的估算）与网络挂载
+/// 降级时拿不到可信的整盘数字，上限就退回总额本身。总额也为 `None`
+/// （hidden 模式）时返回 `None`，调用方跳过校验并在日志里说明。
+fn allocatable_ceiling(total: Option<i64>, host_used: Option<i64>) -> Option<i64> {
+    total.map(|total| match host_used {
+        Some(host_used) => (total - host_used).max(0),
+        None => total,
+    })
 }
 
 /// 字节数的人话表示，只给用户看的文案用。
@@ -778,6 +851,7 @@ mod tests {
 
         let payload = state.quota_payload().await.expect("配额面板");
         assert_eq!(payload.allocated, 20 * GIB);
+        assert_eq!(payload.allocatable, 25 * GIB, "手填总额时上限就是总额本身");
         assert_eq!(payload.remaining, 5 * GIB);
         assert_eq!(payload.default_quota_bytes, defaults::QUOTA_DEFAULT);
         assert_eq!(payload.per_user_max, defaults::QUOTA_PER_USER_MAX);
@@ -801,6 +875,105 @@ mod tests {
             "{}",
             payload.capacity.note
         );
+    }
+
+    /// 可分配上限 = 系统总额 − 宿主机整盘已用（拿不到整盘数字时就是总额）。
+    #[test]
+    fn allocatable_ceiling_subtracts_host_usage_when_known() {
+        assert_eq!(allocatable_ceiling(Some(1000), Some(600)), Some(400));
+        assert_eq!(allocatable_ceiling(Some(1000), None), Some(1000));
+        assert_eq!(allocatable_ceiling(None, Some(600)), None);
+        // 磁盘占满：上限是 0，不是负数
+        assert_eq!(allocatable_ceiling(Some(1000), Some(1200)), Some(0));
+        assert_eq!(allocatable_ceiling(Some(1000), Some(1000)), Some(0));
+    }
+
+    /// 自动模式下校验按「总额 − 磁盘占用」判：上限以内能存，越过就拒绝，
+    /// 并且把上限是怎么算出来的讲清楚。
+    #[cfg(any(target_os = "linux", windows))]
+    #[tokio::test]
+    async fn quota_ceiling_subtracts_host_usage_in_auto_mode() {
+        let (state, _dir) = test_state().await;
+        let admin = add_admin(&state, "admin@example.com", "1000").await;
+
+        let payload = state.quota_payload().await.expect("配额面板");
+        let total = payload.capacity.total.expect("自动模式有总额");
+        let host_used = payload.capacity.host_used.expect("自动模式要给出宿主机整盘已用");
+        assert_eq!(
+            payload.allocatable,
+            total - host_used,
+            "同一个响应里上限必须等于总额减整盘已用"
+        );
+        assert!(payload.allocatable > 0, "测试机的磁盘不该是满的");
+
+        // 探测与校验之间磁盘占用会微动（其它进程还在写盘），所以不追求「正好
+        // 卡在上限」，留 1 GiB 余量，用例只验证两侧的判定方向
+        const MARGIN: i64 = GIB;
+        let ceiling = payload.allocatable;
+
+        // 上限以内：放行（顺手改一个配额之外的阈值，把校验完整跑一遍）
+        add_user(&state, "chenyu@example.com", "1001", ceiling - MARGIN).await;
+        let saved = state
+            .quota_update(
+                admin,
+                QuotaInput {
+                    auto_close_on: Some(85),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(saved.is_ok(), "上限以内不该被拒：{saved:?}");
+
+        // 合计越过上限 1 GiB：拒绝，且说明上限是「总额减磁盘占用」
+        add_user(&state, "design@studio.io", "2044", 2 * MARGIN).await;
+        let err = state
+            .quota_update(
+                admin,
+                QuotaInput {
+                    auto_close_on: Some(84),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("超出可分配上限必须被拒绝");
+        let message = err.message();
+        assert!(message.contains("可分配上限"), "{message}");
+        assert!(message.contains("磁盘占用"), "{message}");
+    }
+
+    /// 已经越界时（磁盘占用会把上限压低）「只减不增」的调整必须放行：
+    /// 全拦的话管理员连调低配额都做不到，就再也回不到合规状态了。
+    #[tokio::test]
+    async fn over_allocated_state_allows_lowering_but_blocks_raising() {
+        let (state, _dir) = test_state().await;
+        let admin = add_admin(&state, "admin@example.com", "1000").await;
+        let first = add_user(&state, "chenyu@example.com", "1001", 800).await;
+        add_user(&state, "design@studio.io", "2044", 800).await;
+
+        // 手填 1000 字节，合计 1600 已经越界——等价于磁盘被占满把上限压下来之后
+        state.settings.set(keys::CAPACITY_MODE, "manual").await.expect("容量模式");
+        state
+            .settings
+            .set_integer(keys::CAPACITY_MANUAL_TOTAL, 1000)
+            .await
+            .expect("手填总额");
+
+        // 往上加：合计会到 1700，拒绝
+        let err = state
+            .set_user_quota(admin, first, 900)
+            .await
+            .expect_err("越界时加额度必须被拒绝");
+        assert!(err.message().contains("可分配上限"), "{}", err.message());
+
+        // 往下降：合计从 1600 到 1200，虽然仍越界但方向是对的，放行
+        let lowered = state.set_user_quota(admin, first, 400).await.expect("只减不增要放行");
+        assert_eq!(lowered.allocated, 1200);
+        assert_eq!(lowered.remaining, 0, "还没降到上限以内，剩余仍是 0");
+
+        // 继续降到正好用满：放行
+        let fit = state.set_user_quota(admin, first, 200).await.expect("降到上限以内");
+        assert_eq!(fit.allocated, 1000);
+        assert_eq!(fit.remaining, 0);
     }
 
     #[tokio::test]
