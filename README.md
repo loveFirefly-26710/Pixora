@@ -39,6 +39,47 @@ PIXORA_WEB_DIR=./web/dist cargo run -p pixora-server
 没有配 SMTP 时，验证码会写进服务端日志，日志里也能直接看到码，
 所以本地开发不需要真邮箱。
 
+### Windows（cmd，不需要 Git Bash）
+
+在 cmd 里逐条执行。第 2 步和第 3 步的顺序不能颠倒：前端产物要被 cargo 嵌进二进制。
+
+```bat
+cargo build --workspace
+cargo test --workspace
+
+cd web
+npm install
+npx tsc --noEmit
+npm run build
+cd ..
+
+cargo build -p pixora-server
+
+powershell -ExecutionPolicy Bypass -File scripts\smoke.ps1
+```
+
+起服务：
+
+```bat
+set PIXORA_DB_DRIVER=sqlite
+set PIXORA_DB_DSN=./data/pixora.db
+set PIXORA_DATA_DIR=./data
+set PIXORA_BASE_URL=http://127.0.0.1:8080
+cargo run -p pixora-server
+```
+
+首次打开 <http://127.0.0.1:8080/#/install> 走安装向导。
+
+Windows 上有三个坑，都踩过一遍：
+
+1. **`.ps1` 要存成 UTF-8 with BOM。** Windows PowerShell 5.1 在没有 BOM 时按本地
+   代码页读脚本，中文注释和字符串会变成乱码并直接报语法错误。
+2. **不要把自己的函数命名成 `Curl`。** PowerShell 的命令解析顺序是「别名 > 函数」，
+   内置别名 `curl` 指向 `Invoke-WebRequest`，同名函数会被它抢走，报
+   「无法将 System.Object[] 转换为参数 Uri 所需的类型」。
+3. **curl 的输出要按 UTF-8 解码。** 默认按本地代码页解，服务端返回的 UTF-8 JSON
+   会变成乱码导致解析失败；`scripts\smoke.ps1` 里已经处理了这件事。
+
 ### Docker
 
 ```bash
