@@ -422,6 +422,10 @@ expect_json "${STORAGE}" "d['data']['paths']['upload_prefix']" "images" "存储�
 
 QUOTA="$(api GET /api/v1/admin/quota)"
 expect_json "${QUOTA}" "d['data']['default_quota_bytes'] > 0" "True" "配额总览"
+# 容量自动探测：Linux 走 statfs（容器里是 overlayfs）、Windows 走 Win32 盘类型查询，
+# 两边都必须读到真实总额。来源降级或总额为 0，说明当前平台的探测路径断了。
+expect_json "${QUOTA}" "d['data']['capacity']['source']" "auto" "容量自动探测：来源是 auto"
+expect_json "${QUOTA}" "(d['data']['capacity']['total'] or 0) > 0" "True" "容量自动探测：系统总额 > 0"
 
 SETTINGS="$(api GET /api/v1/admin/settings)"
 expect_json "${SETTINGS}" "d['data']['site']['name']" "Pixora" "系统设置：站点名"

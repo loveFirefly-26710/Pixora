@@ -455,6 +455,10 @@ try {
     ExpectJson (Api GET "/api/v1/admin/storage") { $d.data.default_driver -eq "local" } "存储总览：默认驱动"
     ExpectJson (Api GET "/api/v1/admin/storage") { $d.data.paths.upload_prefix -eq "images" } "存储总览：直链前缀"
     ExpectJson (Api GET "/api/v1/admin/quota") { $d.data.default_quota_bytes -gt 0 } "配额总览"
+    # 容量自动探测：Windows 走 Win32 盘类型查询（Linux 走 statfs），
+    # 来源降级或总额为 0/null，说明当前平台的探测路径断了。
+    ExpectJson (Api GET "/api/v1/admin/quota") { $d.data.capacity.source -eq "auto" } "容量自动探测：来源是 auto"
+    ExpectJson (Api GET "/api/v1/admin/quota") { $d.data.capacity.total -gt 0 } "容量自动探测：系统总额 > 0"
     ExpectJson (Api GET "/api/v1/admin/settings") { $d.data.site.name -eq "Pixora" } "系统设置：站点名"
 
     Api PUT "/api/v1/admin/storage/prefix" @("-H", "Content-Type: application/json",

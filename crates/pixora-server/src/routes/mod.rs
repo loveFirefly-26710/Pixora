@@ -675,6 +675,30 @@ mod tests {
         assert_error(&body, "FORBIDDEN");
     }
 
+    /// 带 Bearer 令牌的 multipart 上传请求。
+    fn multipart_upload(uri: &str, token: &str, file: &[u8], name: &str) -> Request<Body> {
+        const BOUNDARY: &str = "pixora-test-boundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\ncontent-disposition: form-data; name=\"file\"; \
+                 filename=\"{name}\"\r\ncontent-type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(file);
+        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body))
+            .expect("构造请求")
+    }
 
     #[tokio::test]
     async fn upload_needs_a_token() {
@@ -694,5 +718,81 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = body_json(response).await;
         assert_error(&body, "UNAUTHORIZED");
+    }
+
+    /// 上传链路端到端：Bearer 鉴权 → multipart 收件 → 魔数与尺寸解析 →
+    /// 内容寻址落盘。同内容的第二份要命中去重：物理文件只有一份，
+    /// 但各自生成独立的图片记录。
+    #[tokio::test]
+    async fn upload_stores_a_real_png_and_dedups_identical_content() {
+        let (state, dir) = test_state().await;
+        let user = add_user(&state, "upload@example.com", "8402", false).await;
+
+        // 库内只存哈希：按与登录相同的算法存一遍，走的是真鉴权路径
+        let plaintext = "px_live_test_upload_token";
+        state
+            .repo
+            .create_api_token(&NewApiToken {
+                user_id: user.id,
+                name: "测试上传".into(),
+                token_hash: pixora_crypto::token::token_hash(plaintext),
+                display: "px_live_test…".into(),
+                scopes: vec!["upload".into(), "read".into()],
+                expires_at: None,
+            })
+            .await
+            .expect("签发令牌");
+
+        let first = app(state.clone())
+            .oneshot(multipart_upload(
+                "/api/v1/upload",
+                plaintext,
+                PNG_1X1,
+                "pixel.png",
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = body_json(first).await;
+        assert!(first["error"].is_null(), "首次上传不该失败：{first}");
+        assert_eq!(first["data"]["dedup"], false, "首次上传不该是去重：{first}");
+        assert_eq!(first["data"]["size"], PNG_1X1.len() as i64);
+        assert_eq!(first["data"]["storage_type"], "local");
+        let sha = first["data"]["sha256"].as_str().expect("响应带哈希").to_string();
+        assert_eq!(sha.len(), 64, "哈希应是 SHA-256 十六进制");
+        let url = first["data"]["url"].as_str().expect("响应带直链").to_string();
+        assert!(
+            url.contains(&format!("{sha}.png")),
+            "直链应指向内容寻址文件：{url}"
+        );
+
+        // 字节真的落到 blobs/{前2位}/{sha}.png
+        let blob_path = dir
+            .path()
+            .join("data")
+            .join("blobs")
+            .join(&sha[..2])
+            .join(format!("{sha}.png"));
+        assert!(blob_path.exists(), "物理文件应落盘：{}", blob_path.display());
+
+        // 同内容再传一次：命中去重，独立图片记录，直链不变
+        let second = app(state.clone())
+            .oneshot(multipart_upload(
+                "/api/v1/upload",
+                plaintext,
+                PNG_1X1,
+                "pixel.png",
+            ))
+            .await
+            .expect("发请求");
+        let second = body_json(second).await;
+        assert_eq!(second["data"]["dedup"], true, "同内容要命中去重：{second}");
+        assert_eq!(second["data"]["sha256"], sha);
+        assert_eq!(second["data"]["url"], url);
+        assert_ne!(
+            second["data"]["id"].as_i64(),
+            first["data"]["id"].as_i64(),
+            "去重不等于复用图片记录"
+        );
     }
 }
