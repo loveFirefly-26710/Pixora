@@ -96,6 +96,7 @@ export async function loadSite(): Promise<void> {
       background: null,
       installed: true,
       plaza_grid_columns: 3,
+      recycle_retention_days: 30,
       terms: { required: false, version: null, articles: 0 },
     };
   }

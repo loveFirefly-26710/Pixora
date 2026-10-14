@@ -844,6 +844,7 @@ async fn storage_stats_dedup_and_admin_summary() {
             blob_id: image.blob_id,
             thumb_blob_id: image.thumb_blob_id,
             size: 2000,
+                    by_album: false,
         },
         now(),
     )

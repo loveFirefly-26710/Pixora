@@ -25,13 +25,19 @@ pub struct GcOutcome {
 }
 
 /// 回收无引用的物理文件。
+///
+/// `retention_days` 是回收站的保留天数：只要还有没到期的墓碑挂着这个实体，
+/// 文件就留着（恢复还要用它）。到期的墓碑先摘掉——外键挡着实体行不让删。
+/// 回收站关着（0 天）时所有墓碑都算到期，等于没有回收站。
 pub async fn collect_blobs(
     state: &Arc<AppState>,
     grace_minutes: i64,
     batch: i64,
+    retention_days: i64,
 ) -> pixora_core::Result<GcOutcome> {
     let grace = chrono::Duration::minutes(grace_minutes.max(5));
     let older_than = Utc::now() - grace;
+    let retention_cutoff = Utc::now() - chrono::Duration::days(retention_days.max(0));
     let candidates = state.repo.list_gc_candidates(older_than, batch).await?;
     let mut removed = 0u64;
 
@@ -44,11 +50,27 @@ pub async fn collect_blobs(
             continue;
         }
 
-        // 先摘掉指向它的软删行：外键挡着实体行不让删，不清的话物理文件永远回收不掉。
+        // 回收站里有它、且还没到期：这一步什么都不做，等保留期过了再来
+        if retention_days > 0
+            && state
+                .repo
+                .count_tombstones_after(fresh.id, retention_cutoff)
+                .await
+                .unwrap_or(0)
+                > 0
+        {
+            continue;
+        }
+
+        // 到期的墓碑先摘掉：外键挡着实体行不让删，不清的话物理文件回收不掉。
         // 单条出问题只跳过这一条——原来的写法会让一个「删不掉」的实体
         // 拖垮整轮回收，其它几十个孤儿文件跟着一起走不掉。
-        if let Err(err) = state.repo.purge_tombstones_for_blob(fresh.id).await {
-            tracing::warn!(blob_id = fresh.id, error = %err, "清理软删引用失败，跳过这个实体");
+        if let Err(err) = state
+            .repo
+            .purge_tombstones_for_blob_before(fresh.id, retention_cutoff)
+            .await
+        {
+            tracing::warn!(blob_id = fresh.id, error = %err, "清理过期墓碑失败，跳过这个实体");
             continue;
         }
 
@@ -168,10 +190,22 @@ pub async fn purge_expired(state: &Arc<AppState>) -> pixora_core::Result<()> {
         .purge_audit_before(now - chrono::Duration::days(180))
         .await?;
 
+    // 回收站：过了保留期的墓碑在这里清掉（物理文件交给同一轮的 collect_blobs）。
+    // 单靠 collect_blobs 不够——一张图的实体可能还被别的活图引用着，
+    // 那种情况下它不会进候选，墓碑却早该清了。
+    let retention_days = state.settings.retention_days().await.unwrap_or(0);
+    let mut tombstones = 0u64;
+    if retention_days > 0 {
+        tombstones = state
+            .repo
+            .purge_expired_tombstones(now - chrono::Duration::days(retention_days), 500)
+            .await?;
+    }
+
     // 没有任何引用的空标签
     let tags = state.repo.purge_unused_tags().await.unwrap_or(0);
 
-    if sessions + codes + ip_rules + counters + jobs + mails + audits + tags > 0 {
+    if sessions + codes + ip_rules + counters + jobs + mails + audits + tags + tombstones > 0 {
         tracing::info!(
             sessions,
             codes,
@@ -181,6 +215,7 @@ pub async fn purge_expired(state: &Arc<AppState>) -> pixora_core::Result<()> {
             mails,
             audits,
             tags,
+            tombstones,
             "清理过期数据完成"
         );
     }

@@ -22,6 +22,7 @@ pub mod auth;
 pub mod catalog;
 pub mod install;
 pub mod public;
+pub mod recycle;
 pub mod upload;
 
 use std::net::SocketAddr;

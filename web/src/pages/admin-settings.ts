@@ -55,6 +55,7 @@ interface SettingsDraft {
   baseUrl: HTMLInputElement;
   plazaPublic: boolean;
   plazaColumns: HTMLSelectElement;
+  recycleRetention: HTMLInputElement;
   requireLogin: boolean;
   registerEnabled: boolean;
   maxFileBytes: HTMLInputElement;
@@ -141,6 +142,13 @@ function view(reload: () => void, data: AdminSettings): Node[] {
     baseUrl: textInput({ value: data.site.base_url, mono: true }),
     plazaPublic: data.site.plaza_public,
     plazaColumns: select(GRID_COLUMN_OPTIONS, String(data.site.plaza_grid_columns ?? 3)),
+    recycleRetention: textInput({
+      value: String(data.site.recycle_retention_days ?? 30),
+      type: "number",
+      mono: true,
+      min: "0",
+      max: "365",
+    }),
     requireLogin: data.site.require_login_to_upload,
     registerEnabled: data.site.register_enabled,
     maxFileBytes: textInput({ value: formatBytes(data.upload.max_file_bytes), mono: true }),
@@ -209,6 +217,11 @@ function siteCard(draft: SettingsDraft): HTMLElement {
       "广场每行列数",
       draft.plazaColumns,
       "决定广场预览图的大小：列数越少，单张图越大。窄屏（手机）会自动少放几列，不受这里影响。",
+    ),
+    field(
+      "回收站保留天数",
+      draft.recycleRetention,
+      "删除的图片与相册先留在回收站，这个天数内可以恢复；到期由后台彻底删除。填 0 表示关闭回收站（删除即彻底删除）。",
     ),
     switchRow("拒绝游客上传", "上传必须登录", draft.requireLogin, (next) => {
       draft.requireLogin = next;
@@ -530,6 +543,7 @@ async function save(
       base_url: draft.baseUrl.value.trim().replace(/\/+$/, ""),
       plaza_public: draft.plazaPublic,
       plaza_grid_columns: Number(draft.plazaColumns.value) || 3,
+      recycle_retention_days: Math.min(365, Math.max(0, intOf(draft.recycleRetention))),
       require_login_to_upload: draft.requireLogin,
       register_enabled: draft.registerEnabled,
     },

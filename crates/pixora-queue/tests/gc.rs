@@ -93,7 +93,7 @@ async fn unreferenced_blob_past_grace_period_is_reclaimed() {
     age_blob(&state, blob_id, 3).await;
     assert!(path.exists(), "准备阶段文件应当存在");
 
-    let removed = gc::collect_blobs(&state, 60, 10).await.expect("回收").removed;
+    let removed = gc::collect_blobs(&state, 60, 10, 0).await.expect("回收").removed;
     assert_eq!(removed, 1, "无引用且过期的实体应当被回收");
     assert!(!path.exists(), "物理文件必须被删掉");
     assert!(
@@ -112,7 +112,7 @@ async fn referenced_blob_is_never_deleted() {
     // 加一个引用：这张图还被某个人用着
     state.repo.inc_blob_ref(blob_id).await.unwrap();
 
-    let removed = gc::collect_blobs(&state, 60, 10).await.expect("回收").removed;
+    let removed = gc::collect_blobs(&state, 60, 10, 0).await.expect("回收").removed;
     assert_eq!(removed, 0, "还有引用的实体绝不能被回收");
     assert!(path.exists(), "别人的图不能消失");
     assert_eq!(
@@ -135,7 +135,7 @@ async fn fresh_blob_within_grace_period_is_left_alone() {
     // 刚登记、引用还没建起来：这正是宽限期要保护的时间窗
     let (blob_id, path) = seed_blob(&state, 'c').await;
 
-    let removed = gc::collect_blobs(&state, 60, 10).await.expect("回收").removed;
+    let removed = gc::collect_blobs(&state, 60, 10, 0).await.expect("回收").removed;
     assert_eq!(removed, 0, "宽限期内的实体不动");
     assert!(path.exists());
     assert!(state.repo.find_blob_by_id(blob_id).await.unwrap().is_some());
@@ -152,9 +152,9 @@ async fn batch_limit_is_respected() {
     }
 
     // 单轮只处理 2 个：剩下的留给下一轮，避免一次 GC 把 IO 打满
-    let first = gc::collect_blobs(&state, 60, 2).await.expect("回收").removed;
+    let first = gc::collect_blobs(&state, 60, 2, 0).await.expect("回收").removed;
     assert_eq!(first, 2, "单轮上限要生效");
-    let second = gc::collect_blobs(&state, 60, 2).await.expect("回收").removed;
+    let second = gc::collect_blobs(&state, 60, 2, 0).await.expect("回收").removed;
     assert_eq!(second, 1, "下一轮把剩下的收掉");
     assert_eq!(state.repo.count_blobs().await.unwrap(), 0);
 }
@@ -281,7 +281,7 @@ async fn deleting_a_user_does_not_strand_physical_files() {
 
     // 归零 + 过期 → 回收，物理文件不再滞留
     age_blob(&state, blob_id, 3).await;
-    let removed = gc::collect_blobs(&state, 60, 10).await.unwrap().removed;
+    let removed = gc::collect_blobs(&state, 60, 10, 0).await.unwrap().removed;
     assert_eq!(removed, 1);
     assert!(!path.exists(), "删账号不该把物理文件永久留在盘上");
 }
@@ -375,22 +375,27 @@ async fn deleting_an_album_clears_its_mirror_directory() {
     assert!(view.exists(), "上传进相册后镜像树里应当有链接");
     let album_dir = view.parent().unwrap().to_path_buf();
 
-    // 删相册：图片落到「未分类」，镜像目录与链接都要收掉
-    let detached = state
+    // 删相册 = 相册与其中的图片一起进回收站：镜像目录与链接要收掉，
+    // 但物理文件留着（保留期内要能整份恢复）
+    let moved = state
         .delete_album(&pixora_core::images::Viewer::User(user.clone()), album.id)
         .await
         .unwrap();
-    assert_eq!(detached, 1, "应当解除 1 张图片的关联");
-    assert!(!view.exists(), "删相册后镜像链接不该还在");
+    assert_eq!(moved, 1, "应当带着 1 张图片一起进回收站");
+    assert!(!view.exists(), "进回收站后镜像链接不该还在");
     assert!(
         !album_dir.exists(),
         "空了的相册目录也该收掉，别在磁盘上留空壳"
     );
-    assert!(path.exists(), "物理文件不归删相册管——引用还在（未分类），由 GC 处理");
+    assert!(path.exists(), "物理文件要留着——回收站里能恢复");
     assert_eq!(
         state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
-        1,
-        "图片只是换了归属，引用计数不该变"
+        0,
+        "进回收站的图片引用计数归零（不占配额）"
+    );
+    assert!(
+        state.repo.find_album_by_id(album.id).await.unwrap().is_none(),
+        "回收站里的相册不出现在正常查询里"
     );
 }
 
@@ -510,7 +515,7 @@ async fn soft_deleted_rows_do_not_pin_physical_files() {
     );
 
     age_blob(&state, blob_id, 3).await;
-    let removed = gc::collect_blobs(&state, 10, 10).await.unwrap().removed;
+    let removed = gc::collect_blobs(&state, 10, 10, 0).await.unwrap().removed;
     assert_eq!(removed, 1, "过宽限期后应当回收");
     assert!(!path.exists(), "物理文件要真删掉");
     assert!(
@@ -520,5 +525,142 @@ async fn soft_deleted_rows_do_not_pin_physical_files() {
     assert!(
         state.repo.find_image(image.id).await.unwrap().is_none(),
         "墓碑跟着内容一起消失（没有回收站，留着没有意义）"
+    );
+}
+
+/// 回收站：保留期内文件必须留着（恢复还要用），到期才回收。
+#[tokio::test]
+async fn binned_image_keeps_its_file_until_retention_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+    let user = state
+        .repo
+        .create_user(&pixora_repo::repo::users::NewUser {
+            uid: "3006".to_string(),
+            email: "bin@example.com".to_string(),
+            password_hash: "$argon2id$placeholder".to_string(),
+            role: "user".to_string(),
+            status: "active".to_string(),
+            quota_bytes: 1024 * 1024,
+            email_verified: true,
+        })
+        .await
+        .unwrap();
+    let (blob_id, path) = seed_blob(&state, 'r').await;
+    let image = state
+        .repo
+        .create_image_reference(
+            &pixora_repo::repo::images::NewImage {
+                owner_id: user.id,
+                album_id: None,
+                blob_id,
+                thumb_blob_id: None,
+                original_name: "binned.png".to_string(),
+                title: None,
+                visibility: "private".to_string(),
+            },
+            21,
+            &[],
+        )
+        .await
+        .unwrap();
+
+    // 删除：进回收站（软删），引用计数归零
+    state
+        .delete_image(&pixora_core::images::Viewer::User(user.clone()), image.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
+        0
+    );
+
+    // 保留 30 天：还没到期，文件与实体都不该被收走——收走了就恢复不出来
+    age_blob(&state, blob_id, 3).await;
+    let removed = gc::collect_blobs(&state, 5, 10, 30).await.unwrap().removed;
+    assert_eq!(removed, 0, "保留期内的回收站内容不该被回收");
+    assert!(path.exists(), "文件要留着给恢复用");
+    assert!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().is_some(),
+        "实体行也要留着"
+    );
+
+    // 把墓碑时间推到 31 天前：过期了，这一轮应当回收
+    state
+        .repo
+        .db()
+        .execute(
+            "UPDATE images SET deleted_at = ? WHERE id = ?",
+            Args::new()
+                .text(ts(Utc::now() - Duration::days(31)))
+                .int(image.id),
+        )
+        .await
+        .unwrap();
+    let removed = gc::collect_blobs(&state, 5, 10, 30).await.unwrap().removed;
+    assert_eq!(removed, 1, "过了保留期应当回收");
+    assert!(!path.exists(), "过期后物理文件要真删掉");
+    assert!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().is_none(),
+        "实体行也要删掉"
+    );
+}
+
+/// 相册进回收站：相册与图片一起进去，恢复时整份回来。
+#[tokio::test]
+async fn album_bin_and_restore_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+    let (user, album, blob_id, path, _view) = seed_album_image(&state, 's', "3007").await;
+    let image = state.repo.list_album_live_images(album.id).await.unwrap();
+    assert_eq!(image.len(), 1);
+
+    let before_used = state.repo.find_user_by_id(user.id).await.unwrap().unwrap().used_bytes;
+
+    // 删相册 → 进回收站
+    let moved = state
+        .delete_album(&pixora_core::images::Viewer::User(user.clone()), album.id)
+        .await
+        .unwrap();
+    assert_eq!(moved, 1, "应当带着 1 张图一起进去");
+    assert!(
+        state.repo.find_album_by_id(album.id).await.unwrap().is_none(),
+        "回收站里的相册不出现在正常查询里"
+    );
+    assert_eq!(
+        state.repo.count_deleted_albums(user.id).await.unwrap(),
+        1,
+        "回收站里应当有 1 个相册"
+    );
+    assert_eq!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
+        0,
+        "图片跟着进回收站，引用计数归零"
+    );
+    let after_delete_used = state.repo.find_user_by_id(user.id).await.unwrap().unwrap().used_bytes;
+    assert!(after_delete_used < before_used, "用量要回退");
+    assert!(path.exists(), "文件留着（保留期内要能恢复）");
+
+    // 恢复：相册与图片一起回来
+    let restored = state
+        .restore_album(&pixora_core::images::Viewer::User(user.clone()), album.id)
+        .await
+        .unwrap();
+    assert_eq!(restored, 1, "应当带回 1 张图");
+    assert!(
+        state.repo.find_album_by_id(album.id).await.unwrap().is_some(),
+        "相册回到正常列表"
+    );
+    assert_eq!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
+        1,
+        "引用计数回到 1"
+    );
+    let after_restore_used = state.repo.find_user_by_id(user.id).await.unwrap().unwrap().used_bytes;
+    assert_eq!(after_restore_used, before_used, "用量回到删除前");
+    assert_eq!(
+        state.repo.list_album_live_images(album.id).await.unwrap().len(),
+        1,
+        "图片回到相册里"
     );
 }

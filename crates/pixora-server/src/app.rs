@@ -105,6 +105,17 @@ fn api_routes() -> Router<Arc<AppState>> {
                 .delete(r::catalog::image_delete),
         )
         .route("/images/batch", post(r::catalog::images_batch))
+        // ---------- 回收站 ----------
+        .route("/recycle/images", get(r::recycle::images_list))
+        .route("/recycle/images/restore", post(r::recycle::images_restore))
+        .route("/recycle/images/purge", post(r::recycle::images_purge))
+        .route("/recycle/images/empty", post(r::recycle::images_empty))
+        .route("/recycle/albums", get(r::recycle::albums_list))
+        .route(
+            "/recycle/albums/{id}/restore",
+            post(r::recycle::album_restore),
+        )
+        .route("/recycle/albums/{id}", delete(r::recycle::album_purge))
         .route(
             "/tags",
             get(r::catalog::tags_list).patch(r::catalog::tags_patch),

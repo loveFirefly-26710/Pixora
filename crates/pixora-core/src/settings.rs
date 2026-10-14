@@ -58,6 +58,8 @@ pub mod keys {
     pub const ANTISPAM_MX: &str = "antispam.mx_check";
     pub const ANTISPAM_THIRD_PARTY: &str = "antispam.third_party_key";
     pub const APPEARANCE_BACKGROUND: &str = "appearance.background";
+    /// 回收站保留天数。0 = 关闭回收站（删除即彻底删）
+    pub const RECYCLE_RETENTION_DAYS: &str = "recycle.retention_days";
 }
 
 /// 默认值。设计稿里写死的那些数字都在这里。
@@ -84,6 +86,10 @@ pub mod defaults {
     pub const IP_FAIL_THRESHOLD: i64 = 20;
     pub const IP_BAN_MINUTES: i64 = 30;
     pub const UPLOAD_PREFIX: &str = "images";
+    /// 回收站默认保留 30 天。够把「手滑删了」捞回来，又不至于让磁盘长期背着。
+    pub const RECYCLE_RETENTION_DAYS: i64 = 30;
+    /// 保留天数的上限：365 天（一年）。再长不如关掉回收站。
+    pub const RECYCLE_RETENTION_MAX: i64 = 365;
     /// 广场网格默认 3 列：比设计稿的 4/5 列大一圈，预览更清楚
     pub const GRID_COLUMNS: i64 = 3;
     /// 网格列数的可配置范围。少于 2 列不成网格，多于 6 列缩略图就糊了
@@ -335,6 +341,17 @@ impl Settings {
         }
         let value = self.integer(keys::CAPACITY_MANUAL_TOTAL, 0).await?;
         Ok(if value > 0 { Some(value) } else { None })
+    }
+
+    /// 回收站保留天数。0 表示关闭回收站（删除即彻底删除）。
+    pub async fn retention_days(&self) -> Result<i64> {
+        let raw = self
+            .integer(
+                keys::RECYCLE_RETENTION_DAYS,
+                defaults::RECYCLE_RETENTION_DAYS,
+            )
+            .await?;
+        Ok(raw.clamp(0, defaults::RECYCLE_RETENTION_MAX))
     }
 
     pub async fn capacity_mode(&self) -> Result<String> {

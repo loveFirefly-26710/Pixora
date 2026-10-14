@@ -362,24 +362,45 @@ try {
 
     Step "可见性、批量与删除"
     Api PATCH "/api/v1/images/$imageId" @("-H", "Content-Type: application/json",
-        "-d", (JsonBody "private" @{ visibility = "private" })) | Out-Null
+        "-d", (JsonBody "visprivate" @{ visibility = "private" })) | Out-Null
     ExpectStatus "$script:Base$urlPath" 404 "全部引用转私有后直链返回 404"
 
     Api PATCH "/api/v1/images/$imageId" @("-H", "Content-Type: application/json",
-        "-d", (JsonBody "public" @{ visibility = "public" })) | Out-Null
+        "-d", (JsonBody "vispublic" @{ visibility = "public" })) | Out-Null
     ExpectStatus "$script:Base$urlPath" 200 "恢复公开后直链可用"
 
     $batch = Api POST "/api/v1/images/batch" @("-H", "Content-Type: application/json",
-        "-d", (JsonBody "batch" @{ action = "tag"; ids = @($imageId, $imageId2); tags = @("风景") }))
+        "-d", (JsonBody "batchtag" @{ action = "tag"; ids = @($imageId, $imageId2); tags = @("风景") }))
     ExpectJson $batch { $d.data.affected -eq 2 } "批量改标签"
 
     Api DELETE "/api/v1/images/$imageId2" | Out-Null
     $left = @(Get-ChildItem -Recurse -File (Join-Path $dataDir "blobs")).Count
     if ($left -ne 1) { Fail "删掉一条引用后物理文件不该消失（实际 $left）" }
-    Ok "删掉一条引用后物理文件保留（还有另一条引用）"
+    Ok "删掉一条引用后物理文件保留（还有另一条引用，回收站也留着它）"
 
     Api DELETE "/api/v1/images/$imageId" | Out-Null
     ExpectStatus "$script:Base$urlPath" 404 "全部引用删除后直链返回 404"
+
+    # 回收站：删掉的图先到这里；恢复之后回到相册；彻底删除之后才真没了
+    $bin = Api GET "/api/v1/recycle/images"
+    ExpectJson $bin { $d.meta.total -eq 2 } "两张删掉的图都在回收站里"
+    ExpectJson $bin { $d.data[0].size -gt 0 } "回收站列表带完整字段"
+
+    $restoreOne = Api POST "/api/v1/recycle/images/restore" @("-H", "Content-Type: application/json",
+        "-d", (JsonBody "binrestore" @{ ids = @($imageId) }))
+    ExpectJson $restoreOne { $d.data.restored -eq 1 } "从回收站恢复 1 张"
+    $alive = Api GET "/api/v1/images?album_id=$albumId"
+    ExpectJson $alive { $d.meta.total -eq 1 } "恢复之后图片回到相册里"
+    ExpectStatus "$script:Base$urlPath" 200 "恢复之后直链又能访问"
+
+    Api DELETE "/api/v1/images/$imageId" | Out-Null
+    $purged = Api POST "/api/v1/recycle/images/purge" @("-H", "Content-Type: application/json",
+        "-d", (JsonBody "binpurge" @{ ids = @($imageId) }))
+    ExpectJson $purged { $d.data.purged -eq 1 } "彻底删除 1 张"
+    $gone = Api GET "/api/v1/images/$imageId"
+    ExpectJson $gone { $d.error.code -eq "NOT_FOUND" } "彻底删除之后查不到这张图"
+    $binOne = Api GET "/api/v1/recycle/images"
+    ExpectJson $binOne { $d.meta.total -eq 1 } "回收站里只剩另一张"
 
     # 删光之后重传同一张图：预检报「不存在」，上传把图带回来
     $remiss = Api POST "/api/v1/blobs/exists" @("-H", "Content-Type: application/json",
@@ -393,24 +414,40 @@ try {
     if ($reuploadId -eq $imageId) { Fail "重传应当是新的图片记录" }
     Ok "删光后重传真的把图带回来了"
 
-    # 删相册：镜像目录收掉，图片落到未分类
+    # 删相册 = 相册连图一起进回收站：镜像目录收掉，但整份可以恢复
     $albumDir = Get-ChildItem (Join-Path $dataDir "users") -Recurse -Directory -Filter "旅行*" |
         Select-Object -First 1
     if (-not $albumDir) { Fail "镜像树里没有相册目录" }
     Api DELETE "/api/v1/albums/$albumId" | Out-Null
-    if (Test-Path $albumDir.FullName) { Fail "删相册后目录还在：$($albumDir.FullName)" }
+    if (Test-Path $albumDir.FullName) { Fail "进回收站后镜像目录还在：$($albumDir.FullName)" }
     Ok "删相册后镜像目录已收掉"
-    $imagesLeft = Api GET "/api/v1/images"
-    ExpectJson $imagesLeft { $d.meta.total -eq 1 } "相册里的图落到未分类，没有被删"
+    $liveAfter = Api GET "/api/v1/images"
+    ExpectJson $liveAfter { $d.meta.total -eq 0 } "相册里的图跟着进了回收站，不在正常列表里"
+    $binAlbums = Api GET "/api/v1/recycle/albums"
+    ExpectJson $binAlbums { @($d.data.albums).Count -eq 1 } "回收站里能看到这个相册"
 
-    # 收尾：把重传的那张也删掉，文末「引用计数归零」才是此刻的事实
-    Api DELETE "/api/v1/images/$reuploadId" | Out-Null
+    $restoreAlbum = Api POST "/api/v1/recycle/albums/$albumId/restore"
+    ExpectJson $restoreAlbum { $d.data.restored_images -eq 1 } "恢复相册把图一起带回来"
+    $liveBack = Api GET "/api/v1/images?album_id=$albumId"
+    ExpectJson $liveBack { $d.meta.total -eq 1 } "图片回到相册里"
+    if (-not (Test-Path $albumDir.FullName)) { Fail "恢复之后镜像目录应当重新出现" }
+    Ok "恢复之后镜像目录也回来了"
 
-    # 引用归零 ≠ 立刻回收。物理文件由后台 GC 在宽限期（默认 60 分钟）之后删，
-    # 这个窗口是为了避开「先登记实体、再建引用」之间的时间差。
-    # 回收行为本身由 crates/pixora-queue/tests/gc.rs 覆盖（含「还有引用时绝不删」）。
+    # 再删一次、这次彻底删除
+    Api DELETE "/api/v1/albums/$albumId" | Out-Null
+    $purgeAlbum = Api DELETE "/api/v1/recycle/albums/$albumId"
+    ExpectJson $purgeAlbum { $d.data.purged_images -eq 1 } "彻底删除相册带走了 1 张图"
+    $binFinal = Api GET "/api/v1/recycle/images"
+    ExpectJson $binFinal { $d.meta.total -eq 1 } "回收站里只剩早先那张（未随相册删除）"
+    $emptyBin = Api POST "/api/v1/recycle/images/empty"
+    ExpectJson $emptyBin { $d.data.purged -eq 1 } "清空回收站"
+    $binEmpty = Api GET "/api/v1/recycle/images"
+    ExpectJson $binEmpty { $d.meta.total -eq 0 } "回收站已经空了"
+
+    # 引用归零 ≠ 立刻回收：物理文件由后台 GC 在宽限期之后删，回收行为由
+    # crates/pixora-queue/tests/gc.rs 覆盖（含「回收站保留期内绝不删」）。
     $stillThere = @(Get-ChildItem -Recurse -File (Join-Path $dataDir "blobs")).Count
-    if ($stillThere -ne 1) { Fail "引用归零后物理文件应当留到 GC 再删（实际 $stillThere 个）" }
+    if ($stillThere -lt 1) { Fail "宽限期内物理文件不该被删（实际 $stillThere 个）" }
     Ok "引用归零，物理文件留待后台 GC 回收"
 
     Step "管理后台"
