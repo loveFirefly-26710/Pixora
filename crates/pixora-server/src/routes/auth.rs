@@ -20,8 +20,8 @@ use axum::Json;
 use pixora_core::{AppError, AppState};
 
 use crate::http::{
-    api_token, clear_cookies, error_response, finish, request_context, session_cookie,
-    session_cookies, with_cookies,
+    api_token, clear_cookies, clear_impersonator_cookie, error_response, finish, merge_cookies,
+    request_context, session_cookie, session_cookies, with_cookies,
 };
 
 use super::{bad_request, field_opt_str, field_str, PeerAddr};
@@ -124,6 +124,7 @@ pub async fn login(
             totp.as_deref(),
             recovery.as_deref(),
             &rectx.device(),
+            remember,
         )
         .await
     {
@@ -139,6 +140,7 @@ pub async fn login(
                 &state,
                 &issued.user,
                 Some(issued.csrf_token.clone()),
+                None,
             )
             .await
             {
@@ -189,9 +191,13 @@ pub async fn logout(
             }
         }
     }
+    // 「切回管理员」的 Cookie 也要一起清掉：它本身就是一个会话凭据，
+    // 登出后留着等于留着别人的登录状态。合并用 merge_cookies——
+    // HeaderMap::extend 会把同名的 Set-Cookie 替换掉
+    let cookies = merge_cookies(clear_cookies(&state), clear_impersonator_cookie(&state));
     with_cookies(
         finish::<serde_json::Value>(Ok(serde_json::json!({ "ok": true }))),
-        clear_cookies(&state),
+        cookies,
     )
 }
 

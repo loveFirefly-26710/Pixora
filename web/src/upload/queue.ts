@@ -14,7 +14,7 @@
  */
 
 import { ApiError, request } from "../core/api";
-import { extOf } from "../core/format";
+import { extOf, normalizeExt } from "../core/format";
 import { getState } from "../core/state";
 import {
   loadUploadSettings,
@@ -104,7 +104,8 @@ const MAX_RETRIES = 3;
  * 网络类失败按 8 次、退避到 8 秒封顶，总共能等半分钟左右。
  */
 const MAX_NETWORK_RETRIES = 8;
-/** 预检一批最多发多少个哈希。契约上限 1000，留出余量防止哈希串太长。 */
+/** 预检一批最多发多少个哈希。契约上限 1000，留出余量防止哈希串太长；
+ *  实际分块还受「单批次最大张数」约束，取两者的小值。 */
 const PREFLIGHT_BATCH = 400;
 /** Worker 单任务超时：超过就认定 Worker 坏了，terminate 后走降级路径。 */
 const WORKER_TIMEOUT = 30_000;
@@ -342,15 +343,48 @@ function createId(index: number): string {
  *  登录后以「我的生效策略」为准——管理员可以按用户单独放宽或收紧格式白名单。 */
 function isLikelyImage(file: File): boolean {
   const formats = getState().user?.limits?.formats ?? getState().site?.formats ?? [];
-  const ext = extOf(file.name);
-  if (formats.length > 0) return formats.includes(ext);
+  // 两边都归一：服务端给的白名单只有 jpg / tiff / heic 这几个名字，
+  // 用户文件却常见 .jpeg / .tif / .heif。不归一的话这些文件会被当成
+  // 「非图片」直接丢掉，而服务端其实完全收得下
+  const ext = normalizeExt(extOf(file.name));
+  if (formats.length > 0) return formats.map(normalizeExt).includes(ext);
   if (file.type.startsWith("image/")) return true;
-  return ["jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif", "tiff", "tif", "bmp", "svg"].includes(ext);
+  return ["jpg", "png", "gif", "webp", "avif", "heic", "tiff", "bmp", "svg"].includes(ext);
 }
 
-/** 单批张数上限：登录后按我的生效策略（可能被按用户覆盖），没登录回落到站点全局值。 */
+/**
+ * 单批次最大张数：一次选择最多收多少张。
+ *
+ * 与「队列深度阈值」不是一回事：队列深度管的是「浏览器里同时堆着多少
+ * 待传项」，单批张数管的是「这一次选择收多少」。一次选择（选文件、拖文件夹）
+ * 就是一批，超出的部分不加入，得再选一次。
+ *
+ * 服务端也在同一处卡：批量预检一次收的哈希数超过它就直接 400，
+ * 因为上传是逐张发的，预检是唯一能按批拦住的地方。
+ * 登录后按我的生效策略（可能被按用户覆盖），没登录回落到站点全局值。
+ * 0 表示不限。
+ */
 function effectiveBatchLimit(): number {
-  return getState().user?.limits?.max_batch_size ?? getState().site?.max_batch_size ?? 1000;
+  const value =
+    getState().user?.limits?.max_batch_size ?? getState().site?.max_batch_size ?? 1000;
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
+
+/**
+ * 队列深度阈值：队列里最多堆多少张。
+ *
+ * 服务端用同一个值卡两处：在途任务满了就回 429，预检一次收的哈希数超了
+ * 就回 400。所以本地队列也必须按它限长，不然会出现「本地排了 900 张、
+ * 第一张预检就被服务端拒掉」的错位——用户看到的是「上传失败」，
+ * 而不是「你一次选太多了」。
+ * 0 表示不限。
+ */
+function effectiveQueueDepth(): number {
+  const value =
+    getState().user?.limits?.queue_depth ?? getState().site?.queue_depth ?? 0;
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
 }
 
 /** 单用户并发上限：策略里的值，客户端选的并发数不能超过它。 */
@@ -484,6 +518,34 @@ class UploadQueue {
       return 0;
     }
 
+    // 单批次最大张数：一次选择收多少张。先按它截断，再按队列容量截断——
+    // 两个上限管的是不同的事，谁先谁后只影响提示语里报哪个数
+    const batchLimit = effectiveBatchLimit();
+    let overBatch = 0;
+    if (batchLimit > 0 && accepted.length > batchLimit) {
+      overBatch = accepted.length - batchLimit;
+      accepted.length = batchLimit;
+    }
+
+    // 队列深度阈值：算这一批能进来多少张，超出部分直接不收。
+    // 不截断的话，浏览器会老老实实排 900 张，然后第一张预检就被服务端拒掉——
+    // 用户看到的是「上传失败」，而不是「你一次选太多了」
+    const depth = effectiveQueueDepth();
+    let skipped = 0;
+    if (depth > 0 && this.items.length + accepted.length > depth) {
+      const room = Math.max(0, depth - this.items.length);
+      skipped = accepted.length - room;
+      accepted.length = room;
+      if (accepted.length === 0) {
+        this.emit({
+          kind: "notice",
+          tone: "warn",
+          text: `队列里已经有 ${this.items.length} 张（上限 ${depth} 张），先传完或清空再加新的。`,
+        });
+        return 0;
+      }
+    }
+
     for (const entry of accepted) {
       this.seq += 1;
       const file = entry.file;
@@ -513,12 +575,22 @@ class UploadQueue {
       });
     }
 
-    const limit = effectiveBatchLimit();
-    if (this.items.length > limit) {
+    if (overBatch > 0) {
       this.emit({
         kind: "notice",
         tone: "warn",
-        text: `队列已有 ${this.items.length} 张，超过单批上限 ${limit} 张，建议分批上传。`,
+        text:
+          `单批次最多 ${batchLimit} 张，这次多选的 ${overBatch} 张没有加入。` +
+          "再选一次就能接着传剩下的。",
+      });
+    }
+    if (skipped > 0) {
+      this.emit({
+        kind: "notice",
+        tone: "warn",
+        text:
+          `队列上限是 ${depth} 张（队列深度阈值），超出的 ${skipped} 张没有加入。` +
+          "先传完这一批，再继续选剩下的文件。",
       });
     }
     if (rejected > 0) {
@@ -798,8 +870,12 @@ class UploadQueue {
     this.preflightBusy = true;
     try {
       const hashes = [...new Set(candidates.map((item) => item.sha256!))];
+      // 分块大小不能超过服务端的单批上限：一次预检请求就是服务端眼里的「一批」，
+      // 切得比它大就会被 400 挡回来
+      const batchLimit = effectiveBatchLimit();
+      const chunkSize = batchLimit > 0 ? Math.min(PREFLIGHT_BATCH, batchLimit) : PREFLIGHT_BATCH;
       const exist = new Set<string>();
-      for (const batch of chunk(hashes, PREFLIGHT_BATCH)) {
+      for (const batch of chunk(hashes, chunkSize)) {
         const result = await request<HashCheck>("/blobs/exists", {
           json: { hashes: batch },
         });

@@ -41,6 +41,12 @@ pub enum AppError {
     },
     UnsupportedFormat(String),
     InvalidImage(String),
+    /// 内容审核判为违规，上传被拦下
+    ContentRejected {
+        label: String,
+        score: f64,
+        provider: String,
+    },
     RateLimited {
         retry_after: u64,
         detail: String,
@@ -83,6 +89,7 @@ impl AppError {
             AppError::FileTooLarge { .. } => "FILE_TOO_LARGE",
             AppError::UnsupportedFormat(_) => "UNSUPPORTED_FORMAT",
             AppError::InvalidImage(_) => "INVALID_IMAGE",
+            AppError::ContentRejected { .. } => "CONTENT_REJECTED",
             AppError::RateLimited { .. } => "RATE_LIMITED",
             AppError::QueueFull { .. } => "QUEUE_FULL",
             AppError::TermsRequired => "TERMS_REQUIRED",
@@ -120,6 +127,9 @@ impl AppError {
             AppError::QuotaExceeded { .. } | AppError::FileTooLarge { .. } => 413,
             AppError::UnsupportedFormat(_) => 415,
             AppError::InvalidImage(_) => 422,
+            // 违规内容不是「请求格式不对」而是「内容不行」，422 比 400 更贴切，
+            // 客户端能靠 code 区分出「被审核拦下」并给出对应文案
+            AppError::ContentRejected { .. } => 422,
             AppError::RateLimited { .. } | AppError::QueueFull { .. } => 429,
             AppError::TermsRequired => 451,
             AppError::StorageUnavailable(_) => 503,
@@ -169,6 +179,10 @@ impl AppError {
             }
             AppError::UnsupportedFormat(ext) => format!("不支持的图片格式：{ext}"),
             AppError::InvalidImage(detail) => format!("文件不是有效的图片：{detail}"),
+            AppError::ContentRejected { label, score, .. } => format!(
+                "图片未通过内容审核（{label}，{} 分）。请勿上传违规内容，多次违规会被暂停使用。",
+                score.round() as i64
+            ),
             AppError::RateLimited { detail, .. } => {
                 if detail.is_empty() {
                     "请求过于频繁，请稍后重试".into()

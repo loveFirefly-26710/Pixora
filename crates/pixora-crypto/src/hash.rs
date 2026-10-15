@@ -59,3 +59,10 @@ pub fn hmac_sha1(key: &[u8], message: &[u8]) -> [u8; 20] {
     mac.update(message);
     mac.finalize().into_bytes().into()
 }
+
+/// HMAC-SHA256。腾讯云的 TC3 签名用它。
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC 接受任意长度密钥");
+    mac.update(message);
+    mac.finalize().into_bytes().into()
+}

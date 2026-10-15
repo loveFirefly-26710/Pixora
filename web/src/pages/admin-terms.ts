@@ -41,14 +41,18 @@ import {
 interface AdminTermsRow extends TermsVersion {
   updated_at?: string | null;
   require_reconsent?: boolean;
+  /* 正文来自 TermsVersion.body：服务端的列表接口现在会带上它，
+     编辑区不再出现「保存一次就被刷空」的假象 */
 }
 
 /** 页面状态：列表 + 当前编辑目标。 */
 interface State {
   rows: AdminTermsRow[];
-  /** 正在编辑的版本 id；null 表示新增 */
+  /** 正在编辑的版本 id；null 表示新增或「从某版修订」 */
   editingId: number | null;
   editing: AdminTermsRow | null;
+  /** 点「修订出新版本」时的源版本：正文与摘要从它抄，版本号自动 +1 */
+  revisingFrom: AdminTermsRow | null;
 }
 
 /** 三个重画入口，避免把「谁刷新谁」写成一串参数。 */
@@ -115,6 +119,18 @@ function consentText(row: AdminTermsRow): string {
   return `同意 ${formatNumber(row.consent_count)} / 共 ${formatNumber(row.user_total)}`;
 }
 
+/**
+ * 版本号 +1：`v2.1` → `v2.2`，`2.9` → `2.10`。
+ *
+ * 只在结尾是数字时递增（多段版本号按最后一段加一）；解析不出来就原样返回，
+ * 让管理员自己写。
+ */
+function bumpVersion(version: string): string {
+  const match = /^(.*?)([0-9]+)$/.exec(version.trim());
+  if (!match) return version;
+  return `${match[1]}${Number(match[2]) + 1}`;
+}
+
 /** 下一个版本号的建议值：v2.1 → v2.2；解析不出来就不猜。 */
 function suggestVersion(rows: AdminTermsRow[]): string {
   for (const row of rows) {
@@ -132,7 +148,7 @@ export async function render(ctx: PageContext): Promise<void> {
 
   try {
     const rows = await request<AdminTermsRow[]>("/admin/terms");
-    const state: State = { rows, editingId: null, editing: null };
+    const state: State = { rows, editingId: null, editing: null, revisingFrom: null };
     // 默认对着最新一个草稿，没有草稿就是新增态
     const draft = rows.find((row) => statusOf(row) === "draft");
     if (draft) {
@@ -163,6 +179,7 @@ function paintPage(root: HTMLElement, state: State): void {
   addBtn.addEventListener("click", () => {
     state.editing = null;
     state.editingId = null;
+    state.revisingFrom = null;
     view.editor();
   });
 
@@ -218,12 +235,12 @@ function paintPage(root: HTMLElement, state: State): void {
       qtip(
         "err",
         "删除限制",
-        "当前生效中的版本不能直接删除，必须先把另一个版本设为生效。删除只是归档隐藏，用户已有的同意记录会保留，便于日后追溯。",
+        "当前生效中的版本不能直接删除，必须先把另一个版本设为生效。删除是真删：这一版连同它的同意记录一起从库里消失，删掉的同意记录条数会写进审计日志。",
       ),
     ),
     note(
       "w",
-      "条款存数据库这张表里：版本号、生效日期、正文、状态、更新摘要，外加一张同意记录表存「谁在什么时候同意了哪个版本、来自哪个 IP」。同意记录不随条款删除而消失。",
+      "条款存数据库这张表里：版本号、生效日期、正文、状态、更新摘要，外加一张同意记录表存「谁在什么时候同意了哪个版本、来自哪个 IP」。同意记录挂在版本行上：版本删掉，记录也跟着删。",
     ),
   );
 }
@@ -269,6 +286,7 @@ function rowNodes(view: View, row: AdminTermsRow): HTMLElement {
         click: () => {
           view.state.editing = row;
           view.state.editingId = row.id;
+          view.state.revisingFrom = null;
           view.editor();
         },
       },
@@ -284,11 +302,22 @@ function rowNodes(view: View, row: AdminTermsRow): HTMLElement {
   });
 
   if (status === "active") {
-    actions.append(editBtn("编辑"), previewBtn("预览"), deleteButton(view, row, true));
+    // 生效中的版本不能就地改：点「修订」等于把正文抄成一份新草稿，版本号自动 +1
+    actions.append(
+      reviseButton(view, row),
+      previewBtn("预览"),
+      deleteButton(view, row, true),
+    );
   } else if (status === "draft") {
     actions.append(editBtn("继续编辑"), publishBtn, deleteButton(view, row, false));
   } else {
-    actions.append(previewBtn("查看"), hitEffectiveButton(view, row), deleteButton(view, row, false));
+    // 历史版本可以就地修订（它不生效，改它不影响任何人的同意记录）
+    actions.append(
+      editBtn("修订"),
+      previewBtn("查看"),
+      hitEffectiveButton(view, row),
+      deleteButton(view, row, false),
+    );
   }
 
   return h(
@@ -302,6 +331,28 @@ function rowNodes(view: View, row: AdminTermsRow): HTMLElement {
     h("td", { "data-label": "更新时间" }, txt(formatDateTime(row.updated_at ?? row.published_at ?? null))),
     h("td", { "data-label": "操作" }, actions),
   );
+}
+
+/**
+ * 从这一版修订出新草稿。
+ *
+ * 生效中的版本不能就地改（改了之后「用户同意的是哪一份」就说不清了），
+ * 所以「改条款」在这条路上就是：抄一份正文 → 版本号 +1 → 落成草稿 → 由管理员改完再发布。
+ * 直接从这里开始，比让管理员自己「新建 + 手抄正文 + 手动改版本号」少三步错。
+ */
+function reviseButton(view: View, row: AdminTermsRow): HTMLButtonElement {
+  return h("button.btn.sm", {
+    type: "button",
+    text: "修订出新版本",
+    on: {
+      click: () => {
+        view.state.revisingFrom = row;
+        view.state.editing = null;
+        view.state.editingId = null;
+        view.editor();
+      },
+    },
+  });
 }
 
 /** 把已归档的版本重新设为生效。 */
@@ -336,9 +387,12 @@ function deleteButton(view: View, row: AdminTermsRow, looksDisabled: boolean): H
   });
   button.addEventListener("click", async () => {
     if (!looksDisabled) {
+      const consented = (row.consent_count ?? 0) > 0;
       const ok = await confirmDialog({
         title: `删除 ${row.version}`,
-        message: "删除只是归档隐藏，用户已有的同意记录会保留，便于日后追溯。",
+        message: consented
+          ? `这一版会从数据库里真正删掉，连同 ${formatNumber(row.consent_count ?? 0)} 条用户同意记录。删除后无法恢复，也不能再追溯「谁同意过这一版」。`
+          : "这一版会从数据库里真正删掉，无法恢复。",
         confirmText: "删除",
         danger: true,
       });
@@ -404,9 +458,7 @@ function openPreview(row: AdminTermsRow): void {
   const body = h("div", {
     style: { whiteSpace: "pre-wrap", fontSize: "12.5px", lineHeight: "1.95", color: "#4b5563" },
   });
-  body.textContent = row.body
-    ? row.body
-    : "列表接口没有带正文，请在编辑区查看或修改。";
+  body.textContent = row.body || "这个版本的正文是空的。";
   handle = openModal({
     title: `${row.version} · ${row.status_label || STATUS_TEXT[statusOf(row)] || ""}`,
     reading: true,
@@ -426,9 +478,19 @@ function openPreview(row: AdminTermsRow): void {
 function editorCard(view: View): HTMLElement {
   const state = view.state;
   const target = state.editing;
+  const source = state.revisingFrom;
   const isDraft = target !== null && statusOf(target) === "draft";
+  // 修订态：正文/标题/摘要从源版本抄过来，版本号在它的基础上 +1
+  const seedBody = target?.body ?? source?.body ?? "";
+  const seedTitle = target?.title ?? source?.title ?? "服务条款";
   const controls = {
-    version: textInput({ value: target?.version ?? suggestVersion(state.rows), placeholder: "v2.2", mono: true }),
+    version: textInput({
+      value:
+        target?.version ??
+        (source ? bumpVersion(source.version) : suggestVersion(state.rows)),
+      placeholder: "v2.2",
+      mono: true,
+    }),
     effective: textInput({ type: "datetime-local", value: target?.effective_at ? toLocalInput(target.effective_at) : "" }),
     status: select(
       [
@@ -439,15 +501,17 @@ function editorCard(view: View): HTMLElement {
       "draft",
     ),
     summary: textInput({ value: target?.summary ?? "", placeholder: "新增第七条：账号申诉流程说明" }),
-    body: textarea({ value: target?.body ?? "", rows: 9, placeholder: "一、服务说明\n……" }),
+    body: textarea({ value: seedBody, rows: 9, placeholder: "一、服务说明\n……" }),
     reconsent: { value: Boolean(target?.require_reconsent) },
   };
 
   const result = h("div", { style: { marginTop: "8px" } });
-  const saveBtn = h("button.btn", {
-    type: "button",
-    text: isDraft || target === null ? "保存草稿" : "另存为新草稿",
-  });
+  const saveText = (): string => {
+    if (source) return "保存为新草稿";
+    if (isDraft) return "保存草稿";
+    return target === null ? "保存草稿" : "另存为新草稿";
+  };
+  const saveBtn = h("button.btn", { type: "button", text: saveText() });
   const publishBtn = h("button.btn.pri", { type: "button", text: "发布并生效" });
   const previewBtn = h("button.btn", { type: "button", text: "预览用户视角" });
 
@@ -496,7 +560,7 @@ function editorCard(view: View): HTMLElement {
     const effectiveAt = mode === "scheduled" ? fromLocalInput(controls.effective.value) : null;
     const payload = {
       version,
-      title: target?.title ?? "服务条款",
+      title: seedTitle,
       body: controls.body.value,
       summary: controls.summary.value.trim() || null,
       status: "draft",
@@ -510,27 +574,30 @@ function editorCard(view: View): HTMLElement {
     try {
       let id: number;
       if (isDraft && target) {
+        // 草稿就地改
         await request(`/admin/terms/${target.id}`, { method: "PATCH", json: payload });
         id = target.id;
       } else {
-        // 后端只让改草稿：非草稿目标一律另存为新草稿，原版本不动
+        // 其余情况一律新建：生效中的版本不能就地改（历史版本可以就地改，
+        // 那种情况走的是上面的 PATCH 分支——「修订出新版本」本来就走新建）
         const created = await request<AdminTermsRow>("/admin/terms", { method: "POST", json: payload });
         id = created?.id ?? 0;
         if (!id) throw new Error("服务端没有返回新版本 id");
         state.editingId = id;
+        state.revisingFrom = null;
       }
 
       if (thenPublish) {
         await request(`/admin/terms/${id}/publish`, { method: "POST" });
         toastOk(`${version} 已生效`);
       } else {
-        toastOk(isDraft ? "草稿已保存" : `已另存为草稿 ${version}`);
+        toastOk(isDraft ? "草稿已保存" : `已保存为草稿 ${version}`);
       }
       await refetch(view);
     } catch (err) {
       saveBtn.disabled = false;
       publishBtn.disabled = false;
-      saveBtn.textContent = isDraft || target === null ? "保存草稿" : "另存为新草稿";
+      saveBtn.textContent = saveText();
       const message = err instanceof ApiError ? err.message : String(err);
       const detail = err instanceof ApiError ? err.detail : null;
       mount(result, qtip("err", "没保存成功", detail ? `${message}（${detail}）` : message));
@@ -558,19 +625,22 @@ function editorCard(view: View): HTMLElement {
     await submit(true);
   });
 
-  const hint = isDraft
-    ? `正在编辑 ${target?.version}（草稿）`
-    : target
-      ? `正在编辑 ${target.version}（${target.status_label || STATUS_TEXT[statusOf(target)]}）：生效中的版本不能就地改，保存会另存为新草稿`
-      : "新建条款：先落成草稿，确认无误再发布";
+  const targetIsActive = target !== null && statusOf(target) === "active";
+  const hint = source
+    ? `从 ${source.version} 修订出新版本（${controls.version.value}）：正文已抄好，改完保存成草稿再发布`
+    : isDraft
+      ? `正在编辑 ${target?.version}（草稿）`
+      : target
+        ? `正在编辑 ${target.version}（${target.status_label || STATUS_TEXT[statusOf(target)]}）`
+        : "新建条款：先落成草稿，确认无误再发布";
 
   return cardNode(
     cardHead("编辑条款", h("small", { text: hint })),
-    !isDraft && target
+    targetIsActive
       ? qtip(
           "warn",
-          "这一版不能就地修改",
-          "后端只允许改草稿：保存时会新建一个草稿版本，原版本保持原样；发布新草稿后才会替换它。",
+          "生效中的版本不能就地修改",
+          "保存会另存为一个新草稿（原版本原样保留）：用户已经同意过的文本不能事后被改写。改完点「发布并生效」才会替换它。",
         )
       : null,
     h(

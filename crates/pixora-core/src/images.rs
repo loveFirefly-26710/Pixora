@@ -149,6 +149,8 @@ pub struct ListQuery {
     pub query: Option<String>,
     pub tag: Option<String>,
     pub sort: Option<String>,
+    /// 打乱排序的种子（ 时用）。0 = 让服务端随机挑一个
+    pub seed: u64,
     pub ids: Option<Vec<i64>>,
     pub page: Option<i64>,
     pub per_page: Option<i64>,
@@ -168,7 +170,9 @@ impl AppState {
             tag: q.tag.clone(),
             ids: q.ids.clone(),
             include_deleted: false,
-            sort: ImageSort::parse(q.sort.as_deref().unwrap_or("new")),
+            // 排序交给仓储层解析：默认是打乱，客户端给了 sort 就按它来
+            sort: ImageSort::parse(q.sort.as_deref().unwrap_or("shuffle")),
+            seed: q.seed,
         };
 
         let result = self.repo.list_images(&filter, request).await?;
@@ -178,11 +182,13 @@ impl AppState {
     }
 
     /// 广场：只捞公开图片。
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_plaza(
         &self,
         query: Option<&str>,
         tag: Option<&str>,
         sort: Option<&str>,
+        seed: u64,
         page: Option<i64>,
         per_page: Option<i64>,
     ) -> Result<Page<ImageItemPayload>> {
@@ -191,7 +197,9 @@ impl AppState {
             public_only: true,
             query: query.map(str::to_string),
             tag: tag.map(str::to_string),
-            sort: ImageSort::parse(sort.unwrap_or("new")),
+            // 广场默认是随机顺序：每次进来看到的都该是新的组合
+            sort: ImageSort::parse(sort.unwrap_or("shuffle")),
+            seed,
             ..Default::default()
         };
         let result = self.repo.list_images(&filter, request).await?;
@@ -627,7 +635,9 @@ impl AppState {
             // 否则它们会以「引用计数为 0 但外键还在」的状态一直挂着
             if self.settings.retention_days().await? == 0 {
                 for image in images {
-                    let _ = self.repo.purge_image_row(image.id).await;
+                    if let Ok(Some(targets)) = self.repo.purge_image_row(image.id).await {
+                        self.reclaim_purged(vec![targets]).await;
+                    }
                 }
             }
             // 最后一张引用可能刚刚消失：催一次回收，别让文件在磁盘上多躺半小时
@@ -723,7 +733,90 @@ impl AppState {
         Ok(restored)
     }
 
-    /// 彻底删除：墓碑行消失，物理文件交给 GC（引用计数已归零）。
+    /// 立即回收一个已经没有引用的实体（原图或缩略图）。
+    ///
+    /// 与后台 GC 共用同一套顺序：**先删物理文件、再删数据库行**。区别只在
+    /// 不看宽限期——这个入口由「彻底删除」这类明确的销毁动作调用，那时引用
+    /// 已经归零、墓碑也清干净了，宽限期要保护的那道「登记实体 → 建引用」
+    /// 时间窗压根不适用。
+    ///
+    /// 两道保险仍然在：`ref_count > 0`（还有别的引用）与「还有任何图片行
+    /// 引用它」（含回收站里的墓碑，恢复还要那份字节）时都不动它。
+    pub async fn reclaim_blob_now(&self, blob_id: i64) -> Result<bool> {
+        let Some(blob) = self.repo.find_blob_by_id(blob_id).await? else {
+            return Ok(false);
+        };
+        if blob.ref_count > 0 {
+            return Ok(false);
+        }
+        if self.repo.count_image_refs_for_blob(blob.id).await? > 0 {
+            return Ok(false);
+        }
+
+        match self
+            .storage
+            .delete_object(&blob.storage_driver, blob.backend_id, &blob.storage_key)
+            .await
+        {
+            Ok(()) => {}
+            Err(err) => {
+                // 后端配置没了的孤儿（管理员删过后端）也照样收掉；
+                // 远端对象够不到时留行并记日志，与 GC 同一套判断
+                match self
+                    .storage
+                    .delete_orphan_object(&blob.storage_driver, &blob.storage_key)
+                    .await
+                {
+                    Ok(true) => tracing::info!(
+                        blob_id = blob.id,
+                        driver = %blob.storage_driver,
+                        "后端配置已删除，按孤儿对象回收"
+                    ),
+                    Ok(false) => {
+                        tracing::warn!(
+                            blob_id = blob.id,
+                            driver = %blob.storage_driver,
+                            error = %err,
+                            "物理文件删除失败，留给后台回收重试"
+                        );
+                        return Ok(false);
+                    }
+                    Err(orphan_err) => {
+                        tracing::warn!(
+                            blob_id = blob.id,
+                            driver = %blob.storage_driver,
+                            error = %orphan_err,
+                            "孤儿对象回收失败，留给后台回收重试"
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+
+        Ok(self.repo.delete_blob_if_unreferenced(blob.id).await? > 0)
+    }
+
+    /// 一批墓碑删掉之后，把它们各自对应的实体当场收掉。
+    ///
+    /// 彻底删除之后不再需要管理员去「存储分布」页点「立即回收」：引用归零的
+    /// 文件本来就该在删除的那一刻消失。收不掉的（远端失败）留着由后台重试。
+    pub async fn reclaim_purged(&self, targets: Vec<pixora_repo::repo::images::PurgedBlobs>) -> u64 {
+        let mut reclaimed = 0u64;
+        for target in targets {
+            if let Ok(true) = self.reclaim_blob_now(target.blob_id).await {
+                reclaimed += 1;
+            }
+            if let Some(thumb_id) = target.thumb_blob_id {
+                if let Ok(true) = self.reclaim_blob_now(thumb_id).await {
+                    reclaimed += 1;
+                }
+            }
+        }
+        reclaimed
+    }
+
+    /// 彻底删除：墓碑行消失，物理文件当场回收（引用计数已归零）。
     pub async fn purge_images(&self, viewer: &Viewer, ids: &[i64]) -> Result<u64> {
         if ids.is_empty() {
             return Err(AppError::bad_request("没有选中任何图片"));
@@ -766,7 +859,10 @@ impl AppState {
                     }
                 }
             }
-            purged += self.repo.purge_image_row(image.id).await?;
+            if let Some(targets) = self.repo.purge_image_row(image.id).await? {
+                purged += 1;
+                self.reclaim_purged(vec![targets]).await;
+            }
         }
         if purged > 0 {
             self.kick_gc();
@@ -794,10 +890,10 @@ impl AppState {
         if listed.total > ids.len() as i64 {
             let owner = viewer.user().ok_or(AppError::Unauthorized)?;
             let more = self.repo.purge_deleted_images(owner.id, 20_000).await?;
-            if more > 0 {
-                self.kick_gc();
+            if !more.is_empty() {
+                self.reclaim_purged(more.clone()).await;
             }
-            return Ok(purged + more);
+            return Ok(purged + more.len() as u64);
         }
         Ok(purged)
     }

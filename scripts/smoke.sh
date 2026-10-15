@@ -524,15 +524,23 @@ PY
 [[ "${AUDIT_ROWS}" -gt 5 ]] || fail "审计日志行数偏少（${AUDIT_ROWS}）"
 ok "审计日志记录了 ${AUDIT_ROWS} 条事件"
 
-# 引用计数最终应当归零，且没有负数
+# 引用计数最终不该还有正数。全清之后 blob 行可能已经被彻底回收顺手删掉
+# （表空），也可能还留着 ref_count=0 的行——两种都算归零
 REF_STATE="$(python - "$DB" <<'PY'
 import sqlite3, sys
 conn = sqlite3.connect(sys.argv[1])
-rows = conn.execute("select sha256, ref_count, kind from blobs").fetchall()
-print("|".join(f"{r[2]}:{r[1]}" for r in rows))
+rows = conn.execute("select kind, ref_count from blobs").fetchall()
+live = [f"{k}:{c}" for k, c in rows if c > 0]
+if live:
+    print("LIVE=" + ",".join(live))
+else:
+    print("none" if not rows else "|".join(f"{k}:{c}" for k, c in rows))
 PY
 )"
-[[ "${REF_STATE}" == *":0"* ]] || fail "引用计数未归零：${REF_STATE}"
-ok "引用计数已归零（${REF_STATE}）"
+case "${REF_STATE}" in
+  LIVE=*) fail "还有 blob 带着引用：${REF_STATE#LIVE=}" ;;
+  none) ok "引用计数已归零（blob 行已被彻底回收）" ;;
+  *) ok "引用计数已归零（剩下的都是 0：${REF_STATE}）" ;;
+esac
 
 printf '\n\033[1;32m全部通过。\033[0m\n'

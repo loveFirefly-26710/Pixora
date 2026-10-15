@@ -90,6 +90,52 @@
   gap: 0;
 }
 
+/* 侧边栏右边那一列：提示条在上，页面内容在下 */
+.shell-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.banner-slot {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 12px 14px 0;
+}
+
+@media (min-width: 1024px) {
+  .banner-slot {
+    padding: 14px 22px 0;
+  }
+}
+
+.banner-slot:empty {
+  display: none;
+}
+
+/* 设置类页面的卡片流。
+   以前这里是「两两一行」的 flex：同一行里短卡片会被拉成高卡片那么高，
+   内容撑不满就留一大片空白（系统设置页尤其明显——「防盗链」旁边是长长的
+   「内容审核」）。改成按高度自动排布：卡片保持自己的高度，短的空隙由后面的
+   卡片填上。窄屏回落到一列。 */
+.cardflow {
+  columns: 2;
+  column-gap: 14px;
+}
+
+.cardflow > * {
+  break-inside: avoid;
+  margin: 0 0 14px;
+}
+
+@media (max-width: 1023px) {
+  .cardflow {
+    columns: 1;
+  }
+}
+
 .sidebar {
   width: 216px;
   flex: 0 0 216px;
@@ -147,6 +193,25 @@
   font-weight: 600;
 }
 
+/* 退出登录：账号级动作，视觉上与「去哪一页」的导航项区分开 */
+.sidebar .logout {
+  color: var(--danger);
+}
+
+.sidebar .logout:hover {
+  background: var(--danger-soft);
+}
+
+/* 表单字段栅格：字段多的时候按可用宽度自动分列。
+   存储后端的配置项（S3 有 8 项）挤在一行里每个只有几十像素宽，
+   这个栅格给每列一个下限，放不下就换行。 */
+.fldgrid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+/* 宽弹窗：存储后端这类字段多的表单用它，普通弹窗上限 580px 不够 */
 .sidebar a.sub {
   padding-left: 20px;
   font-size: 12.5px;
@@ -1018,6 +1083,7 @@ tr.pick {
   max-height: 85vh;
 }
 
+
 @media (min-width: 768px) {
   .modal .sheet {
     border-radius: 12px;
@@ -1028,6 +1094,13 @@ tr.pick {
   }
   .modal .sheet.reading {
     max-width: 720px;
+  }
+  /* 宽弹窗要写在媒体查询里：桌面端的宽度是在这里定的，
+     写在媒体查询外面会被上面这条 `.modal .sheet` 的 max-width 盖住 */
+  .modal .sheet.wide {
+    width: min(92vw, 860px);
+    min-width: 0;
+    max-width: 860px;
   }
 }
 

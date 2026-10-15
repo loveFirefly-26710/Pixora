@@ -35,7 +35,9 @@ pub async fn collect_blobs(
     batch: i64,
     retention_days: i64,
 ) -> pixora_core::Result<GcOutcome> {
-    let grace = chrono::Duration::minutes(grace_minutes.max(5));
+    // 下限两分钟：这段宽限期保护的是「登记实体 → 建引用」那一瞬间（毫秒级），
+    // 两分钟已经是几十万倍的余量。再长只会让「删完还显示占着盘」看起来像没删掉
+    let grace = chrono::Duration::minutes(grace_minutes.max(2));
     let older_than = Utc::now() - grace;
     let retention_cutoff = Utc::now() - chrono::Duration::days(retention_days.max(0));
     let candidates = state.repo.list_gc_candidates(older_than, batch).await?;
@@ -81,15 +83,38 @@ pub async fn collect_blobs(
         {
             Ok(()) => {}
             Err(err) => {
-                // 物理删除失败就留着这行，下一轮再试。
-                // 先删行会让物理文件永远留在存储后端上，那比多留一行糟糕得多。
-                tracing::warn!(
-                    blob_id = fresh.id,
-                    driver = %fresh.storage_driver,
-                    error = %err,
-                    "物理文件删除失败，保留实体行等待下一轮"
-                );
-                continue;
+                // 驱动实例装配不出来（管理员把后端配置行删了）时走孤儿回收：
+                // 本地与数据库内这两种的落点与配置无关，能照常收掉；远端对象
+                // 只能在对象存储侧解决，这里已经记了警告，行留着不再反复重试。
+                match state
+                    .storage
+                    .delete_orphan_object(&fresh.storage_driver, &fresh.storage_key)
+                    .await
+                {
+                    Ok(true) => tracing::info!(
+                        blob_id = fresh.id,
+                        driver = %fresh.storage_driver,
+                        "后端配置已删除，按孤儿对象回收"
+                    ),
+                    Ok(false) => {
+                        tracing::warn!(
+                            blob_id = fresh.id,
+                            driver = %fresh.storage_driver,
+                            error = %err,
+                            "物理文件删除失败，保留实体行等待下一轮"
+                        );
+                        continue;
+                    }
+                    Err(orphan_err) => {
+                        tracing::warn!(
+                            blob_id = fresh.id,
+                            driver = %fresh.storage_driver,
+                            error = %orphan_err,
+                            "孤儿对象回收失败，保留实体行等待下一轮"
+                        );
+                        continue;
+                    }
+                }
             }
         }
 
@@ -118,6 +143,30 @@ pub async fn collect_blobs(
 }
 
 /// 对账：重算用量与相册计数。修正是幂等的，跑多少次结果一样。
+/// 清掉 CAS 目录树里的空目录。
+///
+/// 删除实体时会顺手收掉它所在的那层目录（`blobs/xx/`），但早期版本留下的空壳
+/// 没人管，数据目录里会攒下一片空目录。这里按第二轮扫描一次，只删空的、
+/// 不递归、删不掉就算了——纯卫生问题，不值得为它报错。
+pub async fn clean_empty_blob_dirs(state: &Arc<AppState>) -> u64 {
+    let root = state.config.data_dir.join("blobs");
+    let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
+        return 0;
+    };
+    let mut removed = 0u64;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !entry.metadata().await.map(|meta| meta.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        // remove_dir 只对空目录成功，非空的会报错——正是我们要的语义
+        if tokio::fs::remove_dir(&path).await.is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// 清掉旧版镜像树的残留：`{data_dir}/users/users/…`。
 ///
 /// 早期版本的镜像路径解析多拼了一层 `users`，于是硬链接落进了 `users/users/`。
@@ -196,10 +245,18 @@ pub async fn purge_expired(state: &Arc<AppState>) -> pixora_core::Result<()> {
     let retention_days = state.settings.retention_days().await.unwrap_or(0);
     let mut tombstones = 0u64;
     if retention_days > 0 {
-        tombstones = state
+        let expired = state
             .repo
             .purge_expired_tombstones(now - chrono::Duration::days(retention_days), 500)
             .await?;
+        tombstones = expired.len() as u64;
+        // 保留期到了就是彻底销毁：文件当场收掉，不等下一轮 collect_blobs
+        for target in expired {
+            let _ = state.reclaim_blob_now(target.blob_id).await;
+            if let Some(thumb_id) = target.thumb_blob_id {
+                let _ = state.reclaim_blob_now(thumb_id).await;
+            }
+        }
     }
 
     // 没有任何引用的空标签

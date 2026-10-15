@@ -637,8 +637,9 @@ async fn album_bin_and_restore_round_trip() {
         0,
         "图片跟着进回收站，引用计数归零"
     );
+    // 回收站里的文件仍然算已用额度：它占着盘，只有彻底删除才还回去
     let after_delete_used = state.repo.find_user_by_id(user.id).await.unwrap().unwrap().used_bytes;
-    assert!(after_delete_used < before_used, "用量要回退");
+    assert_eq!(after_delete_used, before_used, "进回收站不减少用量");
     assert!(path.exists(), "文件留着（保留期内要能恢复）");
 
     // 恢复：相册与图片一起回来
@@ -657,10 +658,167 @@ async fn album_bin_and_restore_round_trip() {
         "引用计数回到 1"
     );
     let after_restore_used = state.repo.find_user_by_id(user.id).await.unwrap().unwrap().used_bytes;
-    assert_eq!(after_restore_used, before_used, "用量回到删除前");
+    assert_eq!(after_restore_used, before_used, "恢复前后用量一致");
     assert_eq!(
         state.repo.list_album_live_images(album.id).await.unwrap().len(),
         1,
         "图片回到相册里"
+    );
+}
+
+/// 后端配置被删掉之后，指向它的实体仍然要能收掉。
+///
+/// 这不是假想的情况：管理员在「存储管理」里删掉一个后端行之后，那个驱动就
+/// 装配不出来了（远端驱动连地址带凭据都在配置行里）。以前这种实体会让 GC
+/// 每轮都失败、行与字节永远留着——「数据库内」那种字节就留在库里，
+/// 用户会看到「删了还在」。
+///
+/// 本地与数据库内两种驱动的落点与配置无关，所以这两种必须照常收掉。
+#[tokio::test]
+async fn blobs_left_by_a_deleted_backend_are_still_reclaimed() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+
+    // 数据库内驱动的实体：字节在 storage_objects 里，backend_id 指向一个不存在的后端
+    let sha = "d".repeat(64);
+    let key = format!("blobs/{}/{}.png", &sha[..2], sha);
+    state
+        .repo
+        .db()
+        .execute(
+            "INSERT INTO storage_objects (key, content, size, updated_at) VALUES (?, ?, ?, ?)",
+            Args::new().text(&key).blob(b"in-db-bytes".to_vec()).int(11).text(now_ts()),
+        )
+        .await
+        .unwrap();
+    let blob = state
+        .repo
+        .insert_blob_if_absent(&NewBlob {
+            sha256: sha.clone(),
+            kind: "original".to_string(),
+            size: 11,
+            mime_type: "image/png".to_string(),
+            ext: "png".to_string(),
+            width: None,
+            height: None,
+            storage_driver: pixora_storage::names::DATABASE.to_string(),
+            storage_key: key.clone(),
+            backend_id: Some(4242), // 已经不存在的后端
+        })
+        .await
+        .unwrap();
+    age_blob(&state, blob.id, 3).await;
+
+    let outcome = gc::collect_blobs(&state, 5, 10, 30).await.unwrap();
+    assert_eq!(outcome.removed, 1, "孤儿实体应当被收掉");
+
+    let left = state
+        .repo
+        .db()
+        .count(
+            "SELECT COUNT(*) AS total FROM storage_objects WHERE key = ?",
+            Args::new().text(&key),
+        )
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "库里的字节也要跟着删掉");
+    assert!(
+        state.repo.find_blob_by_id(blob.id).await.unwrap().is_none(),
+        "实体行要删掉"
+    );
+
+    // 本地驱动同理：后端行没了，文件仍然在数据目录下，按 key 直接删
+    let (local_id, local_path) = seed_blob(&state, 'e').await;
+    state
+        .repo
+        .db()
+        .execute(
+            "UPDATE blobs SET backend_id = 4242 WHERE id = ?",
+            Args::new().int(local_id),
+        )
+        .await
+        .unwrap();
+    age_blob(&state, local_id, 3).await;
+    let outcome = gc::collect_blobs(&state, 5, 10, 30).await.unwrap();
+    assert_eq!(outcome.removed, 1, "后端行没了的本地实体也应当被收掉");
+    assert!(!local_path.exists(), "文件要真删掉");
+}
+
+/// 彻底删除（回收站里清掉）要当场把文件收走，而不是留一行「待回收」等人点。
+///
+/// 「彻底删除」的意思就是立刻销毁：引用归零之后没有任何人还需要这份字节。
+/// 以前这一步只把墓碑删掉，物理文件要等下一轮 GC；存储分布页因此会出现一行
+/// 「待回收」，还得管理员手动点一下——那是把本该自动的事推给了人。
+#[tokio::test]
+async fn purging_an_image_reclaims_the_file_right_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+    let (user, album, blob_id, path, _view) = seed_album_image(&state, 'f', "4001").await;
+    let viewer = pixora_core::images::Viewer::User(user.clone());
+
+    // 先删进回收站：文件必须还在（保留期内要能恢复）
+    let image = state.repo.list_album_live_images(album.id).await.unwrap()[0].clone();
+    state.delete_image(&viewer, image.id).await.unwrap();
+    assert!(path.exists(), "进回收站的文件要留着");
+
+    // 再彻底删除：文件与实体行都应当当场消失，不需要跑 GC
+    let purged = state.purge_images(&viewer, &[image.id]).await.unwrap();
+    assert_eq!(purged, 1);
+    assert!(!path.exists(), "彻底删除要当场删掉物理文件");
+    assert!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().is_none(),
+        "实体行也要一起删掉"
+    );
+}
+
+/// 只删掉自己的那份引用时，别人的引用还在 → 文件不能动。
+#[tokio::test]
+async fn purging_one_reference_keeps_the_shared_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir).await;
+    let (user, album, blob_id, path, _view) = seed_album_image(&state, 'g', "4002").await;
+    let viewer = pixora_core::images::Viewer::User(user.clone());
+
+    // 另一个人引用同一份实体（内容寻址：磁盘上只有一份）
+    let other = state
+        .repo
+        .create_user(&pixora_repo::repo::users::NewUser {
+            uid: "4003".to_string(),
+            email: "other@example.com".to_string(),
+            password_hash: "$argon2id$placeholder".to_string(),
+            role: "user".to_string(),
+            status: "active".to_string(),
+            quota_bytes: 1024 * 1024,
+            email_verified: true,
+        })
+        .await
+        .unwrap();
+    state
+        .repo
+        .create_image_reference(
+            &pixora_repo::repo::images::NewImage {
+                owner_id: other.id,
+                album_id: None,
+                blob_id,
+                thumb_blob_id: None,
+                original_name: "shared.png".to_string(),
+                title: None,
+                visibility: "private".to_string(),
+            },
+            21,
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let image = state.repo.list_album_live_images(album.id).await.unwrap()[0].clone();
+    state.delete_image(&viewer, image.id).await.unwrap();
+    let purged = state.purge_images(&viewer, &[image.id]).await.unwrap();
+    assert_eq!(purged, 1);
+
+    assert!(path.exists(), "别人还引用着这份实体，文件不能删");
+    assert!(
+        state.repo.find_blob_by_id(blob_id).await.unwrap().is_some(),
+        "实体行也要留着"
     );
 }

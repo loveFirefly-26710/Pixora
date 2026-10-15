@@ -41,6 +41,14 @@ pub mod actions {
     pub const TERMS_PUBLISH: &str = "terms_publish";
     pub const IP_RULE_CHANGE: &str = "ip_rule_change";
     pub const TEMP_BAN: &str = "temp_ban";
+    /// 内容审核拦下一次上传
+    pub const MODERATION_BLOCK: &str = "moderation_block";
+    /// 内容审核累计违规触发的自动暂停
+    pub const MODERATION_BAN: &str = "moderation_ban";
+    /// 管理员免登录切换到其他用户
+    pub const IMPERSONATE_START: &str = "impersonate_start";
+    /// 从目标用户切回管理员
+    pub const IMPERSONATE_STOP: &str = "impersonate_stop";
 }
 
 impl AppState {

@@ -16,6 +16,7 @@ import type { PageContext } from "../core/router";
 import { getState } from "../core/state";
 import { toastError, toastOk } from "../core/toast";
 import type { AdminUserRow, PolicyFields, UserActionRow } from "../core/types";
+import { openRateLogs } from "./ratelimit-cards";
 import {
   badge,
   card,
@@ -589,10 +590,13 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
       // PUT 是整体覆盖：body 里没给的字段会继承全局默认，而这个人可能还有
       // 别的自定义项（比如单文件上限）。所以先把他自己的覆盖行原样带上——
       // 注意用 policy_override（未解析的原始值）而不是 policy（解析结果），
-      // 后者会把「跟随全局」悄悄固化成当前值。路径里的标识是 uid，不是自增 id
+      // 后者会把「跟随全局」悄悄固化成当前值。路径里的标识是 uid，不是自增 id。
+      //
+      // `unlimited` 保持服务端返回的原值：以前这里写死 false，结果是
+      // 「在这一页点一次保存，别处设好的不限额度就被悄悄取消了」
       await request(`/admin/ratelimit/users/${encodeURIComponent(user.uid)}`, {
         method: "PUT",
-        json: { ...(detail.policy_override ?? {}), unlimited: false, ...values },
+        json: { ...(detail.policy_override ?? {}), ...values },
       });
       toastOk("该账号的频率限制已更新");
       reload();
@@ -618,7 +622,9 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
     if (!ok) return;
     reset.disabled = true;
     try {
-      await request(`/admin/ratelimit/users/${user.id}`, { method: "DELETE" });
+      // 路径里是 uid 而不是自增 id：服务端按 uid 找用户，
+      // 传数字 id 会得到一句「用户不存在」
+      await request(`/admin/ratelimit/users/${encodeURIComponent(user.uid)}`, { method: "DELETE" });
       toastOk("已恢复全局默认");
       reload();
     } catch (err) {
@@ -630,7 +636,8 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
   const logs = h("button.btn.sm", {
     type: "button",
     text: "查看超限日志",
-    on: { click: () => navigate(`/admin/ratelimit?uid=${encodeURIComponent(user.uid)}`) },
+    // 日志弹窗就在这一页打开：频率限制已经没有自己的页面了
+    on: { click: () => void openRateLogs(1, user.uid) },
   });
 
   const summary = effective
@@ -666,7 +673,9 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
     ),
     h("div", { style: { marginTop: "12px" } }, save),
     errorLine,
-    h("div.tip", { text: "全局默认和用户级覆盖的完整配置在左侧「频率限制」页。" }),
+    h("div.tip", {
+      text: "全局默认、超限处理与所有用户的额度都在「系统设置」里；这一栏只改这个账号的四项额度。",
+    }),
   );
 }
 

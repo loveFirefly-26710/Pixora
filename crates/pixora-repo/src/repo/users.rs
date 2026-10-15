@@ -186,6 +186,9 @@ impl Repo {
     }
 
     /// 处置账号：改状态 + 记原因 + 记操作人。会话吊销由服务层接着做。
+    ///
+    /// `auto_unsuspend_at` 只有「内容审核自动暂停」会给值；管理员手工处置一律传
+    /// `None`，这样自动恢复的扫描不会把管理员的封禁顺手解掉。
     pub async fn update_user_status(
         &self,
         id: i64,
@@ -194,15 +197,30 @@ impl Repo {
         by: Option<i64>,
         at: DateTime<Utc>,
     ) -> Result<()> {
+        self.update_user_status_until(id, status_value, reason, by, at, None)
+            .await
+    }
+
+    /// 带自动恢复时间的处置。`until` 到了由 `ensure_loginable` 一侧自动解除。
+    pub async fn update_user_status_until(
+        &self,
+        id: i64,
+        status_value: &str,
+        reason: Option<&str>,
+        by: Option<i64>,
+        at: DateTime<Utc>,
+        until: Option<DateTime<Utc>>,
+    ) -> Result<()> {
         self.db
             .execute(
                 "UPDATE users SET status = ?, status_reason = ?, status_changed_at = ?, \
-                                  status_changed_by = ? WHERE id = ?",
+                                  status_changed_by = ?, auto_unsuspend_at = ? WHERE id = ?",
                 Args::new()
                     .text(status_value)
                     .opt_text(reason.map(str::to_string))
                     .text(ts(at))
                     .opt_int(by)
+                    .opt_text(until.map(ts))
                     .int(id),
             )
             .await?;
@@ -284,6 +302,19 @@ impl Repo {
     }
 
     // ---------- 列表与统计 ----------
+
+    /// 活跃的管理员。内容审核上报、批量通知这类「告诉所有管理员」的场景用。
+    pub async fn list_active_admins(&self) -> Result<Vec<User>> {
+        let sql = format!(
+            "SELECT {} FROM users WHERE role = ? AND status = ? ORDER BY id",
+            User::COLUMNS
+        );
+        let rows = self
+            .db
+            .fetch_all(&sql, Args::new().text(role::ADMIN).text(status::ACTIVE))
+            .await?;
+        rows.iter().map(User::from_row).collect()
+    }
 
     /// 管理端用户列表。带图片数量与「是否自定义限流」两个派生列。
     pub async fn list_users(
@@ -494,11 +525,12 @@ const USER_SUMMARY_SQL_WHERE: &str = "SELECT u.id, u.uid, u.email, u.role, u.sta
 
 const USER_RECOMPUTE_SQL: &str = "UPDATE users SET used_bytes = COALESCE(( \
         SELECT SUM(b.size) FROM images i JOIN blobs b ON b.id = i.blob_id \
-         WHERE i.owner_id = ? AND i.deleted_at IS NULL), 0) WHERE id = ?";
+         WHERE i.owner_id = ?), 0) WHERE id = ?";
 
+/// 对账口径：**回收站里的文件也算已用额度**（它们还占着盘，只有彻底删除才归还）。
 const USER_RECONCILE_ALL_SQL: &str = "UPDATE users SET used_bytes = COALESCE(( \
         SELECT SUM(b.size) FROM images i JOIN blobs b ON b.id = i.blob_id \
-         WHERE i.owner_id = users.id AND i.deleted_at IS NULL), 0) \
+         WHERE i.owner_id = users.id), 0) \
    WHERE used_bytes <> COALESCE(( \
         SELECT SUM(b.size) FROM images i JOIN blobs b ON b.id = i.blob_id \
-         WHERE i.owner_id = users.id AND i.deleted_at IS NULL), 0)";
+         WHERE i.owner_id = users.id), 0)";

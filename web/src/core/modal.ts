@@ -17,6 +17,8 @@ export interface ModalOptions {
   footer?: Node[] | null;
   /** 阅读类弹窗放宽到 720px */
   reading?: boolean;
+  /** 表单字段多的弹窗再放宽一档（存储后端配置用） */
+  wide?: boolean;
   /** 点击遮罩是否关闭，默认 true；条款通告这类强制阅读的传 false */
   dismissable?: boolean;
   onClose?: () => void;
@@ -55,7 +57,8 @@ export function openModal(options: ModalOptions): ModalHandle {
     );
   }
 
-  const sheet = h("div.sheet", { class: options.reading ? "reading" : "" }, head, body, footer);
+  const sheetClass = options.wide ? "wide" : options.reading ? "reading" : "";
+  const sheet = h("div.sheet", { class: sheetClass }, head, body, footer);
   const mask = h("div.mask");
   const root = h("div.modal", { role: "dialog", "aria-modal": "true" }, mask, sheet);
 

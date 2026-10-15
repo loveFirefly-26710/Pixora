@@ -231,25 +231,154 @@ impl Repo {
         Ok(())
     }
 
-    /// 某个驱动下的实体数与占用。
+    /// 每个后端上的「在用」内容。
+    ///
+    /// 两个数字的口径都改过一次，原因值得写下来：
+    ///
+    ///   - **张数是图片数，不是实体条数**。一张图通常配一个缩略图，按实体数
+    ///     一张图会显示成「2 张」，用户会以为传了两遍。
+    ///   - **字节是这个后端上仍被引用的实体**（原图 + 缩略图，每个实体只算一次）。
+    ///     去重命中的共享实体只算一份，这才是磁盘上的真实占用。
+    ///
+    /// 已经被彻底删除、只剩实体行等后台回收的，不在这里出现（见
+    /// [`Repo::unreferenced_usage`]）——那些东西在界面上没有任何对应物，
+    /// 混进分布只会让人怀疑「删了怎么还在」。
     pub async fn blob_stats_by_driver(&self) -> Result<Vec<DriverStat>> {
+        let counts = self.image_counts_by_driver(false).await?;
+        let bytes = self.entity_bytes_by_driver(false).await?;
+        let mut stats: Vec<DriverStat> = Vec::new();
+        for (driver, count) in counts {
+            stats.push(DriverStat {
+                driver,
+                count,
+                bytes: 0,
+            });
+        }
+        for (driver, value) in bytes {
+            match stats.iter_mut().find(|item| item.driver == driver) {
+                Some(item) => item.bytes = value,
+                None => stats.push(DriverStat {
+                    driver,
+                    count: 0,
+                    bytes: value,
+                }),
+            }
+        }
+        stats.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.driver.cmp(&b.driver)));
+        Ok(stats)
+    }
+
+    /// 回收站里还没过保留期的内容：(张数, 被引用的实体字节)。
+    pub async fn binned_usage(&self) -> Result<(i64, i64)> {
+        let counts = self.image_counts_by_driver(true).await?;
+        let bytes = self.entity_bytes_by_driver(true).await?;
+        Ok((
+            counts.iter().map(|(_, count)| *count).sum(),
+            bytes.iter().map(|(_, value)| *value).sum(),
+        ))
+    }
+
+    /// 已经没有任何图片引用的实体：(条数, 字节)。
+    ///
+    /// 彻底删除之后、后台回收之前，实体会短暂停在这个状态。界面上把它单独列一行，
+    /// 附一个「立即回收」入口，比让这些字节混进正常占用要好解释。
+    pub async fn unreferenced_usage(&self) -> Result<(i64, i64)> {
+        let row = self
+            .db
+            .fetch_optional(
+                "SELECT COUNT(*) AS total, COALESCE(SUM(b.size), 0) AS bytes \
+                   FROM blobs b \
+                  WHERE NOT EXISTS ( \
+                        SELECT 1 FROM images i WHERE i.blob_id = b.id OR i.thumb_blob_id = b.id)",
+                Args::new(),
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok((0, 0));
+        };
+        Ok((get_i64(&row, "total")?, get_i64(&row, "bytes")?))
+    }
+
+    /// 图片张数按「原图所在后端」分组。`binned` 选择活着的还是回收站里的。
+    async fn image_counts_by_driver(&self, binned: bool) -> Result<Vec<(String, i64)>> {
+        let condition = if binned {
+            "i.deleted_at IS NOT NULL"
+        } else {
+            "i.deleted_at IS NULL"
+        };
         let rows = self
             .db
             .fetch_all(
-                "SELECT storage_driver AS driver, COUNT(*) AS total, COALESCE(SUM(size), 0) AS bytes \
-                   FROM blobs GROUP BY storage_driver ORDER BY bytes DESC",
+                &format!(
+                    "SELECT b.storage_driver AS driver, COUNT(*) AS total \
+                       FROM images i JOIN blobs b ON b.id = i.blob_id \
+                      WHERE {condition} GROUP BY b.storage_driver"
+                ),
                 Args::new(),
             )
             .await?;
         rows.iter()
-            .map(|row| {
-                Ok(DriverStat {
-                    driver: get_str(row, "driver")?,
-                    count: get_i64(row, "total")?,
-                    bytes: get_i64(row, "bytes")?,
-                })
-            })
+            .map(|row| Ok((get_str(row, "driver")?, get_i64(row, "total")?)))
             .collect()
+    }
+
+    /// 被图片引用到的实体字节，按后端分组，每个实体只算一次。
+    ///
+    /// 原图与缩略图各取一次再 UNION 去重：同一份实体被多张图引用时只算一份，
+    /// 这正是「去重省下多少」的另一面。
+    async fn entity_bytes_by_driver(&self, binned: bool) -> Result<Vec<(String, i64)>> {
+        let condition = if binned {
+            "i.deleted_at IS NOT NULL"
+        } else {
+            "i.deleted_at IS NULL"
+        };
+        let rows = self
+            .db
+            .fetch_all(
+                &format!(
+                    "SELECT driver, COALESCE(SUM(size), 0) AS bytes FROM ( \
+                        SELECT DISTINCT b.id AS id, b.storage_driver AS driver, b.size AS size \
+                          FROM images i JOIN blobs b ON b.id = i.blob_id WHERE {condition} \
+                        UNION \
+                        SELECT DISTINCT b.id, b.storage_driver, b.size \
+                          FROM images i JOIN blobs b ON b.id = i.thumb_blob_id \
+                         WHERE {condition} AND i.thumb_blob_id IS NOT NULL \
+                     ) AS refs GROUP BY driver"
+                ),
+                Args::new(),
+            )
+            .await?;
+        rows.iter()
+            .map(|row| Ok((get_str(row, "driver")?, get_i64(row, "bytes")?)))
+            .collect()
+    }
+
+    /// 逻辑占用：每张图各自引用的原图大小之和（去重前该占多少）。
+    pub async fn logical_bytes_all(&self) -> Result<i64> {
+        self.db
+            .count(
+                "SELECT COALESCE(SUM(b.size), 0) AS total FROM images i \
+                   JOIN blobs b ON b.id = i.blob_id",
+                Args::new(),
+            )
+            .await
+    }
+
+    /// 仍在被引用的实体字节合计（不含等回收的孤儿）。
+    pub async fn referenced_bytes_all(&self) -> Result<i64> {
+        let live = self
+            .entity_bytes_by_driver(false)
+            .await?
+            .iter()
+            .map(|(_, value)| *value)
+            .sum::<i64>();
+        let binned = self
+            .entity_bytes_by_driver(true)
+            .await?
+            .iter()
+            .map(|(_, value)| *value)
+            .sum::<i64>();
+        Ok(live + binned)
     }
 
     /// 按 MIME 类型分布。

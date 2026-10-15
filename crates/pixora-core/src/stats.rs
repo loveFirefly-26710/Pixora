@@ -52,6 +52,10 @@ pub struct StoragePayload {
     pub capacity: StorageCapacityView,
     pub paths: PathsView,
     pub distribution: Vec<DriverDistribution>,
+    /// 回收站里还没过保留期的那部分（单独一行展示）
+    pub binned: StorageTotals,
+    /// 已经没人引用、等后台回收的那部分（单独一行展示）
+    pub pending: StorageTotals,
     pub totals: StorageTotals,
     pub mimes: Vec<MimeView>,
     pub trend: Vec<TrendView>,
@@ -290,6 +294,16 @@ impl AppState {
                     bytes: row.bytes,
                 })
                 .collect(),
+            binned: StorageTotals {
+                count: stats.binned_count,
+                bytes: stats.binned_bytes,
+                dedup_saved_bytes: 0,
+            },
+            pending: StorageTotals {
+                count: stats.pending_count,
+                bytes: stats.pending_bytes,
+                dedup_saved_bytes: 0,
+            },
             totals: StorageTotals {
                 count: stats.image_count,
                 bytes: stats.total_bytes,

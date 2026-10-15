@@ -9,8 +9,7 @@ import { copyText, h } from "../core/dom";
 import {
   barTone,
   formatBytes,
-  formatDimensions,
-  shortHash,
+  relativeTime,
   STATUS_LABEL,
   statusBadgeClass,
   ROLE_LABEL,
@@ -349,13 +348,21 @@ export function tagChips(
   return row;
 }
 
-/** 单个图片方格。左键打开预览，Shift/Ctrl 复选由容器统一处理。 */
+/** 单个图片方格。左键打开预览，Shift/Ctrl 复选由容器统一处理。
+ *
+ * 卡片上的文字只有「标签 + 时间」，刻意不摆文件名与 UID：
+ *   - 文件名是用户上传时的原始名字，常见于「IMG_20240312_身份证.jpg」这类，
+ *     摆在广场上就是一次信息泄露；
+ *   - UID 是账号的对外短标识，访客没有必要知道每一张图属于谁。
+ * 需要看文件名的场景（自己的相册、管理后台）用列表视图，那里有。
+ */
 export function imageTile(
   item: ImageItem,
   options: {
     selected?: boolean;
     onOpen?: (item: ImageItem, event: MouseEvent) => void;
     onSelect?: (item: ImageItem, event: MouseEvent) => void;
+    /** 副标题（默认是时间，回收站之类想换文案时传） */
     subtitle?: string;
     /** 方格上是否带标签 chip（相册页不显示，广场显示，跟原型一致） */
     showTags?: boolean;
@@ -372,7 +379,7 @@ export function imageTile(
   if (item.has_thumb && item.thumb_url) {
     const img = h("img", {
       src: item.thumb_url,
-      alt: item.title ?? item.short_hash,
+      alt: item.tags[0] ?? "图片",
       loading: "lazy",
       decoding: "async",
     });
@@ -381,31 +388,32 @@ export function imageTile(
     // 没有缩略图时直接用原图，靠容器缩放，带宽影响有限
     const img = h("img", {
       src: item.url,
-      alt: item.title ?? item.short_hash,
+      alt: item.tags[0] ?? "图片",
       loading: "lazy",
       decoding: "async",
     });
     thumb.append(img);
   }
 
+  const time = options.subtitle ?? relativeTime(item.upload_time);
+  const tags = options.showTags === false ? [] : item.tags.slice(0, 3);
   const tile = h(
     "button.tile",
-    { type: "button", class: options.selected ? "sel" : "", title: item.title ?? item.original_name ?? item.short_hash },
+    {
+      type: "button",
+      class: options.selected ? "sel" : "",
+      // 悬停提示也只给标签与时间：tooltip 同样是「展示」
+      title: tags.length > 0 ? `${tags.join(" · ")} · ${time}` : time,
+    },
     thumb,
     h(
       "div.meta",
       null,
-      h("div.n", { text: item.title ?? item.original_name ?? shortHash(item.sha256, item.ext) }),
       h(
         "div.s",
         null,
-        // 原型里这一行是「标签 · 作者 · 时间」，标签用主色 chip 显示
-        item.tags.length > 0 && options.showTags !== false
-          ? h("span.tag.b", { text: item.tags[0] })
-          : null,
-        h("span", {
-          text: options.subtitle ?? `${formatBytes(item.size)} · ${formatDimensions(item.width, item.height)}`,
-        }),
+        ...tags.map((tag) => h("span.tag.b", { text: tag })),
+        h("span", { text: time }),
       ),
     ),
   );
@@ -427,7 +435,7 @@ export function imageTile(
     type: "checkbox",
     class: "pick",
     checked: options.selected ?? false,
-    "aria-label": `选择 ${item.title ?? item.original_name ?? item.short_hash}`,
+    "aria-label": `选择 ${item.tags[0] ?? "这张图片"}（${relativeTime(item.upload_time)}）`,
   });
   pick.addEventListener("click", (event) => {
     // 勾选框自己处理选中；Shift 点它同样按范围选
@@ -490,4 +498,42 @@ export function dangerZone(title: string, text: string, action: Node): HTMLEleme
 
 export function spinner(): HTMLElement {
   return h("span", { text: "⋯", style: { color: "var(--muted)" } });
+}
+
+/**
+ * 图片排序的可选项。广场与相册共用这一份，两个页面的排序口径才一致。
+ *
+ * 默认是「随机」（`shuffle`）：图床的浏览场景里，总是同一批最新的图占着前排，
+ * 后面的内容永远没人看得到。随机顺序让整个图库都有被翻到的机会。
+ * 想按时间线看时，用户自己切到「最新」。
+ */
+export const IMAGE_SORT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "shuffle", label: "随机" },
+  { value: "new", label: "上传时间 · 最新" },
+  { value: "old", label: "上传时间 · 最久" },
+  { value: "size", label: "文件大小 · 大到小" },
+  { value: "smallest", label: "文件大小 · 小到大" },
+  { value: "name", label: "文件名" },
+  { value: "type", label: "文件类型" },
+];
+
+/** 排序下拉。`current` 传「本次生效的排序」，不在清单里就退回第一项。 */
+export function sortSelect(
+  current: string,
+  onChange: (value: string) => void,
+  extra: Array<{ value: string; label: string }> = [],
+): HTMLSelectElement {
+  const options = [...extra, ...IMAGE_SORT_OPTIONS];
+  const element = select(options, current);
+  if (!options.some((item) => item.value === element.value)) {
+    element.value = options[0]?.value ?? "";
+  }
+  element.setAttribute("aria-label", "排序方式");
+  element.addEventListener("change", () => onChange(element.value));
+  return element;
+}
+
+/** 随机排序的种子。同一个种子翻页不会重复/漏图，换一次种子就重洗一次。 */
+export function newShuffleSeed(): number {
+  return Math.floor(Math.random() * 2_000_000_000) + 1;
 }

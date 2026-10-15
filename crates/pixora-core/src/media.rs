@@ -65,11 +65,16 @@ pub fn mime_for_ext(ext: &str) -> &'static str {
 }
 
 /// 归一化扩展名：小写、去掉前导点、`jpeg`/`jpg` 视为同一类。
+///
+/// `jpeg` 折成 `jpg` 这一步是刻意的：嗅探与存储都只产出 `jpg`，
+/// 白名单、扩展名比对、前端 accept 三处都跟着它走，JPEG 就不会出现
+/// 「勾了却传不上」或者「同一类格式两个名字各判一次」的岔子。
 pub fn normalize_ext(ext: &str) -> String {
     let ext = ext.trim_start_matches('.').to_ascii_lowercase();
     match ext.as_str() {
         "tif" => "tiff".to_string(),
         "heif" => "heic".to_string(),
+        "jpeg" => "jpg".to_string(),
         other => other.to_string(),
     }
 }
@@ -550,6 +555,24 @@ pub fn check_pixels(width: u32, height: u32, limit: u64) -> Result<()> {
     Ok(())
 }
 
+/// 长宽上限。0 表示这一边不限。
+///
+/// 与像素数上限是两道独立的门：像素数拦的是「解压炸弹」，
+/// 长宽拦的是「20000×200 这种把版面撑坏的怪图」。
+pub fn check_dimensions(width: u32, height: u32, max_width: i64, max_height: i64) -> Result<()> {
+    if max_width > 0 && width as i64 > max_width {
+        return Err(AppError::InvalidImage(format!(
+            "宽度 {width} 超出上限 {max_width}"
+        )));
+    }
+    if max_height > 0 && height as i64 > max_height {
+        return Err(AppError::InvalidImage(format!(
+            "高度 {height} 超出上限 {max_height}"
+        )));
+    }
+    Ok(())
+}
+
 /// SVG 净化：剥离脚本、事件处理器、外部引用与实体声明。
 ///
 /// 这是个保守的文本级处理，不追求完备的解析——设计稿要求的正是「入库前剥离脚本
@@ -936,9 +959,13 @@ mod tests {
 
     #[test]
     fn format_lookup_normalizes_aliases() {
-        assert_eq!(normalize_ext(".JPEG"), "jpeg");
+        // JPEG 归一到 jpg：嗅探与存储只会产出 jpg，白名单里留着一个
+        // 永远匹配不上的 jpeg，管理员勾了也传不上
+        assert_eq!(normalize_ext(".JPEG"), "jpg");
+        assert_eq!(normalize_ext("jpeg"), "jpg");
         assert_eq!(normalize_ext("tif"), "tiff");
         assert_eq!(rule_for_ext("JPEG").unwrap().mime, "image/jpeg");
+        assert_eq!(rule_for_ext("jpeg").unwrap().ext, "jpg");
         assert_eq!(mime_for_ext("heif"), "image/heic");
         assert_eq!(ext_from_name("IMG_0312.HEIC"), "heic");
     }

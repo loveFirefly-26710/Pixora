@@ -10,12 +10,12 @@ import "./styles/tokens.css";
 import "./styles/components.css";
 
 import { route, setNavigateHook, setNotFound, setOutlet, startRouter, navigate } from "./core/router";
-import { bootstrap, getState, subscribe, updateUser } from "./core/state";
+import { bootstrap, getState, setUser, subscribe, updateUser } from "./core/state";
 import { mountShell, refreshNav } from "./ui/shell";
 import { openModal } from "./core/modal";
 import { h } from "./core/dom";
-import { request } from "./core/api";
-import { toastError } from "./core/toast";
+import { onSessionExpired, request } from "./core/api";
+import { toast, toastError } from "./core/toast";
 import { render as plazaPage } from "./pages/plaza";
 import { render as loginPage } from "./pages/login";
 import { render as registerPage } from "./pages/register";
@@ -35,7 +35,6 @@ import { render as adminUsersPage } from "./pages/admin-users";
 import { render as adminUserDetailPage } from "./pages/admin-user-detail";
 import { render as adminStoragePage } from "./pages/admin-storage";
 import { render as adminQuotaPage } from "./pages/admin-quota";
-import { render as adminRateLimitPage } from "./pages/admin-ratelimit";
 import { render as adminIpPage } from "./pages/admin-ip";
 import { render as adminSettingsPage } from "./pages/admin-settings";
 import { render as adminTermsPage } from "./pages/admin-terms";
@@ -70,7 +69,12 @@ function registerRoutes(): void {
   route("/admin/users/:id", adminUserDetailPage, { auth: true, admin: true });
   route("/admin/storage", adminStoragePage, { auth: true, admin: true });
   route("/admin/quota", adminQuotaPage, { auth: true, admin: true });
-  route("/admin/ratelimit", adminRateLimitPage, { auth: true, admin: true });
+  // 频率限制已经并进系统设置，导航里也没有这一项了；老收藏与旧链接
+  // 直接送过去，别让人撞上「页面不存在」
+  route("/admin/ratelimit", () => navigate("/admin/settings", { replace: true }), {
+    auth: true,
+    admin: true,
+  });
   route("/admin/ip", adminIpPage, { auth: true, admin: true });
   route("/admin/settings", adminSettingsPage, { auth: true, admin: true });
   route("/admin/terms", adminTermsPage, { auth: true, admin: true });
@@ -156,6 +160,16 @@ async function promptTermsIfNeeded(): Promise<void> {
 async function main(): Promise<void> {
   const root = document.getElementById("app");
   if (!root) return;
+
+  // 会话超时的收尾动作。放在这里而不是 api.ts：那里是被路由与状态依赖的
+  // 底层模块，反向 import 会绕成环
+  onSessionExpired(() => {
+    setUser(null);
+    const here = location.hash.replace(/^#/, "") || "/";
+    if (here.startsWith("/login")) return;
+    toast("登录已过期，请重新登录");
+    navigate(`/login?next=${encodeURIComponent(here)}`);
+  });
 
   await bootstrap();
   const outlet = mountShell(root);

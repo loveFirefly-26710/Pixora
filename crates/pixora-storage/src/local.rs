@@ -149,11 +149,17 @@ impl StorageDriver for LocalDriver {
 
     async fn delete(&self, key: &str) -> Result<()> {
         let path = self.resolve(key)?;
-        match fs::remove_file(&path).await {
+        let result = match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err.into()),
+        };
+        // 顺手收掉空目录：CAS 的两层目录（blobs/xx/）在文件删光之后会留下一堆
+        // 空壳。只删空的，删不掉（非空、权限）就算了——纯卫生问题
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir(parent).await;
         }
+        result
     }
 
     async fn stat(&self, key: &str) -> Result<ObjectInfo> {

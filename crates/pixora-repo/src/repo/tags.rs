@@ -109,6 +109,8 @@ impl Repo {
         Ok(result)
     }
 
+    /// 使用次数只数活着的图：回收站里的图也保留着标签链接（恢复时要带回来），
+    /// 但点开标签看的是「自己的图」，把墓碑算进来数字会对不上。
     /// 词表列表，带使用次数。`query` 用于输入时的候选提示。
     pub async fn list_tags(&self, owner_id: i64, query: Option<&str>, limit: i64) -> Result<Vec<Tag>> {
         let mut filters = WhereBuilder::new().and("t.owner_id = ?", |args| args.int(owner_id));
@@ -118,7 +120,9 @@ impl Repo {
         }
         let sql = format!(
             "SELECT t.id, t.owner_id, t.name, t.created_at, \
-                    (SELECT COUNT(*) FROM image_tags it WHERE it.tag_id = t.id) AS usage \
+                    (SELECT COUNT(*) FROM image_tags it \
+                       JOIN images i ON i.id = it.image_id \
+                      WHERE it.tag_id = t.id AND i.deleted_at IS NULL) AS usage \
                FROM tags t{} ORDER BY usage DESC, t.name ASC LIMIT ?",
             filters.sql_string()
         );

@@ -187,8 +187,16 @@ function view(reload: () => void, data: StorageAdmin): Node[] {
         ),
       ),
     ),
-    h("div.row", { style: { marginBottom: "14px" } }, pathsCard(reload, data), defaultDriverCard(reload, data)),
-    h("div.row", { style: { marginBottom: "14px" } }, distributionCard(data), capacityCard(reload, data)),
+    // 卡片流：这几张卡片高度差得多（运行时路径 / 默认存储 / 分布 / 容量），
+    // 两两一行会把短的那张撑出大片空白
+    h(
+      "div.cardflow",
+      null,
+      pathsCard(reload, data),
+      defaultDriverCard(reload, data),
+      distributionCard(reload, data),
+      capacityCard(reload, data),
+    ),
     backendsCard(reload, data),
   ];
 }
@@ -219,19 +227,26 @@ function pathsCard(reload: () => void, data: StorageAdmin): HTMLElement {
 
   return card(
     "运行时路径（只读）",
-    fieldNode(
-      "数据目录",
-      textInput({ value: data.paths.data_dir, readonly: true, mono: true }),
-      h(
-        "span",
-        null,
-        "来自环境变量 ",
-        h("span.mono", { text: data.paths.source }),
-        "，改路径要改容器挂载与变量后重启",
+    h(
+      "div.fldgrid",
+      null,
+      fieldNode(
+        "数据目录",
+        textInput({ value: data.paths.data_dir, readonly: true, mono: true }),
+        h(
+          "span",
+          null,
+          "来自环境变量 ",
+          h("span.mono", { text: data.paths.source }),
+          "，改路径要改容器挂载与变量后重启",
+        ),
+      ),
+      fieldNode(
+        "直链一级目录",
+        h("div.flexline", { style: { gap: "8px" } }, prefixInput, saveBtn),
+        h("span", null, "URL 前缀，可以随时改，改完旧链依然有效"),
       ),
     ),
-    field("直链一级目录", prefixInput, "这是 URL 前缀，可以在这里改，改完旧链依然有效"),
-    h("div", { style: { margin: "-6px 0 13px" } }, saveBtn),
     fieldNode(
       "目录结构",
       textInput({ value: data.paths.layout, readonly: true, mono: true }),
@@ -290,12 +305,16 @@ function defaultDriverCard(reload: () => void, data: StorageAdmin): HTMLElement 
 }
 
 /** 存储分布：各驱动张数与占用，底下一行总计（含去重省下的量）。 */
-function distributionCard(data: StorageAdmin): HTMLElement {
+function distributionCard(reload: () => void, data: StorageAdmin): HTMLElement {
   const body = h("div", { style: { fontSize: "13px", lineHeight: "2.2" } });
   const rows = data.distribution ?? [];
-  if (rows.length === 0) {
+  const binned = data.binned ?? { count: 0, bytes: 0 };
+  const pending = data.pending ?? { count: 0, bytes: 0 };
+
+  if (rows.length === 0 && binned.count === 0) {
     body.append(h("div", { style: { color: "var(--muted)" }, text: "还没有任何图片入库。" }));
   }
+
   for (const item of rows) {
     const meta = driverMeta(item.driver);
     body.append(
@@ -307,11 +326,76 @@ function distributionCard(data: StorageAdmin): HTMLElement {
         h("span.spacer"),
         h("span", {
           style: { color: "var(--muted)" },
+          // 张数是图片数：缩略图不再把它翻一倍
           text: `${formatNumber(item.count)} 张 · ${formatBytes(item.bytes)}`,
         }),
       ),
     );
   }
+
+  // 回收站单独一行：里面的图还占着盘，但和「在用」不是一回事，
+  // 混在一起会让人以为删了没生效
+  if (binned.count > 0) {
+    body.append(
+      h(
+        "div.flexline",
+        null,
+        h("span.dot", { style: { background: "#f59e0b" } }),
+        "回收站（保留期内）",
+        h("span.spacer"),
+        h("span", {
+          style: { color: "var(--muted)" },
+          text: `${formatNumber(binned.count)} 张 · ${formatBytes(binned.bytes)}`,
+        }),
+      ),
+    );
+  }
+
+  // 已经没人引用的实体：等后台回收的那部分。给一个「现在就跑一轮」的入口，
+  // 否则只能盯着这个数字等下一次扫描
+  const gcRow = h("div.flexline", null);
+  if (pending.count > 0) {
+    const gcBtn = h("button.btn.sm", { type: "button", text: "立即回收" });
+    gcBtn.addEventListener("click", async () => {
+      const ok = await confirmDialog({
+        title: "立即回收无引用文件",
+        message: `会把已经没有任何图片引用的 ${formatNumber(pending.count)} 个实体（${formatBytes(
+          pending.bytes,
+        )}）从存储里删掉，并清掉数据库记录。这些文件对应的图片早已被彻底删除，不可恢复。`,
+        confirmText: "开始回收",
+      });
+      if (!ok) return;
+      gcBtn.disabled = true;
+      gcBtn.textContent = "回收中…";
+      try {
+        const payload = await request<{ removed: number; pending: number }>("/admin/storage/gc", {
+          method: "POST",
+        });
+        toastOk(
+          payload.pending > 0
+            ? `已回收 ${payload.removed} 个，另有 ${payload.pending} 个还在宽限期内，稍后自动继续`
+            : `已回收 ${payload.removed} 个无引用实体`,
+        );
+        reload();
+      } catch (err) {
+        toastError(err);
+        gcBtn.disabled = false;
+        gcBtn.textContent = "立即回收";
+      }
+    });
+    gcRow.append(
+      h("span.dot", { style: { background: "#9ca3af" } }),
+      "待回收（已删除，等后台清理）",
+      h("span.spacer"),
+      h("span", {
+        style: { color: "var(--muted)" },
+        text: `${formatNumber(pending.count)} 个 · ${formatBytes(pending.bytes)}`,
+      }),
+      gcBtn,
+    );
+    body.append(gcRow);
+  }
+
   return card(
     "存储分布",
     body,
@@ -323,7 +407,14 @@ function distributionCard(data: StorageAdmin): HTMLElement {
         fontSize: "12.5px",
         color: "var(--muted)",
       },
-      text: `总计 ${formatNumber(data.totals.count)} 张 · ${formatBytes(data.totals.bytes)} · 去重省下 ${formatBytes(data.totals.dedup_saved_bytes)}`,
+      text: `合计 ${formatNumber(data.totals.count + binned.count)} 张 · ${formatBytes(
+        data.totals.bytes + binned.bytes,
+      )} · 去重省下 ${formatBytes(data.totals.dedup_saved_bytes)}`,
+    }),
+    h("div.tip", {
+      text:
+        "占用按「仍被引用的实体」算，含缩略图；同一份文件被多张图引用时只算一次。" +
+        "彻底删除的文件会先出现在「待回收」里，后台清理或点「立即回收」之后消失。",
     }),
   );
 }
@@ -462,7 +553,9 @@ function backendBlock(reload: () => void, backend: BackendRow): HTMLElement {
       }),
     );
   } else {
-    const grid = h("div.row");
+    // 用自适应栅格而不是单行 flex：S3 有 8 个字段，全塞一行每个只有几十像素宽，
+    // 连 endpoint 都看不全。栅格给每列一个下限，窗口宽就多排几列
+    const grid = h("div.fldgrid");
     for (const spec of specs) {
       const raw = config[spec.key];
       if (spec.kind === "bool") {
@@ -602,7 +695,7 @@ function openBackendModal(reload: () => void): void {
       mount(fieldsWrap, h("div.tip", { text: "该驱动没有额外配置项。" }));
       return;
     }
-    const grid = h("div.row");
+    const grid = h("div.fldgrid");
     for (const spec of specs) {
       const control =
         spec.kind === "bool"
@@ -625,6 +718,8 @@ function openBackendModal(reload: () => void): void {
   const submit = h("button.btn.pri", { type: "button", text: "添加" });
   const handle = openModal({
     title: "添加存储后端",
+    // 字段多的驱动（S3 八项）需要宽一点的弹窗，普通宽度下只能一个字一个字地看
+    wide: true,
     body: [
       field("驱动", driverSelect),
       field("名称", labelInput, "只用于后台显示"),

@@ -350,6 +350,7 @@ impl AppState {
         totp_code: Option<&str>,
         recovery_code: Option<&str>,
         device: &DeviceInfo,
+        remember: bool,
     ) -> Result<IssuedSession> {
         self.ensure_ip_allowed(device.ip.as_deref(), crate::ipguard::scope::LOGIN)
             .await?;
@@ -424,6 +425,14 @@ impl AppState {
 
         // 状态检查放在密码验证之后：账号是否存在、口令是否正确这类信息不该
         // 因为状态不同而泄露给未通过验证的人
+        //
+        // 先看内容审核的自动暂停是否已经到期：到期就放行。少了这一步，
+        // 被自动暂停的人如果一直没登录，暂停到期后仍然进不来（没有别的入口
+        // 去触发那次恢复）
+        let user = match self.lift_expired_suspension(&user).await {
+            Some(fresh) => fresh,
+            None => user,
+        };
         self.ensure_loginable(&user)?;
 
         self.repo
@@ -435,7 +444,7 @@ impl AppState {
             .await?
             .ok_or_else(|| AppError::not_found("用户"))?;
 
-        let issued = self.issue_session(&fresh, device).await?;
+        let issued = self.issue_session(&fresh, device, remember).await?;
         self.audit_action(actions::LOGIN_SUCCESS, Some(user.id), device.ip.as_deref())
             .await;
         Ok(issued)
@@ -454,9 +463,23 @@ impl AppState {
     }
 
     /// 签发会话：建会话行 + 生成 CSRF 令牌。
-    async fn issue_session(&self, user: &User, device: &DeviceInfo) -> Result<IssuedSession> {
+    ///
+    /// `remember` 为真时写死绝对到期时间（设置里的 `session.remember_days`），
+    /// 之后不再按闲置时长判——选了「记住我」就该隔几天打开还是登录状态。
+    async fn issue_session(
+        &self,
+        user: &User,
+        device: &DeviceInfo,
+        remember: bool,
+    ) -> Result<IssuedSession> {
         let session_token = crypto_token::new_session_token()?;
         let hash = crypto_token::token_hash(&session_token);
+        let expires_at = if remember {
+            let session = self.settings.session().await?;
+            Some(Utc::now() + chrono::Duration::days(session.remember_days.max(1)))
+        } else {
+            None
+        };
         self.repo
             .create_session(
                 user.id,
@@ -464,6 +487,7 @@ impl AppState {
                 device.device_label().as_deref(),
                 device.ip.as_deref(),
                 device.user_agent.as_deref(),
+                expires_at,
             )
             .await?;
         let csrf_token = crypto_token::new_csrf_token()?;
@@ -474,6 +498,18 @@ impl AppState {
         })
     }
 
+    /// 会话有效期的当前策略。设置读不出来时用保守默认（闲置两小时、最长 30 天），
+    /// 不让一次设置读取失败变成「谁都能永久登录」。
+    pub async fn session_policy(&self) -> pixora_repo::model::SessionPolicy {
+        match self.settings.session().await {
+            Ok(session) => session.policy(),
+            Err(err) => {
+                tracing::warn!(error = %err, "读取会话设置失败，按默认有效期处理");
+                pixora_repo::model::SessionPolicy::fallback()
+            }
+        }
+    }
+
     // ============================================================
     // 鉴权入口（只有这两个）
     // ============================================================
@@ -482,6 +518,9 @@ impl AppState {
     ///
     /// 每次请求都刷新 `last_seen_at`，顺带更新 IP（换网了）。状态判断统一走
     /// [`Self::ensure_loginable`]。
+    ///
+    /// 过期判定用设置里的策略（闲置超时 + 最长寿命）；判到过期就地吊销这一行，
+    /// 于是「活跃会话」列表里也就自然没有它了。
     pub async fn authenticate_session(
         &self,
         session_token: &str,
@@ -494,9 +533,23 @@ impl AppState {
         if !session.is_live() {
             return Err(AppError::Unauthorized);
         }
-        let Some(user) = self.repo.find_user_by_id(session.user_id).await? else {
+        let policy = self.session_policy().await;
+        if session.is_expired(policy, Utc::now()) {
+            // 过期就顺手吊销：列表按同一条尺子过滤，不再显示已经掉线的会话
+            let _ = self
+                .repo
+                .revoke_session(session.id, session.user_id, Utc::now())
+                .await;
+            return Err(AppError::Unauthorized);
+        }
+
+        let Some(mut user) = self.repo.find_user_by_id(session.user_id).await? else {
             return Err(AppError::Unauthorized);
         };
+        // 内容审核的自动暂停到期就放人：用户下次访问就是恢复的时刻
+        if let Some(fresh) = self.lift_expired_suspension(&user).await {
+            user = fresh;
+        }
 
         // 被暂停或封禁的账号：会话立即失效（管理员处置时也会批量吊销，
         // 这里再判一次是防「吊销之前就已经建立的请求」）
@@ -520,9 +573,13 @@ impl AppState {
         if !record.is_usable(Utc::now()) {
             return Err(AppError::TokenRevoked);
         }
-        let Some(user) = self.repo.find_user_by_id(record.user_id).await? else {
+        let Some(mut user) = self.repo.find_user_by_id(record.user_id).await? else {
             return Err(AppError::TokenRevoked);
         };
+        // 自动暂停到期就放人（管理员手工封禁没有到期时间，不受影响）
+        if let Some(fresh) = self.lift_expired_suspension(&user).await {
+            user = fresh;
+        }
 
         // Token 不删，靠这里的状态判断实现「暂停即失效、解封即恢复」
         self.ensure_loginable(&user)?;
@@ -558,9 +615,33 @@ impl AppState {
         user_id: i64,
         current_session_id: i64,
     ) -> Result<Vec<SessionView>> {
+        let policy = self.session_policy().await;
+        let now = Utc::now();
+        // 过期的会话先吊销掉，再把剩下的列出来。
+        // 「活跃会话」只该有真正还能用的那些：长期未活动、或者「记住我」已到期的
+        // 行还挂在列表里，用户会以为自己没退出过。
+        let idle_before = if policy.idle_minutes > 0 {
+            Some(now - chrono::Duration::minutes(policy.idle_minutes))
+        } else {
+            None
+        };
+        let created_before = if policy.absolute_days > 0 {
+            Some(now - chrono::Duration::days(policy.absolute_days))
+        } else {
+            None
+        };
+        if let Err(err) = self
+            .repo
+            .revoke_expired_sessions(user_id, now, idle_before, created_before)
+            .await
+        {
+            tracing::warn!(error = %err, "吊销过期会话失败，列表仍按策略过滤");
+        }
+
         let sessions = self.repo.list_sessions(user_id).await?;
         Ok(sessions
             .into_iter()
+            .filter(|session| !session.is_expired(policy, now))
             .map(|session| SessionView {
                 current: session.id == current_session_id,
                 device: session.device.clone(),
@@ -612,6 +693,84 @@ impl AppState {
         )
         .await;
         Ok(revoked)
+    }
+
+    // ============================================================
+    // 免登录切换用户（管理员）
+    // ============================================================
+
+    /// 管理员切换到目标用户的会话。
+    ///
+    /// 返回目标用户的会话令牌与 CSRF；调用方负责把 Cookie 换成它，并把管理员
+    /// 自己的令牌塞进 `pixora_impersonator` Cookie。刷新之后还能切回来，
+    /// 靠的正是那个 Cookie——它是「免登录切换」成立的前提，所以必须传原件。
+    pub async fn impersonate_start(
+        &self,
+        admin: &User,
+        admin_session_token: &str,
+        target_user_id: i64,
+        device: &DeviceInfo,
+    ) -> Result<IssuedSession> {
+        if !admin.is_admin() {
+            return Err(AppError::forbidden("只有管理员可以使用免登录切换"));
+        }
+        // 先证「能切回来」：管理员自己的会话必须是活的，否则切过去就回不来了
+        let hash = crypto_token::token_hash(admin_session_token);
+        let Some(session) = self.repo.find_session_by_hash(&hash).await? else {
+            return Err(AppError::bad_request(
+                "当前会话已失效，请重新登录后再切换用户",
+            ));
+        };
+        if session.user_id != admin.id {
+            return Err(AppError::forbidden("会话与当前管理员对不上"));
+        }
+
+        let Some(target) = self.repo.find_user_by_id(target_user_id).await? else {
+            return Err(AppError::not_found("用户"));
+        };
+        if target.id == admin.id {
+            return Err(AppError::bad_request("目标就是你自己，不用切换"));
+        }
+        if target.is_banned() {
+            // 封禁账号连管理员也不该切进去：切进去什么也做不了，
+            // 只会把「封禁」这件事看起来像没生效
+            return Err(AppError::forbidden("该账号已被封禁，无法切换登录"));
+        }
+
+        let issued = self.issue_session(&target, device, false).await?;
+        self.audit_detail(
+            actions::IMPERSONATE_START,
+            Some(admin.id),
+            &target.uid,
+            serde_json::json!({
+                "target_email": target.email,
+                "target_role": target.role,
+                "target_status": target.status,
+            }),
+            device.ip.as_deref(),
+        )
+        .await;
+        Ok(issued)
+    }
+
+    /// 解析「切回管理员」用的令牌。校验它对应的会话仍然有效、且属于活跃管理员。
+    pub async fn impersonator_user(&self, token: &str) -> Result<User> {
+        let hash = crypto_token::token_hash(token);
+        let Some(session) = self.repo.find_session_by_hash(&hash).await? else {
+            return Err(AppError::Unauthorized);
+        };
+        let policy = self.session_policy().await;
+        if !session.is_usable(policy, Utc::now()) {
+            return Err(AppError::Unauthorized);
+        }
+        let Some(user) = self.repo.find_user_by_id(session.user_id).await? else {
+            return Err(AppError::Unauthorized);
+        };
+        if !user.is_admin() {
+            return Err(AppError::forbidden("只有管理员的会话能作为切换来源"));
+        }
+        self.ensure_loginable(&user)?;
+        Ok(user)
     }
 
     // ============================================================
@@ -863,7 +1022,10 @@ impl AppState {
     }
 
     /// 把邮件写进发件箱并尝试立即投递。投递失败由发件箱的重试机制兜底。
-    async fn dispatch_mail(
+    ///
+    /// 公开（`pub`）是因为内容审核的上报与自动暂停通知也要走同一条路径——
+    /// 三处各写一遍渲染与重试，迟早会漂移。
+    pub async fn dispatch_mail(
         &self,
         to: &str,
         template: &str,

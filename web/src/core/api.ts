@@ -271,15 +271,46 @@ async function parseResponse(
  * CSRF 校验失败会自动重取令牌再试一次：令牌漂了通常是「在另一个标签页登录过」
  * 这类浏览器级原因，属于可自愈的情况，不该让用户对着「请刷新页面后重试」发呆。
  * 写操作在 CSRF 这一关卡住时什么都不会发生，重试是安全的。
+ *
+ * 401 单独处理后置收尾：会话有闲置超时，最长寿命也有限，超时之后再发请求就会
+ * 拿到 401。这时把身份清掉并送回登录页——否则页面一直显示着旧数据，
+ * 用户点什么都失败，却看不出原因。
  */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   try {
     return await sendRequest<T>(path, options);
   } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      handleSessionExpired(path);
+    }
     if (!(err instanceof ApiError) || err.code !== "CSRF_FAILED") throw err;
     await refreshCsrfToken();
     return await sendRequest<T>(path, options);
   }
+}
+
+/**
+ * 会话失效的统一处置。
+ *
+ * 登录/注册这类公开接口不参与：它们本来就允许在未登录状态下调用，
+ * 401 在那里是「凭据不对」的另一种说法，跳走会打断正在填的表单。
+ */
+function handleSessionExpired(path: string): void {
+  if (path.startsWith("/auth/") || path.startsWith("/install")) return;
+  sessionExpiredHandler?.(path);
+}
+
+/**
+ * 会话失效的处置钩子。
+ *
+ * 这里不直接 import state / router / toast：api 是被它们依赖的底层模块，
+ * 反向 import 会绕成环。由 main.ts 在启动时注册一次，逻辑写在上层——
+ * 那里能同时看到用户状态、路由与提示。
+ */
+let sessionExpiredHandler: ((path: string) => void) | null = null;
+
+export function onSessionExpired(handler: (path: string) => void): void {
+  sessionExpiredHandler = handler;
 }
 
 /** 取一次最新的 CSRF 令牌：Cookie 是权威来源，再拉一次 /me 把响应里的那份也吃进来。 */

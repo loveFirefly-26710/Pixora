@@ -165,8 +165,9 @@ async fn read_small_field(
 
 /// `POST /api/v1/blobs/exists` — 上传前预检。
 ///
-/// 一次最多 1000 个哈希由领域层拦（`check_hashes`）；路由只负责把
-/// JSON 数组翻译成 `Vec<String>`，非字符串元素直接丢掉而不是报错——
+/// 条数上限由领域层拦（`check_hashes`）：1000 是协议硬顶，再按这个账号生效的
+/// 单批次最大张数与队列深度阈值各卡一道。路由只负责把 JSON 数组翻译成
+/// `Vec<String>`，非字符串元素直接丢掉而不是报错——
 /// 前端可能把 `null` 混进来，为这个让整批预检失败不划算。
 pub async fn blobs_exists(
     State(state): State<Arc<AppState>>,
@@ -196,7 +197,7 @@ pub async fn blobs_exists(
         })
         .unwrap_or_default();
 
-    match state.check_hashes(auth.user.id, &hashes).await {
+    match state.check_hashes(&auth.user, &hashes).await {
         Ok(outcome) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "exist": outcome.exist,
             "missing": outcome.missing,

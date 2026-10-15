@@ -212,7 +212,11 @@ impl AppState {
         Ok(created)
     }
 
-    /// 修改条款。**只有草稿可以改**——已生效的版本改了正文，
+    /// 修改条款。**草稿与历史版本可以改，生效中的不能改**。
+    ///
+    /// 历史（已归档）版本允许修订：管理员可能发现旧版本里有个错别字，
+    /// 而它又不在生效状态，改它不会动到任何人已经同意过的那一版。
+    /// 生效中的版本必须走「另存为新版本再发布」——改了正文之后，
     /// 之前那些「同意记录」到底同意的是什么就说不清了。
     pub async fn terms_update(&self, admin_id: i64, id: i64, input: TermsInput) -> Result<()> {
         let existing = self
@@ -220,8 +224,10 @@ impl AppState {
             .find_terms(id)
             .await?
             .ok_or_else(|| AppError::not_found("条款版本"))?;
-        if existing.status != terms_status::DRAFT {
-            return Err(AppError::bad_request("只有草稿状态可以修改"));
+        if existing.is_active() {
+            return Err(AppError::Conflict(
+                "生效中的版本不能就地修改：请用「另存为新版本」改出一版草稿再发布".into(),
+            ));
         }
 
         let version = validate_version_format(&input.version)?;
@@ -304,21 +310,19 @@ impl AppState {
             ));
         }
 
-        // 有同意记录的版本删不掉（外键 RESTRICT），先查一遍给出人话解释：
-        // 那些记录还要能指出「当初同意的是哪一版」
-        let consents = self.repo.count_consents(id).await?;
-        if consents > 0 {
-            return Err(AppError::bad_request(format!(
-                "该版本已有 {consents} 条用户同意记录，删除后无从追溯，不能删除"
-            )));
-        }
-
-        self.repo.delete_terms(id).await?;
+        // 删除就是真删：版本行与它的同意记录一起消失。
+        // 同意记录本来是为了「当初同意的是哪一版」可追溯，而这个可追溯性
+        // 是挂在版本行上的——版本行没了，留下的记录也只是孤儿。
+        // 删掉多少条会写进审计，界面上也会先确认一次。
+        let consents = self.repo.delete_terms(id).await?;
         self.audit_detail(
             terms_actions::DELETE,
             Some(admin_id),
             target.version,
-            serde_json::json!({ "status": target.status }),
+            serde_json::json!({
+                "status": target.status,
+                "consents_removed": consents,
+            }),
             None,
         )
         .await;
@@ -477,56 +481,8 @@ impl<'de> serde::Deserialize<'de> for TermsInput {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use tempfile::TempDir;
-
     use super::*;
-    use crate::config::{Config, KeySource};
-    use pixora_repo::NewUser;
-
-    /// 装一个只跑 SQLite + 本地目录的 AppState。
-    async fn test_state(dir: &TempDir) -> Arc<AppState> {
-        let config = Config {
-            bind: "127.0.0.1:0".parse().expect("监听地址"),
-            db_driver: pixora_repo::DbDriver::Sqlite,
-            db_dsn: dir
-                .path()
-                .join("pixora-test.db")
-                .to_string_lossy()
-                .into_owned(),
-            db_max_connections: 2,
-            data_dir: dir.path().to_path_buf(),
-            master_key: Some(pixora_crypto::MasterKey::generate().expect("主密钥")),
-            key_source: KeySource::Generated(dir.path().join("master.key")),
-            workers: 1,
-            base_url: None,
-            trust_proxy: 0,
-            web_dir: None,
-            accel_prefix: None,
-            secure_cookies: false,
-            dev_return_codes: false,
-            log_level: "warn".into(),
-        };
-        AppState::bootstrap(config).await.expect("装配 AppState")
-    }
-
-    /// 造一个用户，条款测试只关心 id，不关心登录能力。
-    async fn make_user(state: &AppState, email: &str, uid: &str) -> User {
-        state
-            .repo
-            .create_user(&NewUser {
-                uid: uid.to_string(),
-                email: email.to_string(),
-                password_hash: "$argon2id$fake".to_string(),
-                role: pixora_repo::model::role::USER.to_string(),
-                status: pixora_repo::model::status::ACTIVE.to_string(),
-                quota_bytes: 1024 * 1024,
-                email_verified: true,
-            })
-            .await
-            .expect("建用户")
-    }
+    use crate::tests_support::{make_user, test_state};
 
     /// 条款的 `created_by` 有外键，管理动作必须挂在一个真实账号上。
     async fn make_actor(state: &AppState) -> User {
@@ -810,17 +766,40 @@ mod tests {
             .expect_err("版本号已存在");
         assert_eq!(error.code(), "CONFLICT");
 
-        // 生效后的版本不能再改
+        // 生效后的版本不能再改：改了之后「用户同意的是哪一份」就说不清了
         state.terms_publish(actor.id, draft.id).await.unwrap();
         let error = state
             .terms_update(actor.id, draft.id, terms_input("v1.2", false, false))
             .await
-            .expect_err("只有草稿可改");
-        assert_eq!(error.message(), "只有草稿状态可以修改");
+            .expect_err("生效版本不可就地改");
+        assert_eq!(error.code(), "CONFLICT");
+        assert!(
+            error.message().contains("另存为新版本"),
+            "提示里要给出路：{}",
+            error.message()
+        );
+
+        // 归档（历史）版本可以修订：它不生效，改它不影响任何人的同意记录
+        let archived = state
+            .repo
+            .find_terms_by_version("v2.0")
+            .await
+            .unwrap()
+            .expect("上一版");
+        // 先让 v2.0 生效，v1.1 就成了历史版本
+        state.terms_publish(actor.id, archived.id).await.unwrap();
+        let mut edited = terms_input("v1.1", false, false);
+        edited.body = "历史版本的正文也可以改：它不生效，改它不影响任何人的同意记录".into();
+        state
+            .terms_update(actor.id, draft.id, edited)
+            .await
+            .expect("历史版本可修订");
+        let reloaded = state.repo.find_terms(draft.id).await.unwrap().unwrap();
+        assert!(reloaded.body.contains("历史版本"));
     }
 
     #[tokio::test]
-    async fn delete_refuses_active_and_consented_versions() {
+    async fn delete_refuses_active_but_really_removes_others() {
         let dir = tempfile::tempdir().expect("临时目录");
         let state = test_state(&dir).await;
         let actor = make_actor(&state).await;
@@ -853,12 +832,21 @@ mod tests {
             .await
             .unwrap();
 
-        // v1.0 已归档，但已经有同意记录，仍然不能删
-        let error = state
+        // v1.0 已归档、且已经有同意记录：删除就是真删，
+        // 连同那条同意记录一起消失（记录挂在版本行上，版本没了它也只是孤儿）
+        state
             .terms_delete(actor.id, active.id)
             .await
-            .expect_err("有同意记录的版本不能删");
-        assert!(error.message().contains("同意记录"), "{}", error.message());
+            .expect("归档版本应当能真删");
+        assert!(
+            state.repo.find_terms(active.id).await.unwrap().is_none(),
+            "删除后版本行不该还在"
+        );
+        assert_eq!(
+            state.repo.count_consents(active.id).await.unwrap(),
+            0,
+            "同意记录跟着版本一起删掉"
+        );
 
         // 没人同意过的草稿可以删
         let draft = state

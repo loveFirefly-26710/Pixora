@@ -9,8 +9,9 @@
 *.pem
 *.key
 
-# 运行时数据
+# 运行时数据（data.bak-* 是清空环境前留下的备份，见 README 的排障说明）
 /data/
+/data.bak-*/
 /pgdata/
 *.db
 *.sqlite

@@ -13,7 +13,7 @@ import { formatDateTime, relativeTime } from "../core/format";
 import { confirmDialog, openModal } from "../core/modal";
 import { encodeQr, qrSvg } from "../core/qrcode";
 import type { PageContext } from "../core/router";
-import { updateUser } from "../core/state";
+import { getState, updateUser } from "../core/state";
 import { toastError, toastOk, toastWithCode, toast } from "../core/toast";
 import type { SessionRow, UserProfile } from "../core/types";
 import {
@@ -506,7 +506,33 @@ function sessionsCard(list: SessionRow[], hooks: SessionHooks): HTMLElement {
         text: others === 0 ? "当前只有这一台设备在线。" : `除当前设备外还有 ${others} 个会话。`,
       }),
     ),
+    sessionPolicyTip(),
   );
+}
+
+/**
+ * 会话有效期的说明。
+ *
+ * 「多久没动就要重新登录」是用户能感知到的规则，写在列表下面比只放在
+ * 后台设置里合适：掉线之后被弹到登录页时，至少知道为什么。
+ */
+/** 「120 分钟」写成「2 小时」——设置里填的是分钟，读的人按小时想。 */
+function describeMinutes(minutes: number): string {
+  if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60} 小时`;
+  if (minutes >= 60) return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`;
+  return `${minutes} 分钟`;
+}
+
+function sessionPolicyTip(): HTMLElement | null {
+  const policy = getState().site?.session;
+  if (!policy) return null;
+  const parts: string[] = [];
+  if (policy.idle_minutes > 0) {
+    parts.push(`${describeMinutes(policy.idle_minutes)}不操作会自动退出登录`);
+  }
+  if (policy.absolute_days > 0) parts.push(`单次登录最长 ${policy.absolute_days} 天`);
+  if (parts.length === 0) return h("div.tip", { text: "当前未设置会话超时。" });
+  return h("div.tip", { text: `${parts.join("，")}。届时需要重新输入密码。` });
 }
 
 function revokeButton(item: SessionRow, hooks: SessionHooks): HTMLElement {

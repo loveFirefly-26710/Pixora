@@ -465,6 +465,7 @@ mod tests {
             used_bytes: 0,
             login_fail_count: 0,
             locked_until: None,
+            auto_unsuspend_at: None,
             created_at: Utc::now(),
             last_login_at: None,
             last_login_ip: None,

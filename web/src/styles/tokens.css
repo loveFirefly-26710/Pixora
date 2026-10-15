@@ -54,6 +54,23 @@ body {
   overflow-x: hidden;
 }
 
+/* 站点背景图。
+   管理员在「系统设置 → 外观」里配的图（本地上传或外链）由 state.applySiteIdentity
+   写进 --site-bg-image。做成固定底层而不是 body 的 background：
+   body 上的背景会在长页面里跟着滚，而且卡片区一旦有半透明背景就糊成一片。 */
+body.has-site-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image: var(--site-bg-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  /* 压一层半透明白，保证前景文字在任何背景图上都读得清 */
+  opacity: 0.35;
+}
+
 a {
   color: inherit;
 }

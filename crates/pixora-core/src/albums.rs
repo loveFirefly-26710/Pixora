@@ -239,7 +239,9 @@ impl AppState {
         // 回收站关着就是彻底删：相册行与其中的墓碑一起清掉
         if self.settings.retention_days().await? == 0 {
             for image_id in self.repo.deleted_image_ids_in_album(album_id, 20_000).await? {
-                let _ = self.repo.purge_image_row(image_id).await;
+                if let Ok(Some(targets)) = self.repo.purge_image_row(image_id).await {
+                    self.reclaim_purged(vec![targets]).await;
+                }
             }
             self.repo.delete_album(album_id).await?;
         }
@@ -335,7 +337,9 @@ impl AppState {
                     .await;
                 }
             }
-            let _ = self.repo.purge_image_row(*id).await;
+            if let Ok(Some(targets)) = self.repo.purge_image_row(*id).await {
+                self.reclaim_purged(vec![targets]).await;
+            }
         }
         if let Some(owner) = owner.as_ref() {
             self.prune_view_dir(
@@ -496,6 +500,7 @@ mod tests {
             used_bytes: 0,
             login_fail_count: 0,
             locked_until: None,
+            auto_unsuspend_at: None,
             created_at: pixora_repo::model::now(),
             last_login_at: None,
             last_login_ip: None,

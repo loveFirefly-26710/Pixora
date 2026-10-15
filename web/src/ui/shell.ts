@@ -9,9 +9,11 @@
  * 重建会让移动端的滚动位置出问题。
  */
 
-import { h } from "../core/dom";
+import { h, mount } from "../core/dom";
 import { currentPath, navigate } from "../core/router";
-import { getState, isAdmin, subscribe } from "../core/state";
+import { getState, impersonator, isAdmin, setUser, subscribe } from "../core/state";
+import { request } from "../core/api";
+import { toast, toastError } from "../core/toast";
 
 interface NavItem {
   path: string;
@@ -37,12 +39,10 @@ const USER_NAV: NavItem[] = [
   { path: "/account/terms", label: "服务调整 · 服务条款", icon: "📄", match: ["/account/terms"] },
   { path: "/recycle", label: "回收站", icon: "🗑", match: ["/recycle"] },
 ];
-
 const ADMIN_NAV: NavItem[] = [
   { path: "/admin/users", label: "用户管理", icon: "👥", match: ["/admin/users"] },
   { path: "/admin/storage", label: "存储管理", icon: "💾", match: ["/admin/storage"] },
   { path: "/admin/quota", label: "配额与容量", icon: "📊", match: ["/admin/quota"] },
-  { path: "/admin/ratelimit", label: "频率限制", icon: "⏱", match: ["/admin/ratelimit"] },
   { path: "/admin/ip", label: "IP 黑名单", icon: "🛡", match: ["/admin/ip"] },
   { path: "/admin/settings", label: "系统设置", icon: "⚙", match: ["/admin/settings"] },
   { path: "/admin/terms", label: "服务条款", icon: "📄", match: ["/admin/terms"] },
@@ -56,6 +56,8 @@ let refs: {
   sidebar: HTMLElement | null;
   tabbar: HTMLElement;
   outlet: HTMLElement;
+  /** 页面内容上方的提示条槽位（目前放免登录切换的提示） */
+  banner: HTMLElement;
 } | null = null;
 
 /**
@@ -97,9 +99,16 @@ export function renderNavbar(): HTMLElement {
   const user = getState().user;
   const navbar = h("div.navbar");
 
-  navbar.append(
-    h("a.logo", { href: "#/", html: `Pi<em>x</em>ora`, "aria-label": "回到广场首页" }),
-  );
+  // 品牌文字跟着站点名走：`data-brand` 是给 state.applySiteIdentity 改文字用的。
+  // 站名还是默认的 Pixora 时保留原来的双色写法——那是 Logo，不是文字
+  const name = (getState().site?.name ?? "").trim() || "Pixora";
+  const logo = h("a.logo", { href: "#/", "aria-label": "回到广场首页" });
+  if (name === "Pixora") {
+    logo.innerHTML = `Pi<em>x</em>ora`;
+  } else {
+    logo.append(h("span", { "data-brand": "1", text: name }));
+  }
+  navbar.append(logo);
 
   // 搜索框固定在顶栏（不再只在广场与相册页出现）：在哪儿搜都落到当前板块的结果页
   const path = currentPath();
@@ -178,8 +187,41 @@ function renderSidebar(): HTMLElement | null {
     sidebar.append(h("div.grp", { text: title }));
     for (const item of items) sidebar.append(navLink(item));
   }
+  // 退出登录放在侧边栏最后：它是账号级动作，和上面那些「去哪一页」不同类
+  sidebar.append(
+    h("div.grp", { text: "账号" }),
+    h(
+      "button.logout",
+      { type: "button", "data-act": "logout" },
+      h("span", { text: "⏻" }),
+      h("span", { text: "退出登录" }),
+    ),
+  );
   return sidebar;
 }
+
+/**
+ * 退出登录。
+ *
+ * 服务端登出是幂等的（没有会话也返回成功），所以这里不纠结失败：
+ * 本地状态一定要清干净，否则用户点了「退出」却还看着自己的页面。
+ */
+export async function logoutNow(): Promise<void> {
+  try {
+    await request("/auth/logout", { method: "POST" });
+  } catch (err) {
+    toastError(err);
+  }
+  setUser(null);
+  navigate("/login", { replace: true });
+  toast("已退出登录");
+}
+
+/** 侧边栏的退出按钮走事件委托，避免每页各绑一次。 */
+document.addEventListener("click", (event) => {
+  const target = event.target as HTMLElement | null;
+  if (target?.closest('[data-act="logout"]')) void logoutNow();
+});
 
 /**
  * 把顶栏的真实高度写进 `--nav-h`。
@@ -199,19 +241,30 @@ function syncNavHeight(navbar: HTMLElement): void {
 export function mountShell(root: HTMLElement): HTMLElement {
   const navbar = renderNavbar();
   const tabbar = renderTabbar();
+  const banner = h("div.banner-slot");
   const outlet = h("main.app-main");
   const sidebar = renderSidebar();
 
-  const shell = h("div.shell", null, sidebar, outlet);
+  // 提示条放在 outlet 之外：路由每次切换都会清空 outlet，
+  // 放在里面的话「你正在以别人身份登录」这条提示会被一起清掉
+  const shell = h("div.shell", null, sidebar, h("div.shell-body", null, banner, outlet));
   root.replaceChildren(navbar, shell, tabbar);
 
-  refs = { shell, navbar, sidebar, tabbar, outlet };
+  refs = { shell, navbar, sidebar, tabbar, outlet, banner };
+  refreshBanner();
   syncNavHeight(navbar);
   window.addEventListener("resize", () => {
     if (refs) syncNavHeight(refs.navbar);
   });
   subscribe(() => refreshNav());
   return outlet;
+}
+
+/** 填提示条槽位。没有要提示的东西时槽位留空（CSS 里 `:empty` 不占位置）。 */
+function refreshBanner(): void {
+  if (!refs) return;
+  const info = impersonator();
+  mount(refs.banner, info ? impersonationBanner(info, () => void stopImpersonation()) : null);
 }
 
 export function outlet(): HTMLElement {
@@ -241,6 +294,8 @@ export function refreshNav(): void {
   if (refs.sidebar) refs.sidebar.remove();
   refs.sidebar = renderSidebar();
   if (refs.sidebar) refs.shell.prepend(refs.sidebar);
+
+  refreshBanner();
 }
 
 /** 判断当前是否在某个路径下（页面内部高亮用）。 */
@@ -287,3 +342,61 @@ export function userViewBanner(
 }
 
 export { PLAZA, ALBUMS, UPLOAD, MINE, ADMIN_NAV, USER_NAV, ABOUT_NAV };
+
+/**
+ * 免登录切换用户的提示条。
+ *
+ * 与「用户视图」那条不同：这一条说明的是**当前登录身份就是别人**，
+ * 所以一切都按对方账号走（相册、上传、配额），只是随时能一键切回管理员。
+ * 这条提示是页面上唯一说明「你现在是谁」的东西，固定在内容顶部。
+ */
+export function impersonationBanner(
+  info: { uid: string; email: string },
+  onStop: () => void,
+): HTMLElement {
+  return h(
+    "div",
+    {
+      style: {
+        background: "var(--warning-soft, #fef3c7)",
+        border: "1px solid #fcd34d",
+        borderRadius: "10px",
+        padding: "10px 14px",
+        marginBottom: "14px",
+        display: "flex",
+        gap: "10px",
+        alignItems: "center",
+        flexWrap: "wrap",
+      },
+    },
+    h(
+      "div",
+      { style: { flex: "1", minWidth: "200px", fontSize: "13px", color: "#92400e" } },
+      h("b", { text: `你正在以 u_${info.uid}（${info.email}）的身份登录` }),
+      h("div", {
+        style: { fontSize: "12px", marginTop: "2px" },
+        text: "这是管理员免登录切换：当前操作都算在对方名下。刷新页面后仍可切回。",
+      }),
+    ),
+    h("button.btn.sm", { type: "button", text: "切回管理员", on: { click: onStop } }),
+  );
+}
+
+/** 切回管理员：服务端把会话换回去，前端刷新一次拿到管理员的身份。 */
+export async function stopImpersonation(): Promise<void> {
+  try {
+    await request("/admin/impersonate/stop", { method: "POST" });
+    toast("已切回管理员");
+    // 身份换了，缓存里的用户信息一律作废：整页重载最省心也最不容易出错
+    window.location.reload();
+  } catch (err) {
+    toastError(err);
+  }
+}
+
+/** 页面自己决定要不要在顶部挂提示条。 */
+export function topBanner(): HTMLElement | null {
+  const info = impersonator();
+  if (!info) return null;
+  return impersonationBanner(info, () => void stopImpersonation());
+}

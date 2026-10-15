@@ -11,7 +11,7 @@
 import { ApiError, request } from "../core/api";
 import { copyText, h } from "../core/dom";
 import { formatBytes, formatDuration, formatNumber, shortHash } from "../core/format";
-import { getState } from "../core/state";
+import { getState, subscribe as subscribeState } from "../core/state";
 import { toastError, toastRateLimited, toastWithCode } from "../core/toast";
 import type { AlbumList, UploadResult } from "../core/types";
 import { badge, qtip, statCard } from "../ui/widgets";
@@ -53,7 +53,10 @@ export interface UploadPanelHandle {
  *  未登录才回落到 /site 的全局值。 */
 function supportedHint(): string {
   const limits = getState().user?.limits;
-  const formats = (limits?.formats ?? getState().site?.formats ?? []).map((ext) => ext.toUpperCase());
+  const formats = (limits?.formats ?? getState().site?.formats ?? []).map((ext) =>
+    // 库里存的是 jpg（JPEG 归一后的名字），写 JPG 更贴近用户看到的扩展名
+    ext.toUpperCase() === "JPG" ? "JPG" : ext.toUpperCase(),
+  );
   const maxBytes = limits?.max_file_size ?? getState().site?.max_file_bytes;
   const size = maxBytes ? formatBytes(maxBytes) : "";
   if (formats.length === 0) {
@@ -89,10 +92,20 @@ function statusBadge(item: QueueItem): HTMLElement {
   }
 }
 
-/** 上传文件的 accept：图片通配 + 站点白名单扩展名，HEIC/TIFF 这种没有 image/* 的也能选。 */
+/** 上传文件的 accept：图片通配 + 站点白名单扩展名，HEIC/TIFF 这种没有 image/* 的也能选。
+ *
+ *  白名单里的名字是归一后的（jpg / tiff / heic），用户的文件名却常见
+ *  .jpeg / .tif / .heif。accept 里不带上这些写法，文件对话框会默认把它们
+ *  滤掉——用户看到的印象是「我的图明明在文件夹里，选不到」。 */
 function acceptAttr(): string {
   const formats = getState().site?.formats ?? [];
-  return ["image/*", ...formats.map((ext) => `.${ext}`)].join(",");
+  const ACCEPT_ALIASES: Record<string, string[]> = {
+    jpg: ["jpeg", "jpe"],
+    tiff: ["tif"],
+    heic: ["heif"],
+  };
+  const extensions = formats.flatMap((ext) => [`${ext}`, ...(ACCEPT_ALIASES[ext] ?? [])]);
+  return ["image/*", ...extensions.map((ext) => `.${ext}`)].join(",");
 }
 
 interface DirEntryLike {
@@ -191,6 +204,13 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     });
   }
 
+  const hintEl = h("div.tip", { style: { marginTop: "8px" }, text: supportedHint() });
+  const refreshHint = (): void => {
+    hintEl.textContent = supportedHint();
+    // 相册清单也可能刚变（新建/删除相册），下拉跟着重画
+    if (albumSelect.options.length === 0) void fetchAlbums();
+  };
+
   const dropzone = h("div.dropzone");
   dropzone.append(
     h("div.ph", { style: { width: "46px", height: "46px", borderRadius: "10px", margin: "0 auto 8px" }, text: "＋" }),
@@ -204,8 +224,9 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
       h("span.kbd", { text: "V" }),
       " 粘贴剪贴板里的图片",
     ),
-    // 支持哪些格式、单张多大，直接写在这里：进页面就知道，不用先失败一次
-    h("div.tip", { style: { marginTop: "8px" }, text: supportedHint() }),
+    // 支持哪些格式、单张多大，直接写在这里：进页面就知道，不用先失败一次。
+    // 元素留着引用，站点设置变了就重画一次（见 refreshHint）
+    hintEl,
   );
   const dropButtons = h(
     "div.flexline",
@@ -374,7 +395,38 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
       queue.setSettings({ albumId: albumSelect.value ? Number(albumSelect.value) : null });
     }
   };
+  /**
+   * 相册清单没到位时先摆一行占位。
+   *
+   * 空着的下拉框看起来像坏了——用户第一次登录时就是这样：面板先渲染，
+   * 相册清单还在路上，那一格是白的。占位项是禁用的，选不中，
+   * 上传时会走「不指定相册」，服务端把它落进默认相册。
+   */
+  const setAlbumPlaceholder = (text: string): void => {
+    albumSelect.replaceChildren(h("option", { value: "", text, disabled: true }));
+    albumSelect.value = "";
+  };
+
+  /** 自己把相册清单拉回来。失败的兜底是「默认相册」一项，而不是空白。 */
+  const fetchAlbums = async (): Promise<void> => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const albums = await loadAlbumOptions(getState().viewingUid);
+        setAlbumOptions(albums, options.albumId);
+        return;
+      } catch {
+        // 第一次失败再试一次：多半是首屏几个请求挤在一起
+      }
+    }
+    setAlbumPlaceholder("默认相册（相册清单没读到，按默认相册上传）");
+    queue.setSettings({ albumId: null });
+  };
+
   setAlbumOptions(options.albums ?? [], options.albumId);
+  if ((options.albums?.length ?? 0) === 0) {
+    setAlbumPlaceholder("正在读取相册…");
+    void fetchAlbums();
+  }
 
   albumSelect.addEventListener("change", () => {
     queue.setSettings({ albumId: albumSelect.value ? Number(albumSelect.value) : null });
@@ -757,6 +809,9 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
 
   // ---------- 事件绑定 ----------
 
+  // 站点或用户设置变了（管理员改了格式白名单、配额调整）就刷新提示：
+  // 这一页一直开着的时候，清单不该还停在进页面时那份
+  const stateUnsubscribe = subscribeState(() => refreshHint());
   const unsubscribe = queue.subscribe((event) => {
     if (destroyed) return;
     switch (event.kind) {
@@ -839,6 +894,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     destroy() {
       destroyed = true;
       unsubscribe();
+      stateUnsubscribe();
       uploadUnsubscribe();
       document.removeEventListener("paste", onPaste);
       document.removeEventListener("dragover", preventDrop);

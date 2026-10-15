@@ -358,8 +358,11 @@ pub async fn user_view(state: &Arc<AppState>, user: &User) -> pixora_core::Resul
             "max_file_size": upload.max_file_bytes,
             "max_batch_size": upload.max_batch,
             "max_pixels": upload.max_pixels,
+            "max_width": upload.max_width,
+            "max_height": upload.max_height,
             "formats": upload.formats,
             "max_concurrent_uploads": upload.max_concurrent_uploads,
+            "queue_depth": state.settings.upload().await?.queue_depth,
             "unlimited": limits.unlimited,
         },
     }))
@@ -370,14 +373,37 @@ pub async fn user_view(state: &Arc<AppState>, user: &User) -> pixora_core::Resul
 /// `csrf_token` 在会话模式下就是 `pixora_csrf` Cookie 的值（前端存内存后刷新页面
 /// 靠 Cookie 还原），所以这里把它从请求里读回来原样回显；Token 模式下没有
 /// CSRF 这条线，给 `null`。
+///
+/// `impersonator` 是管理员免登录切换用户时多出来的一段：有值说明当前身份是
+/// 「管理员切过来的」，前端据此显示提示条与切回入口。它由服务端的
+/// `pixora_impersonator` Cookie 决定，前端伪造不了。
 pub async fn me_payload(
     state: &Arc<AppState>,
     user: &User,
     csrf_token: Option<String>,
+    impersonator: Option<serde_json::Value>,
 ) -> pixora_core::Result<serde_json::Value> {
     Ok(serde_json::json!({
         "user": user_view(state, user).await?,
         "csrf_token": csrf_token,
+        "impersonator": impersonator,
+    }))
+}
+
+/// 从请求头里解出「谁切过来的」。
+///
+/// Cookie 缺失或已失效都返回 `None`——那只是「切不回去了」，
+/// 不该让整次请求失败。
+pub async fn impersonator_info(
+    state: &Arc<AppState>,
+    headers: &axum::http::HeaderMap,
+) -> Option<serde_json::Value> {
+    let token = crate::http::impersonator_cookie(headers)?;
+    let admin = state.impersonator_user(&token).await.ok()?;
+    Some(serde_json::json!({
+        "id": admin.id,
+        "uid": admin.uid,
+        "email": admin.email,
     }))
 }
 
@@ -488,6 +514,7 @@ mod tests {
                 Some("测试设备"),
                 Some("203.0.113.18"),
                 Some("Mozilla/5.0 Chrome/120"),
+                None,
             )
             .await
             .expect("建会话");

@@ -17,6 +17,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
 use axum::Json;
+use pixora_core::audit::actions;
 use pixora_core::AppState;
 use pixora_crypto::token as crypto_token;
 
@@ -62,7 +63,8 @@ pub async fn me_get(
     } else {
         cookie_value(&headers, CSRF_COOKIE)
     };
-    match super::me_payload(&state, &auth.user, csrf).await {
+    let impersonator = super::impersonator_info(&state, &headers).await;
+    match super::me_payload(&state, &auth.user, csrf, impersonator).await {
         Ok(payload) => finish::<serde_json::Value>(Ok(payload)),
         Err(err) => crate::http::error_response(err),
     }
@@ -553,13 +555,17 @@ pub async fn tokens_create(
     })))
 }
 
-/// `DELETE /api/v1/me/tokens/{id}`：撤销（只写 `revoked_at`，不物理删）。
-pub async fn token_revoke(
+/// `PATCH /api/v1/me/tokens/{id}`：改令牌名字。
+///
+/// 名字只是给人看的标签：客户端认的是令牌本身，改名不影响任何已经发出去的
+/// 脚本与客户端。所以这里不需要重新签发，也不用重新配置 PicGo。
+pub async fn token_rename(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
     Path(token_id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
     let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
@@ -570,16 +576,89 @@ pub async fn token_revoke(
         return resp;
     }
 
-    // 仓储的更新语句带 `user_id`，撤销别人的令牌只会影响 0 行
+    let name = match field_str(&body, "name") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    if name.chars().count() > 64 {
+        return bad_request("名字最长 64 个字符");
+    }
+
     match state
         .repo
-        .revoke_api_token(token_id, auth.user.id)
+        .rename_api_token(token_id, auth.user.id, &name)
         .await
     {
-        Ok(()) => finish::<serde_json::Value>(Ok(serde_json::json!({
-            "ok": true,
-            "csrf_token": cookie_value(&headers, CSRF_COOKIE),
-        }))),
+        Ok(0) => not_found("令牌"),
+        Ok(_) => {
+            state
+                .audit_detail(
+                    actions::SETTINGS_CHANGE,
+                    Some(auth.user.id),
+                    format!("token:{token_id}"),
+                    serde_json::json!({ "action": "rename", "name": name }),
+                    rectx.ip.as_deref(),
+                )
+                .await;
+            finish::<serde_json::Value>(Ok(serde_json::json!({
+                "ok": true,
+                "name": name,
+                "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+            })))
+        }
+        Err(err) => crate::http::error_response(err.into()),
+    }
+}
+
+/// `DELETE /api/v1/me/tokens/{id}`：撤销（只写 `revoked_at`，不物理删）。
+///
+/// `?hard=true` 改成物理删除：撤销是留痕，删除是「不想再在这张表里看到它」。
+/// 已撤销或已过期的令牌才有必要删，但服务端不替调用方做这个判断——
+/// 删掉之后立即无法通过鉴权，效果与撤销一致，只是没了记录。
+pub async fn token_revoke(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(token_id): Path<i64>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = super::ensure_scope(&auth, "write") {
+        return resp;
+    }
+
+    let hard = params
+        .get("hard")
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
+    // 仓储的语句都带 `user_id`，动别人的令牌只会影响 0 行
+    let outcome = if hard {
+        state
+            .repo
+            .delete_api_token(token_id, auth.user.id)
+            .await
+            .map(|rows| serde_json::json!({ "ok": true, "deleted": rows }))
+    } else {
+        state
+            .repo
+            .revoke_api_token(token_id, auth.user.id)
+            .await
+            .map(|_| serde_json::json!({ "ok": true, "deleted": 0 }))
+    };
+
+    match outcome {
+        Ok(mut payload) => {
+            payload["csrf_token"] = serde_json::Value::String(
+                cookie_value(&headers, CSRF_COOKIE).unwrap_or_default(),
+            );
+            finish::<serde_json::Value>(Ok(payload))
+        }
         Err(err) => crate::http::error_response(err.into()),
     }
 }

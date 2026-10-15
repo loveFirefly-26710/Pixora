@@ -61,6 +61,10 @@ async fn direct_inner(
         return Err(AppError::not_found("图片"));
     }
 
+    // 防盗链：直链能被任何站点引用，热度和流量却全落在自己身上。
+    // 开关关着时（默认）这一步什么都不做
+    ensure_hotlink_allowed(&state, &headers).await?;
+
     // 文件名必须是 `{64位十六进制}.{ext}` 的形状，其它一律拒绝，
     // 避免有人拿它去探测任意键
     let (hash_part, ext) = file
@@ -158,6 +162,127 @@ async fn direct_inner(
     apply_headers(&mut response, &blob.mime_type, &blob.sha256, is_svg, want_download, blob.size, !private);
     let _ = is_thumb;
     Ok(response)
+}
+
+/// 防盗链：判断这次请求的来源站是否被允许。
+///
+/// 开关关着（默认）时什么都不做——这功能一开，别人站里已经引用的图会立刻挂掉，
+/// 得由管理员明确决定，不能让默认值替他决定。
+///
+/// 开着时的判定顺序：
+///   1. 没有 `Referer`：由 `security.hotlink_allow_empty` 决定（默认允许）。
+///      直接在地址栏打开、PicGo 这类客户端、部分隐私设置都会让 Referer 为空，
+///      一律拒绝会误伤大量正常访问。
+///   2. 来源主机与请求的 `Host` 一致（本站页面自己引用）→ 放行。
+///   3. 来源主机与站点 `base_url` 的主机一致 → 放行（前后端分域部署时常见）。
+///   4. 来源主机命中白名单（含子域）→ 放行。
+///   5. 其余一律 403。
+async fn ensure_hotlink_allowed(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> pixora_core::Result<()> {
+    let settings = state.settings.hotlink().await?;
+    if !settings.enabled {
+        return Ok(());
+    }
+
+    let referer = headers
+        .get(axum::http::header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(referer) = referer else {
+        return if settings.allow_empty {
+            Ok(())
+        } else {
+            Err(AppError::forbidden(
+                "这个图片不允许直接访问：请求没有携带来源信息".to_string(),
+            ))
+        };
+    };
+
+    let Some(host) = host_of(referer) else {
+        return Err(AppError::forbidden("这个图片不允许从该来源访问".to_string()));
+    };
+
+    let request_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if host_matches(&host, request_host) {
+        return Ok(());
+    }
+
+    let site = state.settings.site(state.config.base_url.as_deref()).await?;
+    if let Some(site_host) = host_of(&site.base_url) {
+        if host_matches(&host, &site_host) {
+            return Ok(());
+        }
+    }
+
+    if settings
+        .domains
+        .iter()
+        .any(|allowed| host_matches(&host, allowed))
+    {
+        return Ok(());
+    }
+
+    tracing::debug!(referer, "防盗链拦下了一次直链访问");
+    Err(AppError::forbidden(
+        "这个图片不允许从该来源访问（站点开启了防盗链）".to_string(),
+    ))
+}
+
+/// 从 URL 里取主机（含端口，统一小写）。取不出主机就返回 `None`。
+///
+/// 只做字符串处理，不引入 URL 解析库：输入的形态就三种
+/// （`https://host/...`、`//host/...`、`host/...`），而且这里只用来比对。
+fn host_of(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("//"))
+        .unwrap_or(trimmed);
+    let host = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@') // 去掉可能的 userinfo
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// 两个主机是否算同一个：完全相等，或者只差端口。
+///
+/// 带不带端口都算同一站：`example.com` 与 `example.com:8080` 是同一台服务器，
+/// 部署时域名解析和端口写法经常不一致。
+fn host_matches(host: &str, allowed: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    let Some(allowed) = host_of(allowed) else {
+        return false;
+    };
+    if host == allowed {
+        return true;
+    }
+    let bare = |value: &str| value.split(':').next().unwrap_or(value).to_string();
+    let (host_bare, allowed_bare) = (bare(&host), bare(&allowed));
+    if host_bare == allowed_bare {
+        return true;
+    }
+    // 白名单里写 `example.com` 时，`img.example.com` 也算命中：
+    // 子域常用来放静态资源，逐个列出来太啰嗦
+    host_bare.ends_with(&format!(".{allowed_bare}"))
 }
 
 /// 这个实体有没有公开引用。

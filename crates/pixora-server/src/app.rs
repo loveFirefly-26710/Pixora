@@ -58,6 +58,7 @@ fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         // ---------- 公开 ----------
         .route("/site", get(r::public::site))
+        .route("/site/background", get(r::public::site_background))
         .route("/plaza", get(r::public::plaza))
         .route("/plaza/tags", get(r::public::plaza_tags))
         .route("/random", get(r::public::random_image))
@@ -87,7 +88,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/me/tokens",
             get(r::account::tokens_list).post(r::account::tokens_create),
         )
-        .route("/me/tokens/{id}", delete(r::account::token_revoke))
+        .route(
+            "/me/tokens/{id}",
+            patch(r::account::token_rename).delete(r::account::token_revoke),
+        )
         // ---------- 相册与图片 ----------
         .route(
             "/albums",
@@ -148,11 +152,19 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/admin/ratelimit",
             get(r::admin::ratelimit_get).put(r::admin::ratelimit_global_put),
         )
+        // 契约与前端都写过 `/admin/ratelimit/global`：这里收成同一个处理函数，
+        // 两种路径都能存，少一个「服务端返回了无法解析的内容」（那条其实是
+        // 请求落到 SPA 静态资源上了）
+        .route(
+            "/admin/ratelimit/global",
+            put(r::admin::ratelimit_global_put),
+        )
         .route(
             "/admin/ratelimit/on_breach",
             put(r::admin::ratelimit_breach_put),
         )
         .route("/admin/storage", get(r::admin::storage_get))
+        .route("/admin/storage/gc", post(r::admin::storage_gc))
         .route(
             "/admin/storage/default",
             put(r::admin::storage_default),
@@ -185,6 +197,15 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route(
             "/admin/settings",
             get(r::admin::settings_get).put(r::admin::settings_put),
+        )
+        .route(
+            "/admin/users/{id}/impersonate",
+            post(r::admin::user_impersonate),
+        )
+        .route("/admin/impersonate/stop", post(r::admin::impersonate_stop))
+        .route(
+            "/admin/settings/background",
+            post(r::admin::background_upload),
         )
         .route("/admin/settings/mail/test", post(r::admin::mail_test))
         .route("/admin/settings/formats", post(r::admin::formats_put))

@@ -217,6 +217,8 @@ pub async fn images_list(
         query: parse_str(&query, "q").map(str::to_string),
         tag: parse_str(&query, "tag").map(str::to_string),
         sort: parse_str(&query, "sort").map(str::to_string),
+        // 随机排序的种子：客户端翻页带上同一个，翻页就不会重复或漏图
+        seed: parse_i64(&query, "seed").unwrap_or(0).max(0) as u64,
         ids,
         page: parse_i64(&query, "page"),
         per_page: parse_i64(&query, "per_page"),

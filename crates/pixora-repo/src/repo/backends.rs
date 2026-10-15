@@ -217,3 +217,42 @@ impl Repo {
             .await
     }
 }
+
+impl Repo {
+    /// 改一个后端的显示名。只动 `label` 一列。
+    pub async fn update_backend_label(&self, id: i64, label: &str) -> Result<()> {
+        self.db
+            .execute(
+                "UPDATE storage_backends SET label = ? WHERE id = ?",
+                crate::args::Args::new().text(label).int(id),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+impl Repo {
+    /// 这个后端上还挂着多少实体（原图 + 缩略图都算）。
+    ///
+    /// 删后端前要问一句：配置行删掉之后驱动就装配不出来了，
+    /// 远端驱动连地址和凭据都没了，那些对象既读不出来也删不掉。
+    pub async fn count_blobs_for_backend(&self, backend_id: i64) -> Result<i64> {
+        self.db
+            .count(
+                "SELECT COUNT(*) AS total FROM blobs WHERE backend_id = ?",
+                crate::args::Args::new().int(backend_id),
+            )
+            .await
+    }
+
+    /// 这个驱动上还挂着多少实体。`backend_id` 为空的历史实体会被这条查出来——
+    /// 它们同样指向这个后端（本地与数据库内两种驱动共用一份落点）。
+    pub async fn count_blobs_by_driver(&self, driver: &str) -> Result<i64> {
+        self.db
+            .count(
+                "SELECT COUNT(*) AS total FROM blobs WHERE storage_driver = ?",
+                crate::args::Args::new().text(driver),
+            )
+            .await
+    }
+}

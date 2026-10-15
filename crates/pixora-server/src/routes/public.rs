@@ -14,7 +14,6 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use pixora_core::settings::keys;
 use pixora_core::AppState;
 use pixora_core::AppError;
 use pixora_repo::repo::images::ImageFilter;
@@ -65,13 +64,11 @@ pub async fn site(
         Err(err) => return crate::http::error_response(err),
     };
     let installed = state.settings.is_installed().await.unwrap_or(false);
-    let background = state
-        .settings
-        .raw(keys::APPEARANCE_BACKGROUND)
-        .await
-        .ok()
-        .flatten()
-        .filter(|value| !value.trim().is_empty());
+    // 背景图可能是上传进库的那张：这里统一翻译成可访问的地址
+    let background = match state.settings.background_public_url().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
     let terms = match terms_summary(&state, auth.as_ref()).await {
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
@@ -94,10 +91,19 @@ pub async fn site(
         "max_file_bytes": upload.max_file_bytes,
         "max_batch_size": upload.max_batch,
         "max_pixels": upload.max_pixels,
+        "max_width": upload.max_width,
+        "max_height": upload.max_height,
+        // 队列深度：客户端队列据此限长（管理员也一样受它约束）
+        "queue_depth": upload.queue_depth,
         "thumb_client": upload.thumb_client,
         "thumb_server_fallback": upload.thumb_server_fallback,
         "appeal_email": mail.appeal_email,
         "background": background,
+        // 会话有效期：界面上要写清楚「多久不动会掉线」，这不是秘密
+        "session": {
+            "idle_minutes": state.settings.session().await.map(|s| s.idle_minutes).unwrap_or(0),
+            "absolute_days": state.settings.session().await.map(|s| s.absolute_days).unwrap_or(0),
+        },
         "installed": installed,
         "terms": terms,
     })))
@@ -173,11 +179,67 @@ pub async fn plaza(
                 parse_str(&query, "q"),
                 parse_str(&query, "tag"),
                 parse_str(&query, "sort"),
+                parse_i64(&query, "seed").unwrap_or(0).max(0) as u64,
                 parse_i64(&query, "page"),
                 parse_i64(&query, "per_page"),
             )
             .await,
     )
+}
+
+/// `GET /api/v1/site/background` — 公开。站点背景图本体（上传进库的那张）。
+///
+/// 地址里带 `?v=<更新时间>`，所以可以放心长缓存：换图之后 URL 就变了。
+/// 没有上传过背景图时返回 404，前端会退回无背景图的样子。
+pub async fn site_background(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let asset = match state
+        .repo
+        .get_asset(pixora_core::settings::keys::BACKGROUND_ASSET_KEY)
+        .await
+    {
+        Ok(Some(asset)) => asset,
+        Ok(None) => return crate::http::error_response(AppError::not_found("背景图")),
+        Err(err) => return crate::http::error_response(err.into()),
+    };
+    let (bytes, version) = asset;
+
+    let etag = format!("\"{}\"", pixora_crypto::hash::sha256_hex(&bytes));
+    if headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim() == etag)
+        .unwrap_or(false)
+    {
+        let mut response = axum::http::StatusCode::NOT_MODIFIED.into_response();
+        if let Ok(value) = axum::http::HeaderValue::from_str(&etag) {
+            response.headers_mut().insert(axum::http::header::ETAG, value);
+        }
+        return response;
+    }
+
+    let mime = pixora_core::media::sniff(&bytes)
+        .map(|item| item.mime)
+        .unwrap_or("application/octet-stream");
+    let mut response = (axum::http::StatusCode::OK, bytes).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(mime) {
+        response.headers_mut().insert(axum::http::header::CONTENT_TYPE, value);
+    }
+    if let Ok(value) = axum::http::HeaderValue::from_str(&etag) {
+        response.headers_mut().insert(axum::http::header::ETAG, value);
+    }
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("public, max-age=86400"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    let _ = version;
+    response
 }
 
 /// `GET /api/v1/plaza/tags` — 公开。广场顶部的标签 chips。
