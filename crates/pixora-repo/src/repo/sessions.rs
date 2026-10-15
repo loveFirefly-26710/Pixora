@@ -11,6 +11,8 @@ use crate::model::*;
 use crate::repo::Repo;
 
 impl Repo {
+    /// 建会话行。`expires_at` 只有「记住我」会给：给了就写死绝对时间，
+    /// 没给就按「闲置时长 + 最长寿命」在读取侧判断（见 `Session::is_expired`）。
     pub async fn create_session(
         &self,
         user_id: i64,
@@ -18,14 +20,15 @@ impl Repo {
         device: Option<&str>,
         ip: Option<&str>,
         user_agent: Option<&str>,
+        expires_at: Option<DateTime<Utc>>,
     ) -> Result<Session> {
         let now = now_ts();
         let id = self
             .db
             .insert_returning_id(
                 "INSERT INTO sessions (user_id, token_hash, device, ip, user_agent, created_at, \
-                                       last_seen_at, revoked_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                                       last_seen_at, expires_at, revoked_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
                 Args::new()
                     .int(user_id)
                     .text(token_hash)
@@ -33,7 +36,8 @@ impl Repo {
                     .opt_text(ip.map(str::to_string))
                     .opt_text(user_agent.map(str::to_string))
                     .text(&now)
-                    .text(&now),
+                    .text(&now)
+                    .opt_text(expires_at.map(ts)),
             )
             .await?;
 
@@ -79,6 +83,9 @@ impl Repo {
     }
 
     /// 用户的活跃会话列表（安全页要展示设备、IP、最近活动）。
+    ///
+    /// 过期的行不在这里筛：判定要用设置里的策略，仓储层读不到。
+    /// 服务层筛完会把过期的行顺手吊销，所以列表会越用越干净。
     pub async fn list_sessions(&self, user_id: i64) -> Result<Vec<Session>> {
         let sql = format!(
             "SELECT {} FROM sessions WHERE user_id = ? AND revoked_at IS NULL \
@@ -87,6 +94,45 @@ impl Repo {
         );
         let rows = self.db.fetch_all(&sql, Args::new().int(user_id)).await?;
         rows.iter().map(Session::from_row).collect()
+    }
+
+    /// 吊销一批已经过期的会话：记住我的按 `expires_at`，普通的按闲置与寿命两个切点。
+    ///
+    /// 吊销而不是删除，是为了留着「这台设备什么时候掉线的」这条线索。
+    /// 两个切点传 `None` 表示那一项不判（对应设置里填 0 = 不限）。
+    pub async fn revoke_expired_sessions(
+        &self,
+        user_id: i64,
+        now: DateTime<Utc>,
+        idle_before: Option<DateTime<Utc>>,
+        created_before: Option<DateTime<Utc>>,
+    ) -> Result<u64> {
+        // 参数顺序跟着 SQL 里的问号走：SET 的时间 → user_id → 各条件
+        let mut args = Args::new().text(ts(now)).int(user_id).text(ts(now));
+        let mut conditions = vec!["expires_at IS NOT NULL AND expires_at <= ?".to_string()];
+        match (idle_before, created_before) {
+            (Some(idle), Some(created)) => {
+                conditions.push(
+                    "expires_at IS NULL AND (last_seen_at < ? OR created_at < ?)".to_string(),
+                );
+                args = args.text(ts(idle)).text(ts(created));
+            }
+            (Some(idle), None) => {
+                conditions.push("expires_at IS NULL AND last_seen_at < ?".to_string());
+                args = args.text(ts(idle));
+            }
+            (None, Some(created)) => {
+                conditions.push("expires_at IS NULL AND created_at < ?".to_string());
+                args = args.text(ts(created));
+            }
+            (None, None) => {}
+        }
+
+        let sql = format!(
+            "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL AND ({})",
+            conditions.join(" OR ")
+        );
+        self.db.execute(&sql, args).await
     }
 
     /// 吊销一个会话。带上 `user_id` 是为了防止拿别人的会话 id 越权下线。

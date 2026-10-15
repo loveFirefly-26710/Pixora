@@ -185,14 +185,31 @@ impl Repo {
 
     /// 删除一个版本。有同意记录的版本（外键 `ON DELETE RESTRICT`）删不掉，
     /// 报错就是正确结果：那些记录还要能指出「当初同意的是哪一版」。
-    pub async fn delete_terms(&self, id: i64) -> Result<()> {
-        self.db
-            .execute(
-                "DELETE FROM terms_versions WHERE id = ?",
-                Args::new().int(id),
-            )
+    /// 删掉一版条款，连同它的同意记录。
+    ///
+    /// `terms_consents.version_id` 的外键是 RESTRICT，不先摘记录就删不掉版本行。
+    /// 两条语句必须在同一个事务里：先删版本再删记录的话，中间失败会留下
+    /// 「版本没了但记录还指着它」的悬空引用。
+    ///
+    /// 返回被一起删掉的同意记录条数，调用方用它写审计——删掉多少条历史
+    /// 是要留下痕迹的。
+    pub async fn delete_terms(&self, id: i64) -> Result<u64> {
+        let mut tx = self.db.pool().begin().await?;
+        let consents = sqlx::query(
+            &self
+                .db
+                .sql("DELETE FROM terms_consents WHERE version_id = ?"),
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        sqlx::query(&self.db.sql("DELETE FROM terms_versions WHERE id = ?"))
+            .bind(id)
+            .execute(&mut *tx)
             .await?;
-        Ok(())
+        tx.commit().await?;
+        Ok(consents)
     }
 
     /// 是否需要重新同意。改版后忘了勾这一项是运营事故，所以单独留一个开关。

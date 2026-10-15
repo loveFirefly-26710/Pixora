@@ -196,6 +196,28 @@ export function extOf(name: string): string {
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
+/**
+ * 把扩展名归一到服务端那套写法。
+ *
+ * 服务端的白名单与嗅探结果只认 `jpg`（jpeg 折成 jpg）、`tiff`（tif 折成 tiff）、
+ * `heic`（heif 折成 heic）。客户端如果拿用户文件名里的原始扩展名去比对，
+ * 就会把 `1.jpeg` 当成「不在白名单里」直接丢掉——实测一个 151 张的文件夹里
+ * 55 张 .jpeg 全被拦在外面。两边用同一套归一，判断才一致。
+ */
+export function normalizeExt(ext: string): string {
+  const value = ext.trim().toLowerCase().replace(/^\./, "");
+  switch (value) {
+    case "jpeg":
+      return "jpg";
+    case "tif":
+      return "tiff";
+    case "heif":
+      return "heic";
+    default:
+      return value;
+  }
+}
+
 /** 中间截断的哈希，用于列表里的次要信息。 */
 export function middleEllipsis(input: string, head = 8, tail = 4): string {
   if (input.length <= head + tail + 1) return input;

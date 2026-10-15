@@ -31,20 +31,16 @@ import { userViewBanner } from "../ui/shell";
 import {
   emptyState,
   imageTile,
+  newShuffleSeed,
   pageHead,
   progressBar,
   qtip,
   skeletonGrid,
+  sortSelect,
   spinner,
 } from "../ui/widgets";
 
-type SortKey = "new" | "size" | "name";
-
-const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
-  { value: "new", label: "上传时间 ↓" },
-  { value: "size", label: "大小 ↓" },
-  { value: "name", label: "名称 ↑" },
-];
+type SortKey = string;
 
 const PER_PAGE = 24;
 /** 长按进入多选的门槛：低于 400ms 会被误触发，高于 600ms 用户会以为没反应。 */
@@ -72,7 +68,10 @@ export async function render(ctx: PageContext): Promise<void> {
   const state = {
     albumId: Number.isFinite(parsedAlbumId) && parsedAlbumId > 0 ? parsedAlbumId : null,
     q: ctx.query.get("q") ?? "",
-    sort: "new" as SortKey,
+    // 默认随机：相册里也总有「最新的几张把后面全挡住」的问题
+    sort: (ctx.query.get("sort") ?? "shuffle") as SortKey,
+    // 随机排序的种子：同一次浏览内保持不变，翻页/换页不会重复或漏图
+    seed: newShuffleSeed(),
     view: loadViewPreference(),
     page: 1,
     items: [] as ImageItem[],
@@ -174,16 +173,15 @@ export async function render(ctx: PageContext): Promise<void> {
     }, 320),
   );
 
-  const sortSelect = h(
-    "select.f",
-    { style: { width: "136px", padding: "4px 10px", fontSize: "12.5px" } },
-    ...SORT_OPTIONS.map((option) => h("option", { value: option.value, text: option.label })),
-  );
-  sortSelect.value = state.sort;
-  sortSelect.addEventListener("change", () => {
-    state.sort = sortSelect.value as SortKey;
+  const sortControl = sortSelect(state.sort, (value) => {
+    state.sort = value;
+    // 换排序时换一个种子：「随机」切回来才是一份新顺序
+    if (value === "shuffle") state.seed = newShuffleSeed();
     void loadImages(1);
   });
+  sortControl.style.width = "150px";
+  sortControl.style.padding = "4px 10px";
+  sortControl.style.fontSize = "12.5px";
 
   const gridChip = h("button.chip", {
     type: "button",
@@ -212,7 +210,7 @@ export async function render(ctx: PageContext): Promise<void> {
     listChip,
     h("span.spacer"),
     searchInput,
-    sortSelect,
+    sortControl,
     allMatchingBtn,
   );
 
@@ -310,6 +308,7 @@ export async function render(ctx: PageContext): Promise<void> {
           album_id: state.albumId ?? undefined,
           q: state.q || undefined,
           sort: state.sort,
+          seed: state.seed,
           page,
           per_page: PER_PAGE,
         },

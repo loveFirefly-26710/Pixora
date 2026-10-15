@@ -15,6 +15,12 @@ use crate::error::{AppError, Result};
 
 /// 键名常量。拼错键名的代价是「设置改了不生效」，所以不写字符串字面量。
 pub mod keys {
+    /// 背景图上传后存进 `storage_objects` 的键名
+    pub const BACKGROUND_ASSET_KEY: &str = "config:background";
+    /// `appearance.background` 取这个值表示「用上传的那张图」
+    pub const BACKGROUND_ASSET_MARKER: &str = "asset";
+    /// 背景图的公开地址（服务器自己提供，与站点同源）
+    pub const BACKGROUND_PUBLIC_PATH: &str = "/api/v1/site/background";
     pub const INSTALLED: &str = "install.completed";
     pub const SITE_NAME: &str = "site.name";
     pub const SITE_BASE_URL: &str = "site.base_url";
@@ -28,6 +34,9 @@ pub mod keys {
     pub const UPLOAD_MAX_FILE: &str = "upload.max_file_bytes";
     pub const UPLOAD_MAX_BATCH: &str = "upload.max_batch";
     pub const UPLOAD_MAX_PIXELS: &str = "upload.max_pixels";
+    /// 长宽上限（像素）。0 = 不限；与 `upload.max_pixels` 一起判，三者都过才收
+    pub const UPLOAD_MAX_WIDTH: &str = "upload.max_width";
+    pub const UPLOAD_MAX_HEIGHT: &str = "upload.max_height";
     pub const UPLOAD_QUEUE_DEPTH: &str = "upload.queue_depth";
     pub const UPLOAD_FORMATS: &str = "upload.formats";
     pub const UPLOAD_REQUIRE_LOGIN: &str = "upload.require_login";
@@ -60,6 +69,49 @@ pub mod keys {
     pub const APPEARANCE_BACKGROUND: &str = "appearance.background";
     /// 回收站保留天数。0 = 关闭回收站（删除即彻底删）
     pub const RECYCLE_RETENTION_DAYS: &str = "recycle.retention_days";
+    /// 会话闲置超时（分钟）。0 = 不按闲置判
+    pub const SESSION_IDLE_MINUTES: &str = "session.idle_minutes";
+    /// 普通会话的最长寿命（天）。0 = 不限
+    pub const SESSION_ABSOLUTE_DAYS: &str = "session.absolute_days";
+    /// 「记住我」签发的会话活多久（天）
+    pub const SESSION_REMEMBER_DAYS: &str = "session.remember_days";
+    /// 防盗链：直链要不要校验来源
+    pub const HOTLINK_ENABLED: &str = "security.hotlink_enabled";
+    /// 防盗链：允许空 Referer（直接打开链接、部分客户端不带）
+    pub const HOTLINK_ALLOW_EMPTY: &str = "security.hotlink_allow_empty";
+    /// 防盗链：允许的来源主机白名单，逗号分隔；空 = 只放本站
+    pub const HOTLINK_DOMAINS: &str = "security.hotlink_domains";
+    /// 内容审核总开关
+    pub const MODERATION_ENABLED: &str = "moderation.enabled";
+    /// 审核服务商：aliyun | tencent | baidu | nsfwjs
+    pub const MODERATION_PROVIDER: &str = "moderation.provider";
+    /// 违规分数阈值（0-100，达到即拦）
+    pub const MODERATION_THRESHOLD: &str = "moderation.threshold";
+    /// 自建服务返回结构里哪个字段是分数（也认 nsfwjs 的 predictions 数组）
+    pub const MODERATION_SCORE_FIELD: &str = "moderation.score_field";
+    /// 自建服务的接口地址
+    pub const MODERATION_ENDPOINT: &str = "moderation.endpoint";
+    pub const MODERATION_REGION: &str = "moderation.region";
+    pub const MODERATION_APP_ID: &str = "moderation.app_id";
+    /// 密钥类：阿里云 AccessKeyId / 腾讯云 SecretId / 百度 API Key
+    pub const MODERATION_ACCESS_KEY: &str = "moderation.access_key";
+    /// 密钥类：阿里云 AccessKeySecret / 腾讯云 SecretKey / 百度 Secret Key
+    pub const MODERATION_SECRET_KEY: &str = "moderation.secret_key";
+    /// 自建服务的 Bearer Token（可选）
+    pub const MODERATION_TOKEN: &str = "moderation.token";
+    /// 普通用户是否过审
+    pub const MODERATION_USER_ENABLED: &str = "moderation.user_enabled";
+    /// 管理员是否过审（默认不过：管理员改配置时不该被自己的图挡在门外）
+    pub const MODERATION_ADMIN_ENABLED: &str = "moderation.admin_enabled";
+    /// 累计多少次违规就临时暂停账号。0 = 不自动封
+    pub const MODERATION_BAN_AFTER: &str = "moderation.ban_after";
+    /// 自动暂停多久（分钟）
+    pub const MODERATION_BAN_MINUTES: &str = "moderation.ban_minutes";
+    /// 违规是否发邮件通知管理员
+    pub const MODERATION_NOTIFY: &str = "moderation.notify_admin";
+    /// 审核服务不可用（超时、5xx）时是否放行。默认放行：审核是增强，
+    /// 让它变成单点故障会直接掐掉整站上传
+    pub const MODERATION_FAIL_OPEN: &str = "moderation.fail_open";
 }
 
 /// 默认值。设计稿里写死的那些数字都在这里。
@@ -70,8 +122,26 @@ pub mod defaults {
     pub const MAX_BATCH: i64 = 1000;
     /// 8000 万像素（解压炸弹防线）
     pub const MAX_PIXELS: i64 = 80_000_000;
+    /// 长宽上限默认不限：像素数上限已经拦住了「解压炸弹」，
+    /// 长宽是给「不想让人传 20000×200 这种怪图」的场景留的
+    pub const MAX_WIDTH: i64 = 0;
+    pub const MAX_HEIGHT: i64 = 0;
     /// 队列深度阈值，超过就返回 429
     pub const QUEUE_DEPTH: i64 = 500;
+    /// 会话闲置超时：两小时没动就要求重新登录（与云控制台的默认口径一致）
+    pub const SESSION_IDLE_MINUTES: i64 = 120;
+    /// 普通会话最长 30 天：一直挂着不动的会话总得有个头
+    pub const SESSION_ABSOLUTE_DAYS: i64 = 30;
+    /// 「记住我」的会话活 30 天
+    pub const SESSION_REMEMBER_DAYS: i64 = 30;
+    /// 会话项的可配置范围。上限给一年，再长不如关掉这一项
+    pub const SESSION_MINUTES_MAX: i64 = 525_600;
+    pub const SESSION_DAYS_MAX: i64 = 365;
+    /// 审核阈值默认 70 分：主流云厂商的「疑似」档就在这一带
+    pub const MODERATION_THRESHOLD: i64 = 70;
+    pub const MODERATION_BAN_AFTER: i64 = 3;
+    pub const MODERATION_BAN_MINUTES: i64 = 1440;
+    pub const MODERATION_SCORE_FIELD: &str = "nsfw";
     /// 新用户默认 10GiB
     pub const QUOTA_DEFAULT: i64 = 10 * 1024 * 1024 * 1024;
     /// 单用户上限 100GiB
@@ -121,10 +191,87 @@ pub struct UploadSettings {
     pub max_file_bytes: i64,
     pub max_batch: i64,
     pub max_pixels: i64,
+    /// 长宽上限（像素），0 = 不限
+    pub max_width: i64,
+    pub max_height: i64,
     pub queue_depth: i64,
     pub formats: Vec<String>,
     pub thumb_client: bool,
     pub thumb_server_fallback: bool,
+}
+
+/// 会话有效期。
+#[derive(Debug, Clone, Copy)]
+pub struct SessionSettings {
+    pub idle_minutes: i64,
+    pub absolute_days: i64,
+    pub remember_days: i64,
+}
+
+impl SessionSettings {
+    /// 仓储层要的策略形状。
+    pub fn policy(&self) -> pixora_repo::model::SessionPolicy {
+        pixora_repo::model::SessionPolicy {
+            idle_minutes: self.idle_minutes,
+            absolute_days: self.absolute_days,
+        }
+    }
+}
+
+/// 防盗链设置。
+#[derive(Debug, Clone)]
+pub struct HotlinkSettings {
+    pub enabled: bool,
+    pub allow_empty: bool,
+    /// 允许的来源主机（小写，不含协议与路径）。空表示只放本站
+    pub domains: Vec<String>,
+}
+
+/// 内容审核设置。密钥单独存放在 settings 里，这里带的是解密后的明文——
+/// 它只在服务端内部流转，绝不出接口（接口只回「配没配」）。
+#[derive(Debug, Clone)]
+pub struct ModerationSettings {
+    pub enabled: bool,
+    pub provider: String,
+    pub threshold: i64,
+    pub score_field: String,
+    pub endpoint: String,
+    pub region: String,
+    pub app_id: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub token: String,
+    pub user_enabled: bool,
+    pub admin_enabled: bool,
+    pub ban_after: i64,
+    pub ban_minutes: i64,
+    pub notify_admin: bool,
+    pub fail_open: bool,
+}
+
+impl ModerationSettings {
+    /// 这个角色要不要过审。
+    pub fn applies_to(&self, is_admin: bool) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if is_admin {
+            self.admin_enabled
+        } else {
+            self.user_enabled
+        }
+    }
+
+    /// 服务商是否已经配齐凭据。缺凭据时审核没法跑，就按「放行 + 记日志」处理。
+    pub fn provider_ready(&self) -> bool {
+        match self.provider.as_str() {
+            "aliyun" | "tencent" | "baidu" => {
+                !self.access_key.trim().is_empty() && !self.secret_key.trim().is_empty()
+            }
+            "nsfwjs" => !self.endpoint.trim().is_empty(),
+            _ => false,
+        }
+    }
 }
 
 /// 一组邮件设置。密码单独取，因为它要解密。
@@ -283,6 +430,14 @@ impl Settings {
             max_pixels: self
                 .integer(keys::UPLOAD_MAX_PIXELS, defaults::MAX_PIXELS)
                 .await?,
+            max_width: self
+                .integer(keys::UPLOAD_MAX_WIDTH, defaults::MAX_WIDTH)
+                .await?
+                .max(0),
+            max_height: self
+                .integer(keys::UPLOAD_MAX_HEIGHT, defaults::MAX_HEIGHT)
+                .await?
+                .max(0),
             queue_depth: self
                 .integer(keys::UPLOAD_QUEUE_DEPTH, defaults::QUEUE_DEPTH)
                 .await?,
@@ -347,6 +502,97 @@ impl Settings {
         Ok(raw.clamp(0, defaults::RECYCLE_RETENTION_MAX))
     }
 
+    /// 会话有效期。三个值都钳在合法区间里：手工改库改坏了也不该让谁都能登录或谁都不能登录。
+    ///
+    /// 一次查询取齐三行，而不是逐个 `integer()`：这个函数在**每个已登录请求**上
+    /// 都会被调用一次（鉴权时要判过期），三次往返换成一次是实打实的收益。
+    pub async fn session(&self) -> Result<SessionSettings> {
+        let rows = self.repo.list_settings().await?;
+        let read = |name: &str, fallback: i64| -> i64 {
+            rows.iter()
+                .find(|row| row.name == name)
+                .and_then(|row| row.value.as_deref())
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .unwrap_or(fallback)
+        };
+        Ok(SessionSettings {
+            idle_minutes: read(keys::SESSION_IDLE_MINUTES, defaults::SESSION_IDLE_MINUTES)
+                .clamp(0, defaults::SESSION_MINUTES_MAX),
+            absolute_days: read(keys::SESSION_ABSOLUTE_DAYS, defaults::SESSION_ABSOLUTE_DAYS)
+                .clamp(0, defaults::SESSION_DAYS_MAX),
+            remember_days: read(keys::SESSION_REMEMBER_DAYS, defaults::SESSION_REMEMBER_DAYS)
+                .clamp(1, defaults::SESSION_DAYS_MAX),
+        })
+    }
+
+    /// 防盗链。默认关闭：这功能一开，别人的站引用你的图就会挂，
+    /// 得由管理员明确决定，不能靠默认值替他决定。
+    pub async fn hotlink(&self) -> Result<HotlinkSettings> {
+        let raw = self.string(keys::HOTLINK_DOMAINS, "").await?;
+        let domains = raw
+            .split(',')
+            .map(|item| item.trim().trim_start_matches("https://").trim_start_matches("http://"))
+            .map(|item| item.split('/').next().unwrap_or("").trim().to_ascii_lowercase())
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<String>>();
+        Ok(HotlinkSettings {
+            enabled: self.bool(keys::HOTLINK_ENABLED, false).await?,
+            allow_empty: self.bool(keys::HOTLINK_ALLOW_EMPTY, true).await?,
+            domains,
+        })
+    }
+
+    /// 内容审核设置。密钥在这里解密出来，只在服务端内部用。
+    pub async fn moderation(&self) -> Result<ModerationSettings> {
+        let read_secret = |value: Option<String>| value.unwrap_or_default();
+        let access_key = read_secret(self.get_secret(keys::MODERATION_ACCESS_KEY).await?);
+        let secret_key = read_secret(self.get_secret(keys::MODERATION_SECRET_KEY).await?);
+        let token = read_secret(self.get_secret(keys::MODERATION_TOKEN).await?);
+
+        let provider = self
+            .string(keys::MODERATION_PROVIDER, "aliyun")
+            .await?
+            .trim()
+            .to_ascii_lowercase();
+        let provider = match provider.as_str() {
+            "aliyun" | "tencent" | "baidu" | "nsfwjs" => provider,
+            _ => "aliyun".to_string(),
+        };
+
+        Ok(ModerationSettings {
+            enabled: self.bool(keys::MODERATION_ENABLED, false).await?,
+            provider,
+            threshold: self
+                .integer(keys::MODERATION_THRESHOLD, defaults::MODERATION_THRESHOLD)
+                .await?
+                .clamp(1, 100),
+            score_field: self
+                .string(keys::MODERATION_SCORE_FIELD, defaults::MODERATION_SCORE_FIELD)
+                .await?,
+            endpoint: self.string(keys::MODERATION_ENDPOINT, "").await?,
+            region: self.string(keys::MODERATION_REGION, "").await?,
+            app_id: self.string(keys::MODERATION_APP_ID, "").await?,
+            access_key,
+            secret_key,
+            token,
+            user_enabled: self.bool(keys::MODERATION_USER_ENABLED, true).await?,
+            admin_enabled: self.bool(keys::MODERATION_ADMIN_ENABLED, false).await?,
+            ban_after: self
+                .integer(keys::MODERATION_BAN_AFTER, defaults::MODERATION_BAN_AFTER)
+                .await?
+                .max(0),
+            ban_minutes: self
+                .integer(
+                    keys::MODERATION_BAN_MINUTES,
+                    defaults::MODERATION_BAN_MINUTES,
+                )
+                .await?
+                .max(0),
+            notify_admin: self.bool(keys::MODERATION_NOTIFY, true).await?,
+            fail_open: self.bool(keys::MODERATION_FAIL_OPEN, true).await?,
+        })
+    }
+
     pub async fn capacity_mode(&self) -> Result<String> {
         let raw = self.string(keys::CAPACITY_MODE, "auto").await?;
         let mode = raw.trim().to_ascii_lowercase();
@@ -365,6 +611,35 @@ impl Settings {
             .collect();
         let enabled = self.upload().await?.formats;
         Ok((all, enabled))
+    }
+
+    /// 背景图的对外地址。
+    ///
+    /// 两种来源都支持：外部 URL 原样返回；上传的那张用本站地址，
+    /// 并带上资产更新时间做版本号——换了图旧缓存立刻失效。
+    pub async fn background_public_url(&self) -> Result<Option<String>> {
+        let Some(raw) = self.raw(keys::APPEARANCE_BACKGROUND).await? else {
+            return Ok(None);
+        };
+        let raw = raw.trim().to_string();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        if raw != keys::BACKGROUND_ASSET_MARKER {
+            return Ok(Some(raw));
+        }
+        let version = self
+            .repo
+            .asset_version(keys::BACKGROUND_ASSET_KEY)
+            .await?
+            .unwrap_or_default();
+        // 时间戳里的分隔符去掉，只留数字：查询串里不需要转义
+        let version: String = version.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        Ok(Some(format!(
+            "{}?v={}",
+            keys::BACKGROUND_PUBLIC_PATH,
+            version
+        )))
     }
 }
 

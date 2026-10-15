@@ -15,12 +15,16 @@ pub mod images;
 pub mod install;
 pub mod ipguard;
 pub mod media;
+pub mod moderation;
 pub mod quota;
 pub mod ratelimit;
 pub mod settings;
 pub mod stats;
 pub mod storage_svc;
 pub mod terms;
+/// 测试脚手架（只在 `cfg(test)` 下编译）
+#[cfg(test)]
+pub mod tests_support;
 pub mod uploads;
 
 use std::sync::{Arc, RwLock};

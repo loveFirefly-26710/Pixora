@@ -17,7 +17,7 @@ import { confirmDialog, openModal } from "../core/modal";
 import { navigate } from "../core/router";
 import type { PageContext } from "../core/router";
 import { getState } from "../core/state";
-import { toastError, toastOk } from "../core/toast";
+import { toast, toastError, toastOk } from "../core/toast";
 import type { AdminStats, AdminUserRow } from "../core/types";
 import {
   emptyState,
@@ -357,6 +357,34 @@ export async function render(ctx: PageContext): Promise<void> {
     return tr;
   }
 
+  /**
+   * 免登录切换到某个用户。
+   *
+   * 服务端会为目标用户签发一个会话，并把管理员自己的会话令牌记在
+   * `pixora_impersonator` Cookie 里——所以刷新之后仍能切回来。
+   * 切过去之后页面按对方账号重载一次，避免界面上留着上一个人的缓存。
+   */
+  async function impersonate(row: AdminUserRow, button: HTMLButtonElement): Promise<void> {
+    const ok = await confirmDialog({
+      title: `以 u_${row.uid} 的身份登录`,
+      message:
+        `不需要对方密码，会直接以 ${row.email} 的身份进入站点；期间的所有操作都算在对方名下。` +
+        "<br>页面顶部会显示提示条，点「切回管理员」即可恢复；本次切换会写入审计日志。",
+      confirmText: "切换登录",
+    });
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      await request(`/admin/users/${row.id}/impersonate`, { method: "POST" });
+      toast(`已切换到 u_${row.uid}，可以随时切回`);
+      // 身份换了，整页重载最干净：缓存里的用户、配额、相册都要按新身份重取
+      window.location.reload();
+    } catch (err) {
+      toastError(err);
+      button.disabled = false;
+    }
+  }
+
   function usageCell(row: AdminUserRow): HTMLElement {
     if (!row.quota_bytes || row.quota_bytes <= 0) {
       return h("span", { style: { fontSize: "12px", color: "var(--faint)" }, text: "—" });
@@ -384,6 +412,13 @@ export async function render(ctx: PageContext): Promise<void> {
         type: "button",
         text: "查看相册",
         on: { click: () => navigate(`/albums?uid=${encodeURIComponent(row.uid)}`) },
+      }),
+      // 免登录切换：不用知道对方密码，直接以他的身份进站，随时能切回来
+      h("button.btn.sm", {
+        type: "button",
+        text: "切换登录",
+        title: `以 u_${row.uid} 的身份登录（不需要对方密码，可随时切回）`,
+        on: { click: (event) => void impersonate(row, event.currentTarget as HTMLButtonElement) },
       }),
     );
 

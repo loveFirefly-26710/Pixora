@@ -100,6 +100,28 @@ impl Repo {
         Ok(())
     }
 
+    /// 改令牌名字。名字只是给人看的标签，改它不影响令牌本身的有效性。
+    pub async fn rename_api_token(&self, id: i64, user_id: i64, name: &str) -> Result<u64> {
+        self.db
+            .execute(
+                "UPDATE api_tokens SET name = ? WHERE id = ? AND user_id = ?",
+                Args::new().text(name).int(id).int(user_id),
+            )
+            .await
+    }
+
+    /// 物理删除一个令牌。撤销只是留痕，删除是「不想再在这张表里看到它」——
+    /// 已经撤销或过期的令牌才有必要删，但接口不做这个前置判断：
+    /// 删掉的令牌立即无法通过鉴权（行都没了），效果上等于撤销 + 清记录。
+    pub async fn delete_api_token(&self, id: i64, user_id: i64) -> Result<u64> {
+        self.db
+            .execute(
+                "DELETE FROM api_tokens WHERE id = ? AND user_id = ?",
+                Args::new().int(id).int(user_id),
+            )
+            .await
+    }
+
     /// 有效令牌数（上限校验用）。已撤销的不计；到期与否由服务层另行判断。
     pub async fn count_api_tokens(&self, user_id: i64) -> Result<i64> {
         self.db

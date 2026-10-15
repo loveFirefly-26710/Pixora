@@ -11,7 +11,7 @@
 import { ApiError, request } from "../core/api";
 import { copyText, h } from "../core/dom";
 import { formatDate, relativeTime } from "../core/format";
-import { confirmDialog, openModal } from "../core/modal";
+import { confirmDialog, openModal, promptDialog } from "../core/modal";
 import type { PageContext } from "../core/router";
 import { addons } from "../core/state";
 import { toast, toastError, toastOk, toastWithCode } from "../core/toast";
@@ -23,6 +23,7 @@ import {
   pageHead,
   qtip,
   responsiveTable,
+  select,
   textInput,
 } from "../ui/widgets";
 
@@ -31,6 +32,20 @@ let lastCreatedToken: string | null = null;
 
 /** Token 过期天数的上限：十年。再长不如直接留空用永不过期。 */
 const MAX_TOKEN_DAYS = 3650;
+
+/**
+ * 过期时间的挡位。
+ *
+ * 改成下拉而不是手输天数：常见需求就是这四个档，手输还得先想「一年是 365 还是
+ * 366」，填错了服务端才拦。真需要别的天数时用 API 建（接口照旧收任意 1-3650）。
+ */
+const EXPIRY_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "30", label: "30 天" },
+  { value: "90", label: "90 天" },
+  { value: "180", label: "180 天" },
+  { value: "365", label: "一年（365 天）" },
+  { value: "", label: "永不过期" },
+];
 
 const SCOPE_OPTIONS: Array<{ key: string; label: string; hint: string }> = [
   { key: "upload", label: "upload", hint: "上传图片" },
@@ -107,9 +122,14 @@ function tokensCard(
     ),
     h("span", { text: token.last_used_at ? relativeTime(token.last_used_at) : "从未使用" }),
     h("span", { text: token.expires_at ? formatDate(token.expires_at) : "永不过期" }),
-    token.revoked_at
-      ? h("span", { style: { color: "var(--faint)", fontSize: "12px" }, text: "—" })
-      : revokeButton(token, reload),
+    h(
+      "div.act",
+      null,
+      renameButton(token, reload),
+      // 已撤销 / 已过期的令牌只剩「改名 / 删除」：撤销按钮在它们身上没有意义
+      token.revoked_at || isExpired(token) ? null : revokeButton(token, reload),
+      deleteButton(token, reload),
+    ),
   ]);
 
   return card(
@@ -124,8 +144,81 @@ function tokensCard(
 /** 过期与撤销都只是「不可用」，用不同徽章区分，别让用户以为撤销后还能用。 */
 function tokenStatusBadge(token: ApiTokenRow): HTMLElement | null {
   if (token.revoked_at) return badge("已撤销", "mute");
-  const expired = token.expires_at ? new Date(token.expires_at).getTime() < Date.now() : false;
-  return expired ? badge("已过期", "warn") : null;
+  return isExpired(token) ? badge("已过期", "warn") : null;
+}
+
+function isExpired(token: ApiTokenRow): boolean {
+  return token.expires_at ? new Date(token.expires_at).getTime() < Date.now() : false;
+}
+
+/**
+ * 改名。
+ *
+ * 名字只是给人看的标签：客户端认的是令牌本身，改名不影响任何已经配好的
+ * 脚本与客户端，所以这里不用重新签发令牌。
+ */
+function renameButton(token: ApiTokenRow, reload: () => void): HTMLElement {
+  const button = h("button.btn.sm", { type: "button", text: "改名" });
+  button.addEventListener("click", async () => {
+    const next = await promptDialog({
+      title: "给令牌改个名字",
+      label: "名称",
+      value: token.name,
+      placeholder: "例如：家里的笔记本",
+      confirmText: "保存",
+      hint: "名字只用于区分是哪台设备在用，改名不会让令牌失效，也不用重新配置客户端。",
+    });
+    if (next === null) return;
+    const name = next.trim();
+    if (!name) {
+      toastError(new Error("名字不能为空"));
+      return;
+    }
+    if (name === token.name) return;
+    button.disabled = true;
+    try {
+      await request(`/me/tokens/${token.id}`, { method: "PATCH", json: { name } });
+      toastOk("名字已更新");
+      reload();
+    } catch (err) {
+      toastError(err);
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+/**
+ * 删除：物理删掉这一行。
+ *
+ * 与「撤销」的区别是留不留痕：撤销写 `revoked_at`，行为上已经不可用，
+ * 但记录还在，便于事后追查是哪台设备在什么时候用过。删除则是
+ * 「这张表里不想再看到它」——比如清理一堆过期令牌。
+ * 两种都不影响已经上传的内容。
+ */
+function deleteButton(token: ApiTokenRow, reload: () => void): HTMLElement {
+  const button = h("button.btn.sm.dgr.gho", { type: "button", text: "删除" });
+  button.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "删除 Token",
+      message:
+        `「${token.name}」的记录会被永久删除，使用它的脚本、客户端会在下一次请求时被拒绝。` +
+        "<br>删除后这条令牌的记录就查不到了；只想作废但保留记录，用「撤销」。",
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      await request(`/me/tokens/${token.id}`, { method: "DELETE", query: { hard: "true" } });
+      toastOk("Token 已删除");
+      reload();
+    } catch (err) {
+      toastError(err);
+      button.disabled = false;
+    }
+  });
+  return button;
 }
 
 function revokeButton(token: ApiTokenRow, reload: () => void): HTMLElement {
@@ -180,15 +273,7 @@ function newTokenCard(nameInput: HTMLInputElement, reload: () => void): HTMLElem
     chips.append(chip);
   }
 
-  // 天数手输：固定几个挡位满足不了「先用 7 天试试」这类需求
-  const expires = textInput({
-    value: "",
-    type: "number",
-    mono: true,
-    placeholder: "留空 = 永不过期",
-    min: "1",
-    max: String(MAX_TOKEN_DAYS),
-  });
+  const expires = select(EXPIRY_OPTIONS, "90");
   expires.style.maxWidth = "180px";
 
   const submit = h("button.btn.pri", { type: "button", text: "生成 Token" });
@@ -203,12 +288,11 @@ function newTokenCard(nameInput: HTMLInputElement, reload: () => void): HTMLElem
       toastError(new Error("至少选择一个权限范围"));
       return;
     }
-    // 天数是手输的，先自己校验一遍，别把「9999 年」这种交给服务端再被拒
+    // 下拉里给的都是合法挡位；仍按接口约束兜一道，免得以后有人加了越界的项
     const daysText = expires.value.trim();
     const days = daysText ? Number(daysText) : null;
     if (days !== null && (!Number.isInteger(days) || days < 1 || days > MAX_TOKEN_DAYS)) {
-      toastError(new Error(`过期天数要填 1 到 ${MAX_TOKEN_DAYS} 之间的整数；想永不过期就留空`));
-      expires.focus();
+      toastError(new Error(`过期天数要在 1 到 ${MAX_TOKEN_DAYS} 之间`));
       return;
     }
     submit.disabled = true;
@@ -245,7 +329,7 @@ function newTokenCard(nameInput: HTMLInputElement, reload: () => void): HTMLElem
       null,
       h("label.f", { text: "过期时间" }),
       expires,
-      h("div.tip", { text: `填天数，例如 90；留空表示永不过期（最长 ${MAX_TOKEN_DAYS} 天）` }),
+      h("div.tip", { text: "「永不过期」的 Token 丢了就等于丢了钥匙，长期不用建议选一个挡位。" }),
     ),
     submit,
     h("div.tip", { text: "权限按最小可用给：只上传的客户端不需要 read / write。" }),

@@ -11,6 +11,11 @@ export interface SiteInfo {
   max_file_bytes: number;
   max_batch_size: number;
   max_pixels: number;
+  /** 长宽上限（像素），0 = 不限 */
+  max_width: number;
+  max_height: number;
+  /** 客户端队列的最大长度：一次选太多会被截到这么多 */
+  queue_depth: number;
   thumb_client: boolean;
   thumb_server_fallback: boolean;
   appeal_email: string | null;
@@ -21,6 +26,8 @@ export interface SiteInfo {
   plaza_grid_columns: number;
   /** 回收站保留天数：0 = 关闭回收站（删除即彻底删除） */
   recycle_retention_days: number;
+  /** 会话有效期：闲置多少分钟掉线、最长多少天 */
+  session?: { idle_minutes: number; absolute_days: number };
 }
 
 export interface UserLimits {
@@ -32,8 +39,12 @@ export interface UserLimits {
   max_file_size: number;
   max_batch_size: number;
   max_pixels: number;
+  max_width: number;
+  max_height: number;
   formats: string[];
   max_concurrent_uploads: number;
+  /** 客户端队列的最大长度（服务端也按它卡预检，管理员同样受约束） */
+  queue_depth: number;
   unlimited: boolean;
 }
 
@@ -42,6 +53,13 @@ export interface UserStats {
   image_count: number;
   public_count: number;
   tag_count: number;
+}
+
+/** 管理员免登录切换用户时，说明「从谁切过来的」。 */
+export interface ImpersonatorInfo {
+  id: number;
+  uid: string;
+  email: string;
 }
 
 export interface UserProfile {
@@ -235,10 +253,12 @@ export interface PolicyFields {
   upload_per_day: number;
   upload_bytes_per_day: number;
   max_concurrent_uploads: number;
-  /** 上传策略四项：0 / 空数组表示「跟随上一层」（全局默认，再往上才是系统设置） */
+  /** 上传策略：0 / 空数组表示「跟随上一层」（全局默认，再往上才是系统设置） */
   max_batch_size: number;
   max_file_size: number;
   max_pixels: number;
+  max_width: number;
+  max_height: number;
   formats: string[];
   unlimited: boolean;
   note?: string | null;
@@ -249,6 +269,8 @@ export interface EffectiveUploadLimits {
   max_file_size: number;
   max_batch_size: number;
   max_pixels: number;
+  max_width: number;
+  max_height: number;
   formats: string[];
   max_concurrent_uploads: number;
 }
@@ -293,7 +315,15 @@ export interface StorageAdmin {
     layout: string;
     source: string;
   };
+  /**
+   * 各后端的「在用」内容。count 是图片张数（不是实体条数），
+   * bytes 是仍被引用的实体字节（原图 + 缩略图，每个实体只算一次）。
+   */
   distribution: { driver: string; label: string; count: number; bytes: number }[];
+  /** 回收站里还没过保留期的那部分 */
+  binned: { count: number; bytes: number };
+  /** 已经没人引用、等后台回收的实体 */
+  pending: { count: number; bytes: number };
   totals: { count: number; bytes: number; dedup_saved_bytes: number };
   mimes?: { mime: string; count: number; bytes: number }[];
   trend?: { bucket: string; count: number }[];
@@ -340,6 +370,8 @@ export interface RateLimitAdmin {
     max_file_bytes: number;
     max_batch_size: number;
     max_pixels: number;
+    max_width: number;
+    max_height: number;
     queue_depth: number;
     formats: string[];
   };
@@ -421,8 +453,40 @@ export interface AdminSettings {
     max_file_bytes: number;
     max_batch_size: number;
     max_pixels: number;
+    max_width: number;
+    max_height: number;
     queue_depth: number;
     formats: string[];
+    /** 可勾选的格式清单（服务端给，界面不再自己写死一份） */
+    format_options?: Array<{ ext: string; label: string }>;
+  };
+  session: {
+    idle_minutes: number;
+    absolute_days: number;
+    remember_days: number;
+  };
+  security: {
+    hotlink_enabled: boolean;
+    hotlink_allow_empty: boolean;
+    hotlink_domains: string;
+  };
+  moderation: {
+    enabled: boolean;
+    provider: string;
+    threshold: number;
+    score_field: string;
+    endpoint: string;
+    region: string;
+    app_id: string;
+    access_key_set: boolean;
+    secret_key_set: boolean;
+    token_set: boolean;
+    user_enabled: boolean;
+    admin_enabled: boolean;
+    ban_after: number;
+    ban_minutes: number;
+    notify_admin: boolean;
+    fail_open: boolean;
   };
   thumb: { client: boolean; server_fallback: boolean };
   mail: {

@@ -18,6 +18,7 @@ enum OwnedValue {
     OptInt(Option<i64>),
     Text(String),
     OptText(Option<String>),
+    Bytes(Vec<u8>),
 }
 
 impl Args {
@@ -42,6 +43,13 @@ impl Args {
 
     pub fn opt_int(mut self, value: Option<i64>) -> Self {
         self.values.push(OwnedValue::OptInt(value));
+        self
+    }
+
+    /// 二进制值。配置类资产（站点背景图）走这条路，
+    /// 图片实体的字节仍然由存储驱动负责，不经过这里。
+    pub fn blob(mut self, value: Vec<u8>) -> Self {
+        self.values.push(OwnedValue::Bytes(value));
         self
     }
 
@@ -80,6 +88,7 @@ impl Args {
                 OwnedValue::Text(inner) => out.add(inner.clone()),
                 OwnedValue::OptText(Some(inner)) => out.add(inner.clone()),
                 OwnedValue::OptText(None) => out.add(None::<String>),
+                OwnedValue::Bytes(inner) => out.add(inner.clone()),
             };
             debug_assert!(added.is_ok(), "只使用受支持的值类型");
         }

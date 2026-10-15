@@ -102,6 +102,9 @@ pub struct EffectiveUploadLimits {
     pub max_batch: i64,
     /// 像素上限：解压炸弹防线
     pub max_pixels: i64,
+    /// 长宽上限（像素），0 = 不限
+    pub max_width: i64,
+    pub max_height: i64,
     /// 允许的图片格式（扩展名，已归一化）
     pub formats: Vec<String>,
     /// 单用户并发上传数：客户端队列的上限
@@ -141,6 +144,8 @@ impl EffectiveUploadLimits {
             max_file_bytes: pick(|policy| policy.max_file_size, site.max_file_bytes),
             max_batch: pick(|policy| policy.max_batch_size, site.max_batch),
             max_pixels: pick(|policy| policy.max_pixels, site.max_pixels),
+            max_width: pick(|policy| policy.max_width, site.max_width),
+            max_height: pick(|policy| policy.max_height, site.max_height),
             formats,
             max_concurrent_uploads: pick(
                 |policy| policy.max_concurrent_uploads,
@@ -158,25 +163,138 @@ impl AppState {
         let own = self.repo.user_policy(user.id).await?;
         Ok(EffectiveUploadLimits::resolve(&site, &global, own.as_ref()))
     }
+
+    /// 内容审核这一步。没开审核、或这个角色不过审时立刻返回，不读盘不发请求。
+    async fn screen_before_store(
+        &self,
+        user: &User,
+        collected: &Collected,
+        input: &UploadInput,
+        mime: &str,
+        thumb: Option<&BufferedThumb>,
+        ip: Option<&str>,
+    ) -> Result<()> {
+        let settings = self.settings.moderation().await?;
+        if !settings.enabled || !settings.applies_to(user.is_admin()) {
+            return Ok(());
+        }
+
+        // 送原作还是送缩略图：原图在体积上限内就送原图，
+        // 超了就退回缩略图（长边 400px，判内容足够，四家都收得下）
+        if collected.size as usize <= crate::moderation::MAX_SUBMIT_BYTES {
+            let bytes = collected.read_all().await?;
+            return self
+                .review_upload(
+                    user,
+                    crate::moderation::ScreenInput::Image {
+                        bytes: &bytes,
+                        mime,
+                    },
+                    &input.original_name,
+                    ip,
+                )
+                .await;
+        }
+        if let Some(thumb) = thumb {
+            return self
+                .review_upload(
+                    user,
+                    crate::moderation::ScreenInput::Image {
+                        bytes: &thumb.bytes,
+                        mime: thumb.mime,
+                    },
+                    &input.original_name,
+                    ip,
+                )
+                .await;
+        }
+
+        // 又大又没有缩略图：没有可送的内容。按 fail_open 的口径处理
+        if settings.fail_open {
+            tracing::warn!(
+                size = collected.size,
+                "图片超过送审体积上限且没有缩略图，本次跳过内容审核"
+            );
+            return Ok(());
+        }
+        Err(AppError::ContentRejected {
+            label: "无法送审".into(),
+            score: 0.0,
+            provider: settings.provider,
+        })
+    }
+}
+
+/// 已经在内存里的缩略图。审核与存储都要用，所以读一次留着。
+pub struct BufferedThumb {
+    bytes: Vec<u8>,
+    mime: &'static str,
+}
+
+/// 把缩略图读进内存。超过 2MiB 直接拒绝——客户端生成的缩略图只有几十 KB，
+/// 这个上限是防止有人往这个字段里塞别的东西。
+async fn read_thumb(
+    thumb: Option<(Box<dyn tokio::io::AsyncRead + Send + Unpin>, i64)>,
+) -> Result<Option<BufferedThumb>> {
+    use tokio::io::AsyncReadExt;
+
+    let Some((mut reader, size_hint)) = thumb else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::with_capacity(size_hint.clamp(0, 2 * 1024 * 1024) as usize);
+    reader.read_to_end(&mut bytes).await?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err(AppError::bad_request("缩略图过大"));
+    }
+    // MIME 在这里嗅一次：审核要带上它，存储那边也用同一份结论
+    let mime = media::sniff(&bytes)
+        .ok_or_else(|| AppError::InvalidImage("缩略图格式无法识别".into()))?
+        .mime;
+    Ok(Some(BufferedThumb { bytes, mime }))
 }
 
 impl AppState {
-    /// 批量预检：客户端一次发上千个哈希，服务端只回哪些已存在。
+    /// 批量预检：客户端把一批哈希一次发过来，服务端只回哪些已存在。
     ///
-    /// 这是省带宽的关键一步——重复文件连上传请求都不发。
-    /// 预检：这些哈希里哪些在**这个账号的图库里**已经有活着的图。
+    /// 这是省带宽的关键一步——重复文件连上传请求都不发。判定口径要跟着
+    /// **这个账号图库里活着的引用**走：只看 blobs 表的话，用户删光图片后
+    /// 重传同一批会被整批跳过。
     ///
-    /// 客户端据此跳过重复上传，所以判定口径必须跟着「活着的引用」走：
-    /// 只看 blobs 表的话，用户删光图片后重传同一批会被整批跳过。
-    pub async fn check_hashes(&self, owner_id: i64, hashes: &[String]) -> Result<HashCheckOutcome> {
+    /// 条数上限也在这里：一次预检请求就是客户端的一批，超过生效的单批次
+    /// 最大张数直接退回，客户端据此把批次切小。
+    pub async fn check_hashes(&self, user: &User, hashes: &[String]) -> Result<HashCheckOutcome> {
         if hashes.is_empty() {
             return Ok(HashCheckOutcome {
                 exist: Vec::new(),
                 missing: Vec::new(),
             });
         }
-        if hashes.len() > 1000 {
-            return Err(AppError::bad_request("单次最多预检 1000 个哈希"));
+        // 协议层的硬顶：比这更大的一次性预检没有实际意义，客户端本来就按批发
+        const CEILING: usize = 1000;
+        if hashes.len() > CEILING {
+            return Err(AppError::bad_request(format!("单次最多预检 {CEILING} 个哈希")));
+        }
+        // 一次预检就是客户端的一批：条数上限按**这个账号生效的**单批次最大张数算。
+        // 上传本身是逐张发的，服务端看不见批次；预检是唯一能按批卡住的地方。
+        let limits = self.effective_upload_limits(user).await?;
+        if limits.max_batch > 0 && hashes.len() as i64 > limits.max_batch {
+            return Err(AppError::bad_request(format!(
+                "单批次最多 {} 张（单批次最大张数），这次预检了 {} 个；请分批上传",
+                limits.max_batch,
+                hashes.len()
+            )));
+        }
+        // 队列深度阈值既管服务端的在途任务，也管「客户端一次贴进来多少张」
+        let upload_settings = self.settings.upload().await?;
+        if upload_settings.queue_depth > 0 && hashes.len() as i64 > upload_settings.queue_depth {
+            return Err(AppError::bad_request(format!(
+                "单次最多预检 {} 个文件（队列深度阈值），这次是 {} 个；请分批上传",
+                upload_settings.queue_depth,
+                hashes.len()
+            )));
         }
         for hash in hashes {
             if hash.len() != 64 || !hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
@@ -184,7 +302,7 @@ impl AppState {
             }
         }
         let normalized: Vec<String> = hashes.iter().map(|hash| hash.to_lowercase()).collect();
-        let check = self.repo.existing_hashes(owner_id, &normalized).await?;
+        let check = self.repo.existing_hashes(user.id, &normalized).await?;
         Ok(HashCheckOutcome {
             exist: check.exist,
             missing: check.missing,
@@ -248,7 +366,16 @@ impl AppState {
             .unwrap_or((0, 0));
         if width > 0 && height > 0 {
             media::check_pixels(width, height, limits.max_pixels as u64)?;
+            media::check_dimensions(width, height, limits.max_width, limits.max_height)?;
         }
+
+        // 缩略图先读进内存：内容审核要用它，存储也要用它。
+        // 原图超过各家接口的体积上限时，送审的就是这张长边 400px 的缩略图。
+        let thumb_bytes = read_thumb(thumb).await?;
+
+        // 内容审核：在写任何一行数据库之前拦下违规内容
+        self.screen_before_store(user, &collected, &input, sniffed.mime, thumb_bytes.as_ref(), ip)
+            .await?;
 
         // 配额与限流：都在拿到真实大小之后判
         crate::quota::ensure_quota_available(self, user, collected.size as i64).await?;
@@ -277,7 +404,7 @@ impl AppState {
                 &ext,
                 width,
                 height,
-                thumb,
+                thumb_bytes,
             )
             .await;
 
@@ -343,7 +470,7 @@ impl AppState {
         ext: &str,
         width: u32,
         height: u32,
-        thumb: Option<(Box<dyn tokio::io::AsyncRead + Send + Unpin>, i64)>,
+        thumb_bytes: Option<BufferedThumb>,
     ) -> Result<UploadOutcome> {
         let size = collected.size as i64;
 
@@ -401,12 +528,15 @@ impl AppState {
         };
 
         // 缩略图也是内容寻址的一份实体，同样去重
-        let thumb_blob_id = match thumb {
-            Some((reader, thumb_size)) => self.store_thumb(reader, thumb_size).await.unwrap_or(None),
+        let thumb_blob_id = match thumb_bytes {
+            Some(thumb) => self.store_thumb(thumb).await.unwrap_or(None),
             None => None,
         };
 
-        let album_slug = match input.album_id {
+        // 没指定相册就落进「默认相册」：界面上那句「不指定相册就等于进默认相册」
+        // 得在服务端也成立，否则这类图不挂在任何相册下，用户在相册页里找不到，
+        // 会以为上传丢了。真找不到默认相册（被删了之类）才留空。
+        let album = match input.album_id {
             Some(album_id) => {
                 let album = self
                     .repo
@@ -416,17 +546,23 @@ impl AppState {
                 if album.owner_id != user.id {
                     return Err(AppError::forbidden("相册不属于当前账号"));
                 }
-                Some(album.slug.clone())
+                Some(album)
             }
-            None => None,
+            None => {
+                self.repo
+                    .find_album_by_slug(user.id, pixora_repo::repo::albums::DEFAULT_ALBUM_SLUG)
+                    .await?
+            }
         };
+        let album_id = album.as_ref().map(|item| item.id);
+        let album_slug = album.as_ref().map(|item| item.slug.clone());
 
         let image = self
             .repo
             .create_image_reference(
                 &pixora_repo::repo::images::NewImage {
                     owner_id: user.id,
-                    album_id: input.album_id,
+                    album_id,
                     blob_id: blob.id,
                     thumb_blob_id,
                     original_name: input.original_name.clone(),
@@ -475,21 +611,10 @@ impl AppState {
     }
 
     /// 存缩略图。同样内容寻址 + 去重，失败只返回 None（不毁掉整次上传）。
-    async fn store_thumb(
-        &self,
-        mut reader: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
-        size_hint: i64,
-    ) -> Result<Option<i64>> {
-        use tokio::io::AsyncReadExt;
-
-        // 缩略图都很小，直接读进内存即可（客户端生成的是 WebP，最长边 400px）
-        let mut buffer = Vec::with_capacity(size_hint.clamp(0, 2 * 1024 * 1024) as usize);
-        reader.read_to_end(&mut buffer).await?;
+    async fn store_thumb(&self, thumb: BufferedThumb) -> Result<Option<i64>> {
+        let buffer = thumb.bytes;
         if buffer.is_empty() {
             return Ok(None);
-        }
-        if buffer.len() > 2 * 1024 * 1024 {
-            return Err(AppError::bad_request("缩略图过大"));
         }
 
         let sniffed = media::sniff(&buffer)
@@ -749,6 +874,14 @@ impl Collected {
             .map_err(|err| AppError::internal(format!("重新打开临时文件失败：{err}")))?;
         Ok(Box::new(file))
     }
+
+    /// 整份读进内存。内容审核要把它 base64 之后送给第三方服务，
+    /// 只能整份读；调用方先按体积门槛判过（见 `screen_before_store`）。
+    pub async fn read_all(&self) -> Result<Vec<u8>> {
+        tokio::fs::read(&self.path)
+            .await
+            .map_err(|err| AppError::internal(format!("读取临时文件失败：{err}")))
+    }
 }
 
 /// 清理遗留的临时文件。进程启动时调一次，避免上次崩溃留下的残渣堆积。
@@ -789,6 +922,8 @@ mod tests {
             max_file_bytes: 100 * 1024 * 1024,
             max_batch: 1000,
             max_pixels: 80_000_000,
+            max_width: 0,
+            max_height: 0,
             queue_depth: 500,
             formats: vec!["jpg".into(), "png".into()],
             thumb_client: true,

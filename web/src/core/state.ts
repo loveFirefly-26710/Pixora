@@ -7,13 +7,18 @@
  */
 
 import { request, cacheSite, currentCsrfToken, setCsrfToken, type ApiError } from "./api";
-import type { SiteInfo, UserProfile } from "./types";
+import type { ImpersonatorInfo, SiteInfo, UserProfile } from "./types";
 
 type Listener = () => void;
 
 interface AppState {
   site: SiteInfo | null;
   user: UserProfile | null;
+  /**
+   * 管理员免登录切换用户时，这里是「从谁切过来的」。
+   * 由服务端的 Cookie 决定，前端只负责显示提示条与切回按钮。
+   */
+  impersonator: ImpersonatorInfo | null;
   /** 管理员正在查看的用户（用户视图）；普通用户恒为 null */
   viewingUid: string | null;
   ready: boolean;
@@ -22,6 +27,7 @@ interface AppState {
 const state: AppState = {
   site: null,
   user: null,
+  impersonator: null,
   viewingUid: null,
   ready: false,
 };
@@ -90,6 +96,9 @@ export async function loadSite(): Promise<void> {
       max_file_bytes: 20 * 1024 * 1024,
       max_batch_size: 1000,
       max_pixels: 80_000_000,
+      max_width: 0,
+      max_height: 0,
+      queue_depth: 500,
       thumb_client: true,
       thumb_server_fallback: false,
       appeal_email: null,
@@ -100,21 +109,68 @@ export async function loadSite(): Promise<void> {
       terms: { required: false, version: null, articles: 0 },
     };
   }
+  applySiteIdentity();
+  notify();
+}
+
+/**
+ * 站点名与背景图落进 DOM。
+ *
+ * 站名改完要刷新才生效是不够的：它在浏览器标签页上，用户一眼就能看到。
+ * 背景图同理——设置里存了却没有哪一行 CSS 用它，等于这个设置是摆设。
+ */
+export function applySiteIdentity(): void {
+  const site = state.site;
+  if (!site) return;
+
+  const name = (site.name ?? "").trim() || "Pixora";
+  document.title = name;
+
+  // 品牌文字也跟着站名走：顶栏那个「Pixora」是硬编码的话，改了站名
+  // 会出现「标签页是新名字、页头还是旧名字」的错位
+  for (const node of Array.from(document.querySelectorAll<HTMLElement>("[data-brand]"))) {
+    node.textContent = name;
+  }
+
+  const background = (site.background ?? "").trim();
+  const root = document.documentElement;
+  if (background) {
+    root.style.setProperty("--site-bg-image", `url("${background}")`);
+    document.body.classList.add("has-site-bg");
+  } else {
+    root.style.removeProperty("--site-bg-image");
+    document.body.classList.remove("has-site-bg");
+  }
+}
+
+export function impersonator(): ImpersonatorInfo | null {
+  return state.impersonator;
+}
+
+export function setImpersonator(info: ImpersonatorInfo | null): void {
+  state.impersonator = info;
   notify();
 }
 
 /** 拉当前用户。未登录返回 null（不是错误）。 */
 export async function loadMe(): Promise<UserProfile | null> {
   try {
-    const payload = await request<{ user: UserProfile; csrf_token?: string }>("/me");
+    const payload = await request<{
+      user: UserProfile;
+      csrf_token?: string;
+      impersonator?: ImpersonatorInfo | null;
+    }>("/me");
     state.user = payload.user;
+    state.impersonator = payload.impersonator ?? null;
     if (payload.csrf_token) setCsrfToken(payload.csrf_token);
     notify();
     return state.user;
   } catch (err) {
     const apiError = err as ApiError;
     if (apiError.status === 401) {
+      // 会话超时/被吊销都走这里：清掉身份，让路由守卫把用户送回登录页
       state.user = null;
+      state.impersonator = null;
       notify();
       return null;
     }
@@ -124,6 +180,7 @@ export async function loadMe(): Promise<UserProfile | null> {
 
 export function setUser(user: UserProfile | null): void {
   state.user = user;
+  if (!user) state.impersonator = null;
   notify();
 }
 

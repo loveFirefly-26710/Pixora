@@ -19,15 +19,17 @@ import { navigate, type PageContext } from "../core/router";
 import { currentUser, getState } from "../core/state";
 import { toastError } from "../core/toast";
 import type { ImageItem } from "../core/types";
-import { createUploadPanel, loadAlbumOptions } from "../upload/panel";
+import { createUploadPanel } from "../upload/panel";
 import { openLightbox } from "../ui/lightbox";
 import { applyMasonry } from "../ui/masonry";
 import {
   emptyState,
   imageTile,
+  newShuffleSeed,
   pageHead,
   qtip,
   skeletonGrid,
+  sortSelect,
   spinner,
 } from "../ui/widgets";
 
@@ -38,13 +40,22 @@ interface PlazaQuery {
   q: string | null;
   tag: string | null;
   sort: string;
+  /** 随机排序的种子：翻页要带同一个，否则每页各洗一次牌会重复与漏图 */
+  seed: number;
 }
 
+const KNOWN_SORTS = ["shuffle", "new", "old", "size", "smallest", "name", "type", "hot"];
+
 function readQuery(ctx: PageContext): PlazaQuery {
+  const sortParam = ctx.query.get("sort");
+  const sort = sortParam && KNOWN_SORTS.includes(sortParam) ? sortParam : "shuffle";
+  const seedParam = Number(ctx.query.get("seed"));
   return {
     q: ctx.query.get("q"),
     tag: ctx.query.get("tag"),
-    sort: ctx.query.get("sort") === "hot" ? "hot" : "new",
+    sort,
+    // 链接里带了种子就用它（翻页、后退时顺序不变），否则现取一个
+    seed: Number.isInteger(seedParam) && seedParam > 0 ? seedParam : newShuffleSeed(),
   };
 }
 
@@ -104,16 +115,16 @@ export async function render(ctx: PageContext): Promise<void> {
   if (user) {
     const panel = createUploadPanel({
       onUploaded: () => {
-        // 传完把列表刷回第一页：新图在最前面，用户一眼能看到
-        if (query.sort === "new") void loadFirstPage();
+        // 传完把列表刷回第一页：按时间排序时新图在最前面；
+        // 随机排序下也刷一次——重新洗牌后新图有机会出现在第一屏，
+        // 总比让用户以为自己那张没传上去要好
+        void loadFirstPage();
       },
     });
     panel.root.style.marginBottom = "18px";
     root.append(panel.root);
-    // 目标相册下拉要有真清单：拿不到就退回「默认相册」（面板自己的兜底）
-    void loadAlbumOptions(getState().viewingUid)
-      .then((albums) => panel.refreshAlbums(albums))
-      .catch(() => {});
+    // 相册清单由面板自己拉（带一次重试与占位项）：
+    // 页面再拉一次会和它抢同一个下拉，两边先后写值反而会闪
   }
 
   // 搜索只在顶栏那一个输入框里（页面里不再重复），标签筛选也交给它——
@@ -121,21 +132,14 @@ export async function render(ctx: PageContext): Promise<void> {
   const tagRow = h("div.flexline", { style: { marginBottom: "14px" } });
   root.append(tagRow, grid, footer);
 
-  const sortChips = () => [
-    h("button.chip", {
-      type: "button",
-      class: query.sort === "new" ? "on" : "",
-      text: "最新",
-      on: { click: () => update({ sort: "new" }) },
-    }),
-    h("button.chip", {
-      type: "button",
-      class: query.sort === "hot" ? "on" : "",
-      text: "最热",
-      on: { click: () => update({ sort: "hot" }) },
-    }),
-  ];
-  tagRow.append(h("span.spacer"), ...sortChips());
+  // 排序下拉。默认「随机」，另给一个「最热」（按浏览量）。
+  // 换排序时换一个种子：不然「随机」切回来还是同一份顺序，看着像没生效
+  const sortControl = sortSelect(query.sort, (value) => {
+    update({ sort: value, seed: value === "shuffle" ? String(newShuffleSeed()) : null });
+  }, [{ value: "hot", label: "最热（按浏览量）" }]);
+  sortControl.classList.add("f");
+  sortControl.style.maxWidth = "190px";
+  tagRow.append(h("span.spacer"), sortControl);
 
   // 顶栏搜索框显示当前关键词（从别处带着 ?q= 进来时也对得上）
   const headerSearch = document.querySelector<HTMLInputElement>(".navbar .search input");
@@ -201,6 +205,7 @@ export async function render(ctx: PageContext): Promise<void> {
           q: query.q ?? undefined,
           tag: query.tag ?? undefined,
           sort: query.sort,
+          seed: query.seed,
           page: currentPage + 1,
           per_page: PER_PAGE,
         },
@@ -221,7 +226,8 @@ export async function render(ctx: PageContext): Promise<void> {
         for (const item of page.items) {
           grid.append(
             imageTile(item, {
-              subtitle: `u_${item.owner_uid} · ${relativeTime(item.upload_time)}`,
+              // 只给时间：卡片上不再暴露上传者 UID（见 widgets.imageTile 的说明）
+              subtitle: relativeTime(item.upload_time),
               // 预览浮层拿累加后的整份列表：翻到哪就能在浮层里前后翻到哪
               onOpen: (clicked) => openLightbox(items, clicked, { anonymous: !user }),
             }),
@@ -268,18 +274,21 @@ export async function render(ctx: PageContext): Promise<void> {
     observer.observe(sentinel);
   }
 
-  function update(patch: Partial<Record<"q" | "tag" | "sort", string | null>>): void {
+  function update(
+    patch: Partial<Record<"q" | "tag" | "sort" | "seed", string | null>>,
+  ): void {
     const next: Record<string, string | null> = {
       q: query.q,
       tag: query.tag,
       sort: query.sort,
+      seed: String(query.seed),
       ...patch,
     };
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(next)) {
       if (value === null || value === "") continue;
       // 默认值不进 URL，链接才干净
-      if (key === "sort" && value === "new") continue;
+      if (key === "sort" && value === "shuffle") continue;
       params.set(key, String(value));
     }
     const encoded = params.toString();

@@ -26,6 +26,11 @@ pub const SESSION_COOKIE: &str = "pixora_session";
 pub const CSRF_COOKIE: &str = "pixora_csrf";
 /// CSRF 请求头名。
 pub const CSRF_HEADER: &str = "x-csrf-token";
+/// 管理员免登录切换用户时，记下自己那份会话的 Cookie 名。
+///
+/// 它存的是管理员会话令牌本身（HttpOnly），所以刷新页面之后还能切回来——
+/// 「免登录切换」正是靠它成立的。登出时一并清掉。
+pub const IMPERSONATOR_COOKIE: &str = "pixora_impersonator";
 
 /// 响应信封。
 #[derive(Debug, Serialize)]
@@ -379,6 +384,9 @@ pub fn verify_csrf(
 }
 
 /// 造登录成功后的两个 Cookie。
+///
+/// `remember` 只决定 Cookie 的 `Max-Age`；服务端那份有效期在
+/// `AppState::issue_session` 里写（会话表的 `expires_at`），两边同一天数。
 pub async fn session_cookies(
     state: &AppState,
     session_token: &str,
@@ -386,9 +394,15 @@ pub async fn session_cookies(
     remember: bool,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    // 记住我：30 天；否则会话 Cookie（关浏览器即失效）
+    // 记住我：跟着设置里的天数走；否则会话 Cookie（关浏览器即失效）
     let max_age = if remember {
-        "; Max-Age=2592000".to_string()
+        let days = state
+            .settings
+            .session()
+            .await
+            .map(|session| session.remember_days.clamp(1, 365))
+            .unwrap_or(30);
+        format!("; Max-Age={}", days * 24 * 3600)
     } else {
         String::new()
     };
@@ -431,10 +445,63 @@ pub fn clear_cookies(state: &AppState) -> HeaderMap {
     headers
 }
 
+/// 取「切回管理员」用的令牌。
+pub fn impersonator_cookie(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, IMPERSONATOR_COOKIE)
+}
+
+/// 写下管理员的会话令牌，供切回时使用。
+pub fn impersonator_cookie_header(state: &AppState, admin_token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let secure = if state.config.secure_cookies {
+        "; Secure"
+    } else {
+        ""
+    };
+    // 与 CSRF Cookie 一样的寿命：会话 Cookie（关浏览器即失效）。
+    // 更短会让人以为切不回去了，更长则多留一份长期凭据
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "{IMPERSONATOR_COOKIE}={admin_token}; Path=/; HttpOnly; SameSite=Lax{secure}"
+    )) {
+        headers.append(header::SET_COOKIE, value);
+    }
+    headers
+}
+
+/// 清掉「切回管理员」的 Cookie。
+pub fn clear_impersonator_cookie(state: &AppState) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let secure = if state.config.secure_cookies {
+        "; Secure"
+    } else {
+        ""
+    };
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "{IMPERSONATOR_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax{secure}"
+    )) {
+        headers.append(header::SET_COOKIE, value);
+    }
+    headers
+}
+
 /// 给响应追加 Cookie。
+///
+/// 这里必须用 `append` 而不是 `HeaderMap::extend`：`extend` 对同名头是**替换**
+/// 语义，一个响应里要塞多个 `Set-Cookie`（会话 + CSRF + 免登录切换的标记）时，
+/// 后加的那一个会把前面的整组挤掉——症状是「切换用户之后身份没变」。
 pub fn with_cookies(mut response: Response, cookies: HeaderMap) -> Response {
-    response.headers_mut().extend(cookies);
+    for (name, value) in cookies.iter() {
+        response.headers_mut().append(name, value.clone());
+    }
     response
+}
+
+/// 合并两组 Cookie。同样不能用 `extend`，理由见 [`with_cookies`]。
+pub fn merge_cookies(mut base: HeaderMap, extra: HeaderMap) -> HeaderMap {
+    for (name, value) in extra.iter() {
+        base.append(name, value.clone());
+    }
+    base
 }
 
 /// RFC3339 时间串，统一用它给前端。
@@ -589,6 +656,7 @@ mod tests {
             used_bytes: 0,
             login_fail_count: 0,
             locked_until: None,
+            auto_unsuspend_at: None,
             created_at: Utc::now(),
             last_login_at: None,
             last_login_ip: None,

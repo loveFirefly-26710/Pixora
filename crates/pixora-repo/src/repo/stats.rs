@@ -17,27 +17,31 @@ use crate::repo::{window_start, Repo};
 impl Repo {
     /// 存储面板：占用、去重收益、分布、趋势与最近上传一次组装齐。
     ///
-    /// `total_bytes` 与 `drivers` / `mimes` 都复用 `blobs.rs` 里的口径，
-    /// 面板和实体页因此不会给出两个不同的数字。
+    /// 这里有两套「占用」，界面上是两个位置，别混：
+    ///
+    ///   - `total_bytes` 是**还在被引用的实体**（在用 + 回收站），和分布行相加相等；
+    ///   - `pending_bytes` 是**已经没人引用的实体**，等后台回收。它们还占着磁盘
+    ///     （容量卡片的「本项目占用」把它们算进去），但界面上没有对应内容，
+    ///     所以单独一行摆出来，并给一个「立即回收」。
     pub async fn storage_stats(&self, recent_limit: i64) -> Result<StorageStats> {
         let image_count = self.count_all_images().await?;
-        let total_bytes = self.sum_blob_bytes().await?;
-        // 逻辑占用按「未删图片各自引用的原图大小」算：去重命中时同一份 blob
-        // 会被多行引用，这正好是「没有去重时该占多少」
-        let logical_bytes = self
-            .db
-            .count(
-                "SELECT COALESCE(SUM(b.size), 0) AS total FROM images i \
-                   JOIN blobs b ON b.id = i.blob_id WHERE i.deleted_at IS NULL",
-                Args::new(),
-            )
-            .await?;
+        // 逻辑占用：每张图各自引用的原图大小之和，去重命中时同一份 blob 会被
+        // 多行引用——这正好是「没有去重时该占多少」。回收站里的图也算进来，
+        // 它们仍然占着额度与磁盘
+        let logical_bytes = self.logical_bytes_all().await?;
+        let total_bytes = self.referenced_bytes_all().await?;
+        let (binned_count, binned_bytes) = self.binned_usage().await?;
+        let (pending_count, pending_bytes) = self.unreferenced_usage().await?;
 
         Ok(StorageStats {
             image_count,
             total_bytes,
             logical_bytes,
             dedup_saved_bytes: (logical_bytes - total_bytes).max(0),
+            binned_count,
+            binned_bytes,
+            pending_count,
+            pending_bytes,
             average_size: self.average_blob_size().await?,
             drivers: self.blob_stats_by_driver().await?,
             mimes: self.blob_stats_by_mime(8).await?,

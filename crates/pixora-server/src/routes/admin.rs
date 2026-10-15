@@ -698,11 +698,43 @@ pub async fn backend_delete(
 ) -> Response {
     let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/storage/backends/{id}");
 
-    match state.repo.find_backend(backend_id).await {
-        Ok(Some(_)) => {}
+    let backend = match state.repo.find_backend(backend_id).await {
+        Ok(Some(backend)) => backend,
         Ok(None) => return not_found("存储后端"),
         Err(err) => return crate::http::error_response(err.into()),
+    };
+
+    // 还挂着实体就不让删：配置行一删，驱动就装配不出来了（远端驱动的地址与凭据
+    // 都在配置行里），那些对象再也没人读得到、也删不掉。宁可让管理员先把图挪走
+    // 或删掉，也不要留下永远收不回的孤儿。
+    let attached = state
+        .repo
+        .count_blobs_for_backend(backend_id)
+        .await
+        .unwrap_or(0);
+    if attached > 0 {
+        return crate::http::error_response(AppError::Conflict(format!(
+            "这个后端上还有 {attached} 个实体（原图与缩略图）：先把它们删掉，或把默认后端切到别处并清理，再删这个后端。配置行一删，那些文件就再也读不出来也删不掉了。"
+        )));
     }
+    // backend_id 为空的历史实体也算在这个驱动名下：本地与数据库内两种驱动共用
+    // 一份落点，删掉配置行同样会让它们变成孤儿
+    if backend.driver == pixora_storage::names::LOCAL
+        || backend.driver == pixora_storage::names::DATABASE
+    {
+        let by_driver = state
+            .repo
+            .count_blobs_by_driver(&backend.driver)
+            .await
+            .unwrap_or(0);
+        if by_driver > attached {
+            return crate::http::error_response(AppError::Conflict(format!(
+                "这个驱动上还有 {} 个历史实体（没绑定到具体后端）：先清理它们再删。",
+                by_driver - attached
+            )));
+        }
+    }
+
     if let Err(err) = state.repo.delete_backend(backend_id).await {
         return crate::http::error_response(err.into());
     }
@@ -926,6 +958,8 @@ pub async fn ratelimit_get(
                 "max_file_size": upload.max_file_bytes,
                 "max_batch_size": upload.max_batch,
                 "max_pixels": upload.max_pixels,
+                "max_width": upload.max_width,
+                "max_height": upload.max_height,
                 "formats": upload.formats,
                 "max_concurrent_uploads": upload.max_concurrent_uploads,
             },
@@ -953,6 +987,8 @@ pub async fn ratelimit_get(
             "max_file_bytes": upload_settings.max_file_bytes,
             "max_batch_size": upload_settings.max_batch,
             "max_pixels": upload_settings.max_pixels,
+            "max_width": upload_settings.max_width,
+            "max_height": upload_settings.max_height,
             "queue_depth": upload_settings.queue_depth,
             "formats": upload_settings.formats,
         },
@@ -979,6 +1015,8 @@ fn policy_json(policy: &RateLimitPolicy) -> serde_json::Value {
         "max_batch_size": policy.max_batch_size,
         "max_file_size": policy.max_file_size,
         "max_pixels": policy.max_pixels,
+        "max_width": policy.max_width,
+        "max_height": policy.max_height,
         "formats": policy
             .formats
             .as_deref()
@@ -1052,6 +1090,8 @@ fn policy_with(base: Option<&RateLimitPolicy>, body: &serde_json::Value) -> Rate
         max_batch_size: field_opt_i64(body, "max_batch_size").unwrap_or(fallback.max_batch_size),
         max_file_size: field_opt_i64(body, "max_file_size").unwrap_or(fallback.max_file_size),
         max_pixels: field_opt_i64(body, "max_pixels").unwrap_or(fallback.max_pixels),
+        max_width: field_opt_i64(body, "max_width").unwrap_or(fallback.max_width),
+        max_height: field_opt_i64(body, "max_height").unwrap_or(fallback.max_height),
         formats: field_opt_formats(body, "formats").or(fallback.formats),
         unlimited: field_opt_bool(body, "unlimited").unwrap_or(fallback.unlimited),
         note: field_opt_str(body, "note").or(fallback.note),
@@ -1533,13 +1573,22 @@ pub async fn settings_get(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
-    let background = state
-        .settings
-        .raw(keys::APPEARANCE_BACKGROUND)
-        .await
-        .ok()
-        .flatten()
-        .filter(|value| !value.trim().is_empty());
+    let background = match state.settings.background_public_url().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
+    let session = match state.settings.session().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
+    let hotlink = match state.settings.hotlink().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
+    let moderation = match state.settings.moderation().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
 
     finish::<serde_json::Value>(Ok(serde_json::json!({
         "site": {
@@ -1559,8 +1608,41 @@ pub async fn settings_get(
             "max_file_bytes": upload.max_file_bytes,
             "max_batch_size": upload.max_batch,
             "max_pixels": upload.max_pixels,
+            "max_width": upload.max_width,
+            "max_height": upload.max_height,
             "queue_depth": upload.queue_depth,
             "formats": upload.formats,
+            // 可勾选的格式清单（含 apng 这类界面以前漏掉的），
+            // 以及每一项的显示名（jpeg 归一到 jpg，界面上写 JPEG）
+            "format_options": format_options(),
+        },
+        "session": {
+            "idle_minutes": session.idle_minutes,
+            "absolute_days": session.absolute_days,
+            "remember_days": session.remember_days,
+        },
+        "security": {
+            "hotlink_enabled": hotlink.enabled,
+            "hotlink_allow_empty": hotlink.allow_empty,
+            "hotlink_domains": hotlink.domains.join(", "),
+        },
+        "moderation": {
+            "enabled": moderation.enabled,
+            "provider": moderation.provider,
+            "threshold": moderation.threshold,
+            "score_field": moderation.score_field,
+            "endpoint": moderation.endpoint,
+            "region": moderation.region,
+            "app_id": moderation.app_id,
+            "access_key_set": !moderation.access_key.trim().is_empty(),
+            "secret_key_set": !moderation.secret_key.trim().is_empty(),
+            "token_set": !moderation.token.trim().is_empty(),
+            "user_enabled": moderation.user_enabled,
+            "admin_enabled": moderation.admin_enabled,
+            "ban_after": moderation.ban_after,
+            "ban_minutes": moderation.ban_minutes,
+            "notify_admin": moderation.notify_admin,
+            "fail_open": moderation.fail_open,
         },
         "thumb": {
             "client": upload.thumb_client,
@@ -1657,7 +1739,7 @@ pub async fn settings_put(
 
     if let Some(upload) = body.get("upload").and_then(|value| value.as_object()) {
         let upload = serde_json::Value::Object(upload.clone());
-        let writes: [(&str, Option<String>); 4] = [
+        let writes: [(&str, Option<String>); 6] = [
             (
                 keys::UPLOAD_MAX_FILE,
                 field_opt_i64(&upload, "max_file_bytes").map(|value| value.to_string()),
@@ -1671,12 +1753,133 @@ pub async fn settings_put(
                 field_opt_i64(&upload, "max_pixels").map(|value| value.to_string()),
             ),
             (
+                keys::UPLOAD_MAX_WIDTH,
+                field_opt_i64(&upload, "max_width").map(|value| value.max(0).to_string()),
+            ),
+            (
+                keys::UPLOAD_MAX_HEIGHT,
+                field_opt_i64(&upload, "max_height").map(|value| value.max(0).to_string()),
+            ),
+            (
                 keys::UPLOAD_QUEUE_DEPTH,
                 field_opt_i64(&upload, "queue_depth").map(|value| value.to_string()),
             ),
         ];
         if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
             return resp;
+        }
+    }
+
+    if let Some(session) = body.get("session").and_then(|value| value.as_object()) {
+        let session = serde_json::Value::Object(session.clone());
+        let writes: [(&str, Option<String>); 3] = [
+            (
+                keys::SESSION_IDLE_MINUTES,
+                field_opt_i64(&session, "idle_minutes").map(|value| {
+                    value.clamp(0, settings_defaults::SESSION_MINUTES_MAX).to_string()
+                }),
+            ),
+            (
+                keys::SESSION_ABSOLUTE_DAYS,
+                field_opt_i64(&session, "absolute_days").map(|value| {
+                    value.clamp(0, settings_defaults::SESSION_DAYS_MAX).to_string()
+                }),
+            ),
+            (
+                keys::SESSION_REMEMBER_DAYS,
+                field_opt_i64(&session, "remember_days").map(|value| {
+                    value.clamp(1, settings_defaults::SESSION_DAYS_MAX).to_string()
+                }),
+            ),
+        ];
+        if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
+            return resp;
+        }
+    }
+
+    if let Some(security) = body.get("security").and_then(|value| value.as_object()) {
+        let security = serde_json::Value::Object(security.clone());
+        let writes: [(&str, Option<String>); 3] = [
+            (
+                keys::HOTLINK_ENABLED,
+                field_opt_bool(&security, "hotlink_enabled").map(|value| value.to_string()),
+            ),
+            (
+                keys::HOTLINK_ALLOW_EMPTY,
+                field_opt_bool(&security, "hotlink_allow_empty").map(|value| value.to_string()),
+            ),
+            (keys::HOTLINK_DOMAINS, field_opt_str(&security, "hotlink_domains")),
+        ];
+        if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
+            return resp;
+        }
+    }
+
+    if let Some(moderation) = body.get("moderation").and_then(|value| value.as_object()) {
+        let moderation = serde_json::Value::Object(moderation.clone());
+        let writes: [(&str, Option<String>); 9] = [
+            (
+                keys::MODERATION_ENABLED,
+                field_opt_bool(&moderation, "enabled").map(|value| value.to_string()),
+            ),
+            (keys::MODERATION_PROVIDER, field_opt_str(&moderation, "provider")),
+            (
+                keys::MODERATION_THRESHOLD,
+                field_opt_i64(&moderation, "threshold").map(|value| value.clamp(1, 100).to_string()),
+            ),
+            (
+                keys::MODERATION_SCORE_FIELD,
+                field_opt_str(&moderation, "score_field"),
+            ),
+            (keys::MODERATION_ENDPOINT, field_opt_str(&moderation, "endpoint")),
+            (keys::MODERATION_REGION, field_opt_str(&moderation, "region")),
+            (keys::MODERATION_APP_ID, field_opt_str(&moderation, "app_id")),
+            (
+                keys::MODERATION_USER_ENABLED,
+                field_opt_bool(&moderation, "user_enabled").map(|value| value.to_string()),
+            ),
+            (
+                keys::MODERATION_ADMIN_ENABLED,
+                field_opt_bool(&moderation, "admin_enabled").map(|value| value.to_string()),
+            ),
+        ];
+        if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
+            return resp;
+        }
+        let extras: [(&str, Option<String>); 4] = [
+            (
+                keys::MODERATION_BAN_AFTER,
+                field_opt_i64(&moderation, "ban_after").map(|value| value.max(0).to_string()),
+            ),
+            (
+                keys::MODERATION_BAN_MINUTES,
+                field_opt_i64(&moderation, "ban_minutes").map(|value| value.max(0).to_string()),
+            ),
+            (
+                keys::MODERATION_NOTIFY,
+                field_opt_bool(&moderation, "notify_admin").map(|value| value.to_string()),
+            ),
+            (
+                keys::MODERATION_FAIL_OPEN,
+                field_opt_bool(&moderation, "fail_open").map(|value| value.to_string()),
+            ),
+        ];
+        if let Err(resp) = write_settings(&state, &extras, &mut touched).await {
+            return resp;
+        }
+        // 三家云服务的凭据都走加密存储；空串表示「不改」，
+        // 界面上那几个框永远是空的，只有填了才写
+        for (field, key) in [
+            ("access_key", keys::MODERATION_ACCESS_KEY),
+            ("secret_key", keys::MODERATION_SECRET_KEY),
+            ("token", keys::MODERATION_TOKEN),
+        ] {
+            if let Some(secret) = field_opt_str(&moderation, field) {
+                if let Err(err) = state.settings.set_secret(key, &secret).await {
+                    return crate::http::error_response(err);
+                }
+                touched.push(key.to_string());
+            }
         }
     }
 
@@ -1763,6 +1966,19 @@ pub async fn settings_put(
                 .await
             {
                 return crate::http::error_response(err);
+            }
+            // 不再用上传的那张图时，把库里的字节一起删掉——留着没有引用它的东西
+            if field_opt_str(&appearance, "background")
+                .as_deref()
+                != Some(pixora_core::settings::keys::BACKGROUND_ASSET_MARKER)
+            {
+                if let Err(err) = state
+                    .repo
+                    .delete_asset(pixora_core::settings::keys::BACKGROUND_ASSET_KEY)
+                    .await
+                {
+                    tracing::warn!(error = %err, "删除背景图资产失败");
+                }
             }
             touched.push(keys::APPEARANCE_BACKGROUND.to_string());
         }
@@ -1925,6 +2141,63 @@ pub async fn formats_put(
     })))
 }
 
+/// `POST /api/v1/admin/storage/gc` — 立即回收无引用的物理文件。
+///
+/// 彻底删除之后文件要等后台扫描才回收，存储面板上会看到「待回收」那一行迟迟不清。
+/// 这个入口就是「现在就跑一轮」，免得管理员盯着一个数字等下一个扫描周期。
+/// 回收本身仍然只走 `pixora_queue::gc`，物理文件依然只有那一个地方会删。
+pub async fn storage_gc(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/storage/gc");
+
+    let config = pixora_queue::QueueConfig::default();
+    let retention = state.settings.retention_days().await.unwrap_or(0);
+    let mut removed = 0u64;
+    let mut pending = 0i64;
+    // 一轮最多处理一个批次，积压多的时候要跑几轮。上限给在这里：
+    // 管理员点一下不该把请求挂住太久，剩下的下一轮后台扫描自然会收
+    for _ in 0..5 {
+        match pixora_queue::gc::collect_blobs(
+            &state,
+            config.gc_grace_minutes,
+            config.gc_batch,
+            retention,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                removed += outcome.removed;
+                pending = outcome.pending_grace;
+                if outcome.removed == 0 {
+                    break;
+                }
+            }
+            Err(err) => return crate::http::error_response(err),
+        }
+    }
+
+    state
+        .audit_detail(
+            actions::STORAGE_CHANGE,
+            Some(auth.user.id),
+            "storage:gc",
+            serde_json::json!({ "removed": removed, "pending": pending }),
+            rectx.ip.as_deref(),
+        )
+        .await;
+
+    finish::<serde_json::Value>(Ok(serde_json::json!({
+        "ok": true,
+        "removed": removed,
+        "pending": pending,
+        "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+    })))
+}
+
 /// `POST /api/v1/admin/thumbnails/rebuild` — 服务端兜底缩略图重建。
 ///
 /// 兜底关着时回 `{enabled: false, queued: 0}`：契约要求如实说明「没做」，
@@ -1960,6 +2233,254 @@ pub async fn thumbnails_rebuild(
 }
 
 // ============================================================
+// 8.6.1 背景图上传 / 免登录切换用户
+// ============================================================
+
+/// 背景图上传的体积上限。界面会先缩到 1920px 再上传，正常只有几百 KB；
+/// 这个上限是防止有人绕过界面直接 POST 一张 50MB 的原图进库。
+const BACKGROUND_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// `POST /api/v1/admin/settings/background` — 上传站点背景图。
+///
+/// 存进数据库（`storage_objects`），不落文件系统：背景图属于配置，
+/// 备份数据库时应该跟着走，也不该出现在用户内容的目录里。
+/// 上传成功后把 `appearance.background` 写成 `asset` 标记，
+/// `/site` 会把它翻译成本站的公开地址。
+pub async fn background_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/settings/background");
+
+    let mut bytes: Option<Vec<u8>> = None;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(err) => {
+                return crate::http::error_response(AppError::bad_request(format!(
+                    "表单解析失败：{err}"
+                )))
+            }
+        };
+        let name = field.name().unwrap_or_default().to_ascii_lowercase();
+        if !matches!(name.as_str(), "file" | "image" | "background") {
+            continue;
+        }
+        match field.bytes().await {
+            Ok(chunk) => {
+                if chunk.len() > BACKGROUND_MAX_BYTES {
+                    return crate::http::error_response(AppError::bad_request(format!(
+                        "背景图不能超过 {} MiB；界面会自动压缩，这个提示说明你在直接调接口",
+                        BACKGROUND_MAX_BYTES / 1024 / 1024
+                    )));
+                }
+                bytes = Some(chunk.to_vec());
+            }
+            Err(err) => {
+                return crate::http::error_response(AppError::bad_request(format!(
+                    "读取背景图失败：{err}"
+                )))
+            }
+        }
+    }
+
+    let Some(bytes) = bytes else {
+        return crate::http::error_response(AppError::bad_request(
+            "没有收到图片文件（字段名用 file）",
+        ));
+    };
+    let Some(sniffed) = pixora_core::media::sniff(&bytes) else {
+        return crate::http::error_response(AppError::bad_request("背景图格式无法识别"));
+    };
+    if !sniffed.mime.starts_with("image/") {
+        return crate::http::error_response(AppError::bad_request("背景图要是图片"));
+    }
+    // SVG 也让它过，但要走一次净化：背景图是站内渲染的，别把脚本带进来
+    let stored = if sniffed.mime == "image/svg+xml" {
+        pixora_core::media::sanitize_svg(&bytes)
+    } else {
+        bytes
+    };
+
+    if let Err(err) = state
+        .repo
+        .put_asset(
+            pixora_core::settings::keys::BACKGROUND_ASSET_KEY,
+            &stored,
+        )
+        .await
+    {
+        return crate::http::error_response(err.into());
+    }
+    if let Err(err) = state
+        .settings
+        .set(
+            pixora_core::settings::keys::APPEARANCE_BACKGROUND,
+            pixora_core::settings::keys::BACKGROUND_ASSET_MARKER,
+        )
+        .await
+    {
+        return crate::http::error_response(err);
+    }
+
+    let url = state
+        .settings
+        .background_public_url()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    state
+        .audit_detail(
+            actions::SETTINGS_CHANGE,
+            Some(auth.user.id),
+            "appearance.background",
+            serde_json::json!({ "bytes": stored.len(), "mime": sniffed.mime }),
+            rectx.ip.as_deref(),
+        )
+        .await;
+
+    finish::<serde_json::Value>(Ok(serde_json::json!({
+        "ok": true,
+        "url": url,
+        "bytes": stored.len(),
+        "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+    })))
+}
+
+/// 可勾选的图片格式清单。`label` 是给界面用的显示名：JPEG 归一到 `jpg` 之后
+/// 界面上仍然要写「JPEG」，否则管理员会以为这个格式没了。
+fn format_options() -> serde_json::Value {
+    let items: Vec<serde_json::Value> = pixora_core::media::FORMATS
+        .iter()
+        .filter(|rule| !matches!(rule.ext, "jpeg" | "tif" | "heif"))
+        .map(|rule| {
+            serde_json::json!({
+                "ext": rule.ext,
+                "label": match rule.ext {
+                    // 上传页与直链都用 JPG 这个名字，后台也照同一套写，
+                    // 两个界面对同一个格式给两个名字最容易让人以为漏了什么
+                    "jpg" => "JPG".to_string(),
+                    other => other.to_ascii_uppercase(),
+                },
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items)
+}
+
+/// `POST /api/v1/admin/users/{id}/impersonate` — 免登录切换到某个用户。
+///
+/// 「免登录」指的是不用知道对方密码：服务端直接为目标用户签发一个会话，
+/// 同时把管理员自己的会话令牌写进 `pixora_impersonator` Cookie。
+/// 于是刷新页面之后仍能切回来——这正是这个功能与「知道密码再登录一次」的区别。
+pub async fn user_impersonate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(user_id): Path<i64>,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/users/{id}/impersonate");
+
+    // 必须能拿到管理员自己的会话令牌：用 API Token 调这个接口就没法切回来
+    let Some(admin_token) = crate::http::session_cookie(&headers) else {
+        return crate::http::error_response(AppError::bad_request(
+            "免登录切换需要在网页登录的会话里操作（API Token 没有可返回的会话）",
+        ));
+    };
+
+    match state
+        .impersonate_start(&auth.user, &admin_token, user_id, &rectx.device())
+        .await
+    {
+        Ok(issued) => {
+            let cookies = crate::http::merge_cookies(
+                crate::http::session_cookies(
+                    &state,
+                    &issued.session_token,
+                    &issued.csrf_token,
+                    false,
+                )
+                .await,
+                crate::http::impersonator_cookie_header(&state, &admin_token),
+            );
+            let payload = match super::me_payload(
+                &state,
+                &issued.user,
+                Some(issued.csrf_token.clone()),
+                Some(serde_json::json!({
+                    "id": auth.user.id,
+                    "uid": auth.user.uid,
+                    "email": auth.user.email,
+                })),
+            )
+            .await
+            {
+                Ok(payload) => payload,
+                Err(err) => return crate::http::error_response(err),
+            };
+            crate::http::with_cookies(finish::<serde_json::Value>(Ok(payload)), cookies)
+        }
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
+/// `POST /api/v1/admin/impersonate/stop` — 从目标用户切回管理员。
+///
+/// 注意它**不能用 `require_admin`**：当前身份是目标用户（可能只是普通用户），
+/// 管理权限来自 `pixora_impersonator` 里那个管理员的会话，所以自己校验。
+pub async fn impersonate_stop(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    // CSRF 与登录态照旧要过：这一步会换 Cookie
+    let auth = match super::require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+
+    let Some(admin_token) = crate::http::impersonator_cookie(&headers) else {
+        return crate::http::error_response(AppError::bad_request(
+            "当前不是切换过来的身份（没有 pixora_impersonator Cookie）",
+        ));
+    };
+    let admin = match state.impersonator_user(&admin_token).await {
+        Ok(admin) => admin,
+        Err(err) => return crate::http::error_response(err),
+    };
+
+    let csrf = cookie_value(&headers, CSRF_COOKIE).unwrap_or_default();
+    let cookies = crate::http::merge_cookies(
+        crate::http::session_cookies(&state, &admin_token, &csrf, false).await,
+        crate::http::clear_impersonator_cookie(&state),
+    );
+
+    state
+        .audit_detail(
+            actions::IMPERSONATE_STOP,
+            Some(admin.id),
+            &auth.user.uid,
+            serde_json::json!({ "back_to": admin.uid }),
+            rectx.ip.as_deref(),
+        )
+        .await;
+
+    let payload = match super::me_payload(&state, &admin, Some(csrf), None).await {
+        Ok(payload) => payload,
+        Err(err) => return crate::http::error_response(err),
+    };
+    crate::http::with_cookies(finish::<serde_json::Value>(Ok(payload)), cookies)
+}
+
+// ============================================================
 // 8.7 服务条款管理
 // ============================================================
 
@@ -1969,6 +2490,9 @@ fn terms_row_json(row: &pixora_repo::repo::terms::TermsRow) -> serde_json::Value
         "id": row.version.id,
         "version": row.version.version,
         "title": row.version.title,
+        // 正文要带上：管理端只有这一个列表接口，不带正文的话编辑区每次保存后
+        // 都被刷成空的，看起来就像「正文没存进去」
+        "body": row.version.body,
         "summary": row.version.summary,
         "status": row.version.status,
         "status_label": terms_status_label(&row.version.status),
@@ -2083,23 +2607,29 @@ pub async fn terms_create(
         return bad_request("status 只能是 draft 或 active");
     }
 
-    let created = match state.repo.create_terms(&input).await {
-        Ok(value) => value,
-        Err(err) => return crate::http::error_response(err.into()),
+    // 走领域服务：版本号格式校验与「版本号已存在」都在那里，
+    // 直接写仓储的话冲突会以一句数据库唯一约束错误抛给管理员
+    let terms_input_value = pixora_core::terms::TermsInput {
+        version: input.version.clone(),
+        title: input.title.clone(),
+        body: input.body.clone(),
+        summary: input.summary.clone(),
+        require_reconsent: input.require_reconsent,
+        effective_at: input.effective_at,
+        publish: status == "active",
     };
-
+    let created = match state.terms_create(auth.user.id, terms_input_value).await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
     if status == "active" {
-        let previous = state.repo.active_terms().await.ok().flatten();
-        if let Err(err) = state.repo.publish_terms(created.id, now()).await {
-            return crate::http::error_response(err.into());
-        }
         let actor = auth.user.id;
         state
             .audit_detail(
                 actions::TERMS_PUBLISH,
                 Some(actor),
                 created.version.clone(),
-                serde_json::json!({ "archived": previous.map(|item| item.version) }),
+                serde_json::json!({ "via": "create" }),
                 rectx.ip.as_deref(),
             )
             .await;
@@ -2134,28 +2664,29 @@ pub async fn terms_update(
         Ok(None) => return not_found("条款版本"),
         Err(err) => return crate::http::error_response(err.into()),
     };
-    if existing.status != pixora_repo::model::terms_status::DRAFT {
-        return bad_request("只有草稿可以修改；已生效的版本请发布新版本");
-    }
 
     let input = match terms_input(&body, Some(&existing), auth.user.id) {
         Ok(value) => value,
         Err(resp) => return resp,
     };
-    if let Err(err) = state.repo.update_terms(terms_id, &input).await {
-        return crate::http::error_response(err.into());
+    let terms_input_value = pixora_core::terms::TermsInput {
+        version: input.version.clone(),
+        title: input.title.clone(),
+        body: input.body.clone(),
+        summary: input.summary.clone(),
+        require_reconsent: input.require_reconsent,
+        effective_at: input.effective_at,
+        publish: false,
+    };
+    // 领域服务里判「生效中的版本不能就地改」，并给出该怎么做的提示
+    if let Err(err) = state
+        .terms_update(auth.user.id, terms_id, terms_input_value)
+        .await
+    {
+        return crate::http::error_response(err);
     }
 
-    let actor = auth.user.id;
-    state
-        .audit_detail(
-            actions::SETTINGS_CHANGE,
-            Some(actor),
-            existing.version.clone(),
-            serde_json::json!({ "action": "update_draft" }),
-            rectx.ip.as_deref(),
-        )
-        .await;
+    let _ = rectx;
 
     let rows = match state.repo.list_terms().await {
         Ok(rows) => rows,
@@ -2222,27 +2753,26 @@ pub async fn terms_delete(
         return bad_request("生效中的版本不能删除，请先发布一个替代版本");
     }
 
+    // 删除是真删：版本行与它的同意记录一起消失（同一个事务）。
+    // 删掉多少条同意记录要写进审计——那是「谁同意过哪一版」的历史
     match state.repo.delete_terms(terms_id).await {
-        Ok(()) => {
+        Ok(consents) => {
             let actor = auth.user.id;
             state
                 .audit_detail(
                     actions::SETTINGS_CHANGE,
                     Some(actor),
                     existing.version.clone(),
-                    serde_json::json!({ "action": "delete" }),
+                    serde_json::json!({ "action": "delete", "consents_removed": consents }),
                     rectx.ip.as_deref(),
                 )
                 .await;
             finish::<serde_json::Value>(Ok(serde_json::json!({
                 "ok": true,
+                "consents_removed": consents,
                 "csrf_token": cookie_value(&headers, CSRF_COOKIE),
             })))
         }
-        // 有同意记录的版本删不掉（外键 RESTRICT）：错误信息里说清原因
-        Err(err) => crate::http::error_response(AppError::bad_request(format!(
-            "该版本存在用户同意记录，不能删除（{}）",
-            err
-        ))),
+        Err(err) => crate::http::error_response(err.into()),
     }
 }

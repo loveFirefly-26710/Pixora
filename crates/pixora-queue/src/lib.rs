@@ -45,11 +45,10 @@ pub struct QueueConfig {
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
-            // 宽限期给足：上传是先写实体再建引用的，太短会误删正在上传的文件
             // 宽限期是「登记实体 → 建引用」那道时间窗的余量，不是「文件该留多久」。
-            // 拿它当留存期是个误会：上传请求里这两步相隔毫秒，10 分钟已经非常宽裕，
-            // 而 60 分钟会让「删完图文件还在」看着像没删掉。
-            gc_grace_minutes: 5,
+            // 上传请求里这两步相隔毫秒，两分钟是几十万倍的余量；再长只会让
+            // 「删完图还显示占着盘」看起来像没删掉。
+            gc_grace_minutes: 2,
             gc_batch: 200,
             mail_poll_seconds: 30,
             reconcile_seconds: 3600,
@@ -142,6 +141,10 @@ pub fn spawn(state: Arc<AppState>, config: QueueConfig) -> Vec<tokio::task::Join
                 }
                 if let Err(err) = gc::purge_expired(&state).await {
                     tracing::warn!(error = %err, "过期数据清理失败");
+                }
+                let emptied = gc::clean_empty_blob_dirs(&state).await;
+                if emptied > 0 {
+                    tracing::info!(removed = emptied, "清掉数据目录里的空目录");
                 }
                 tokio::time::sleep(Duration::from_secs(interval)).await;
             }

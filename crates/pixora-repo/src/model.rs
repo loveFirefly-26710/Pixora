@@ -74,6 +74,12 @@ pub fn get_u32(row: &AnyRow, column: &str) -> Result<u32> {
     Ok(get_i64(row, column)?.max(0) as u32)
 }
 
+/// 二进制列。目前只有配置类资产（站点背景图）用得到。
+pub fn get_bytes(row: &AnyRow, column: &str) -> Result<Vec<u8>> {
+    row.try_get::<Vec<u8>, _>(column)
+        .map_err(|e| RepoError::decode(column, e))
+}
+
 pub fn get_str(row: &AnyRow, column: &str) -> Result<String> {
     row.try_get::<String, _>(column)
         .map_err(|e| RepoError::decode(column, e))
@@ -231,6 +237,8 @@ pub struct User {
     pub used_bytes: i64,
     pub login_fail_count: i32,
     pub locked_until: Option<DateTime<Utc>>,
+    /// 内容审核自动暂停的到期时间。到点自动恢复；管理员手工暂停的行这里为空。
+    pub auto_unsuspend_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub last_login_at: Option<DateTime<Utc>>,
     pub last_login_ip: Option<String>,
@@ -239,7 +247,8 @@ pub struct User {
 impl User {
     pub const COLUMNS: &'static str = "id, uid, email, email_verified, password_hash, role, status, \
          status_reason, status_changed_at, status_changed_by, totp_secret, totp_enabled, \
-         quota_bytes, used_bytes, login_fail_count, locked_until, created_at, last_login_at, last_login_ip";
+         quota_bytes, used_bytes, login_fail_count, locked_until, auto_unsuspend_at, created_at, \
+         last_login_at, last_login_ip";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -259,6 +268,7 @@ impl User {
             used_bytes: get_i64(row, "used_bytes")?,
             login_fail_count: get_i32(row, "login_fail_count")?,
             locked_until: get_opt_ts(row, "locked_until")?,
+            auto_unsuspend_at: get_opt_ts(row, "auto_unsuspend_at")?,
             created_at: get_ts(row, "created_at")?,
             last_login_at: get_opt_ts(row, "last_login_at")?,
             last_login_ip: get_opt_str(row, "last_login_ip")?,
@@ -347,12 +357,33 @@ pub struct Session {
     pub user_agent: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
+    /// 「记住我」签发的会话写绝对到期时间；普通会话为 `None`
+    pub expires_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
+/// 会话有效期策略。两个口径取自系统设置，管理员可改。
+#[derive(Debug, Clone, Copy)]
+pub struct SessionPolicy {
+    /// 闲置多久算掉线（分钟）。0 = 不限
+    pub idle_minutes: i64,
+    /// 普通会话的最长寿命（天）。0 = 不限
+    pub absolute_days: i64,
+}
+
+impl SessionPolicy {
+    /// 设置没读出来时的保守默认：闲置两小时掉线，最长 30 天。
+    pub fn fallback() -> Self {
+        Self {
+            idle_minutes: 120,
+            absolute_days: 30,
+        }
+    }
+}
+
 impl Session {
-    pub const COLUMNS: &'static str =
-        "id, user_id, token_hash, device, ip, user_agent, created_at, last_seen_at, revoked_at";
+    pub const COLUMNS: &'static str = "id, user_id, token_hash, device, ip, user_agent, created_at, \
+         last_seen_at, expires_at, revoked_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -364,12 +395,44 @@ impl Session {
             user_agent: get_opt_str(row, "user_agent")?,
             created_at: get_ts(row, "created_at")?,
             last_seen_at: get_ts(row, "last_seen_at")?,
+            expires_at: get_opt_ts(row, "expires_at")?,
             revoked_at: get_opt_ts(row, "revoked_at")?,
         })
     }
 
+    /// 只吊销标记。到期判断走 [`Self::is_expired`]，它需要设置里的策略。
     pub fn is_live(&self) -> bool {
         self.revoked_at.is_none()
+    }
+
+    /// 是否已经过期。两种口径：
+    ///
+    ///   - 「记住我」签发的会话由签发时写下的 `expires_at` 决定，不再看闲置时长
+    ///     （选了记住我，隔几天打开还应该是登录状态）；
+    ///   - 普通会话没有 `expires_at`，按「闲置超过 idle_minutes」与
+    ///     「从建立起超过 absolute_days」两条判——前者对应控制台上的超时重登，
+    ///     后者给长期挂着不动的会话兜底。
+    ///
+    /// 两个口径都配 0 就是「永不过期」，这一项留给自建场景。
+    pub fn is_expired(&self, policy: SessionPolicy, now: DateTime<Utc>) -> bool {
+        if let Some(at) = self.expires_at {
+            return at <= now;
+        }
+        if policy.idle_minutes > 0
+            && now - self.last_seen_at > chrono::Duration::minutes(policy.idle_minutes)
+        {
+            return true;
+        }
+        if policy.absolute_days > 0 && now - self.created_at > chrono::Duration::days(policy.absolute_days)
+        {
+            return true;
+        }
+        false
+    }
+
+    /// 可用 = 没被吊销 且 没过期。列表与鉴权共用这一个判断。
+    pub fn is_usable(&self, policy: SessionPolicy, now: DateTime<Utc>) -> bool {
+        self.is_live() && !self.is_expired(policy, now)
     }
 }
 
@@ -736,12 +799,15 @@ pub struct RateLimitPolicy {
     pub upload_per_day: i64,
     pub upload_bytes_per_day: i64,
     pub max_concurrent_uploads: i64,
-    /// 上传策略的四项：`0`（数值）与空串（格式）都表示「跟随上一层」。
+    /// 上传策略的几项：`0`（数值）与空串（格式）都表示「跟随上一层」。
     /// 解析顺序（见 `pixora_core::uploads::effective_upload_limits`）：
     /// 单用户覆盖 → 全局策略行 → 系统设置里的站点默认
     pub max_batch_size: i64,
     pub max_file_size: i64,
     pub max_pixels: i64,
+    /// 长宽上限（像素）。与 `max_pixels` 一起判：三者都过才收
+    pub max_width: i64,
+    pub max_height: i64,
     /// 逗号分隔的扩展名列表，与 settings 里的 `upload.formats` 同一种写法
     pub formats: Option<String>,
     pub unlimited: bool,
@@ -752,8 +818,8 @@ pub struct RateLimitPolicy {
 impl RateLimitPolicy {
     pub const COLUMNS: &'static str = "id, user_id, api_per_minute, api_per_hour, api_read_per_minute, \
          api_burst, upload_per_minute, upload_per_hour, upload_per_day, upload_bytes_per_day, \
-         max_concurrent_uploads, max_batch_size, max_file_size, max_pixels, formats, unlimited, \
-         note, updated_at";
+         max_concurrent_uploads, max_batch_size, max_file_size, max_pixels, max_width, max_height, \
+         formats, unlimited, note, updated_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -771,6 +837,8 @@ impl RateLimitPolicy {
             max_batch_size: get_i64(row, "max_batch_size")?,
             max_file_size: get_i64(row, "max_file_size")?,
             max_pixels: get_i64(row, "max_pixels")?,
+            max_width: get_i64(row, "max_width")?,
+            max_height: get_i64(row, "max_height")?,
             formats: get_opt_str(row, "formats")?,
             unlimited: get_bool(row, "unlimited")?,
             note: get_opt_str(row, "note")?,
@@ -802,6 +870,8 @@ impl RateLimitPolicy {
             max_batch_size: 0,
             max_file_size: 0,
             max_pixels: 0,
+            max_width: 0,
+            max_height: 0,
             formats: None,
             unlimited: false,
             note: None,
@@ -1126,9 +1196,16 @@ impl EmailTemplate {
 #[derive(Debug, Clone, Default)]
 pub struct StorageStats {
     pub image_count: i64,
+    /// 还在被引用的实体字节（在用 + 回收站）
     pub total_bytes: i64,
     pub logical_bytes: i64,
     pub dedup_saved_bytes: i64,
+    /// 回收站里还没过保留期的张数与占用
+    pub binned_count: i64,
+    pub binned_bytes: i64,
+    /// 已经没人引用、等后台回收的实体（界面上单独一行）
+    pub pending_count: i64,
+    pub pending_bytes: i64,
     pub average_size: i64,
     pub drivers: Vec<DriverStat>,
     pub mimes: Vec<MimeStat>,
@@ -1142,7 +1219,9 @@ pub struct StorageStats {
 #[derive(Debug, Clone)]
 pub struct DriverStat {
     pub driver: String,
+    /// 图片张数（不是实体条数：一张图带一个缩略图不该显示成两张）
     pub count: i64,
+    /// 这个后端上仍被引用的实体字节（原图 + 缩略图，每个实体只算一次）
     pub bytes: i64,
 }
 
@@ -1223,6 +1302,7 @@ mod tests {
             used_bytes: 40,
             login_fail_count: 0,
             locked_until: None,
+            auto_unsuspend_at: None,
             created_at: now(),
             last_login_at: None,
             last_login_ip: None,

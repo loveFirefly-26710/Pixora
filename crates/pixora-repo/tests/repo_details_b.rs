@@ -779,7 +779,7 @@ async fn storage_stats_dedup_and_admin_summary() {
 
     let stats = repo.storage_stats(5).await.expect("存储面板");
     assert_eq!(stats.image_count, 3);
-    assert_eq!(stats.total_bytes, 3000, "物理占用：两份 blob");
+    assert_eq!(stats.total_bytes, 3000, "占用：两份 blob（去重后只有两份）");
     assert_eq!(
         stats.logical_bytes, 4000,
         "逻辑占用：三张图各自引用的大小之和"
@@ -789,12 +789,14 @@ async fn storage_stats_dedup_and_admin_summary() {
         "被多引用的那一份就是去重省下的"
     );
     assert_eq!(stats.average_size, 1500, "(1000 + 2000) / 2");
+    assert_eq!(stats.binned_count, 0, "没有进回收站的图");
+    assert_eq!(stats.pending_count, 0, "实体都还被引用着");
     assert!(
         stats
             .drivers
             .iter()
-            .any(|item| item.driver == "local" && item.count == 2 && item.bytes == 3000),
-        "{:?}",
+            .any(|item| item.driver == "local" && item.count == 3 && item.bytes == 3000),
+        "张数按图片数算（3 张），占用按实体算（两份 blob 3000 字节）：{:?}",
         stats.drivers
     );
     assert!(
@@ -852,10 +854,14 @@ async fn storage_stats_dedup_and_admin_summary() {
     .expect("软删");
 
     let after = repo.storage_stats(10).await.expect("存储面板");
-    assert_eq!(after.image_count, 2);
-    assert_eq!(after.logical_bytes, 2000);
+    assert_eq!(after.image_count, 2, "活着的图少了一张");
+    assert_eq!(after.binned_count, 1, "那张进了回收站");
+    assert_eq!(
+        after.logical_bytes, 4000,
+        "回收站里的图仍然算占用：它占着磁盘，也占着额度"
+    );
     assert_eq!(after.total_bytes, 3000, "软删不动物理文件");
-    assert_eq!(after.dedup_saved_bytes, 0, "省下的空间不会算成负数");
+    assert_eq!(after.dedup_saved_bytes, 1000, "被多引用的那份仍然是省下的");
     let trend_after = repo.upload_trend(30).await.expect("趋势");
     assert!(
         trend_after
@@ -985,17 +991,6 @@ async fn terms_publish_archive_consent_and_restrict() {
     assert_eq!(rows[0].consent_count, 1);
     assert!(repo.has_consented_active(chen.id).await.expect("同意状态"));
 
-    // 有同意记录的版本删不掉（外键 RESTRICT）
-    assert!(
-        repo.delete_terms(v2.id).await.is_err(),
-        "生效中且有同意记录的版本不该被删掉"
-    );
-    assert!(
-        repo.delete_terms(v1.id).await.is_err(),
-        "归档了但还有同意记录的版本同样删不掉"
-    );
-    assert!(repo.find_terms(v2.id).await.expect("查条款").is_some());
-
     // 草稿可以改、可以删
     let v3 = repo.create_terms(&new_terms("v3.0")).await.expect("建草稿");
     let mut revised = new_terms("v3.0");
@@ -1037,6 +1032,19 @@ async fn terms_publish_archive_consent_and_restrict() {
         v2.id,
         "发布失败不该回滚掉原本的生效版本"
     );
+
+    // 删除是真删：版本行与它的同意记录在同一个事务里一起消失。
+    // 同意记录挂在版本行上——版本没了，留下的记录也只是孤儿，
+    // 所以两者一起删，删掉多少条由返回值给出来写审计。
+    let removed = repo.delete_terms(v1.id).await.expect("删归档版本");
+    assert_eq!(removed, 1, "连带删掉的那条同意记录");
+    assert!(repo.find_terms(v1.id).await.expect("查条款").is_none());
+    assert_eq!(repo.count_consents(v1.id).await.expect("剩余同意记录"), 0);
+
+    let removed = repo.delete_terms(v2.id).await.expect("删生效版本");
+    assert_eq!(removed, 1, "新版那条同意记录也一起删");
+    assert!(repo.find_terms(v2.id).await.expect("查条款").is_none());
+    assert_eq!(repo.list_terms().await.expect("条款列表").len(), 0);
 }
 
 // ============================================================

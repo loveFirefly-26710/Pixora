@@ -18,6 +18,8 @@ pub mod names {
     pub const SUSPEND_NOTICE: &str = "suspend_notice";
     pub const BAN_NOTICE: &str = "ban_notice";
     pub const SUSPEND_LIFTED: &str = "suspend_lifted";
+    /// 内容审核拦下图后的管理员上报
+    pub const MODERATION_ALERT: &str = "moderation_alert";
 }
 
 /// 渲染正文。未提供的占位符替换成空串而不是保留 `{{x}}`，
@@ -96,6 +98,19 @@ pub fn builtin(name: &str) -> Option<(&'static str, &'static str)> {
              你的 Pixora 账号（{{email}}）已于 {{time}} 恢复正常，网页登录与 API 调用均已可用。\n\n\
              账号下已上传的内容已重新可见。\n\n\
              本邮件由系统自动发出，请勿直接回复。\n\n\
+             Pixora 管理团队",
+        )),
+        names::MODERATION_ALERT => Some((
+            "【Pixora】内容审核拦下了一张图片",
+            "管理员你好，\n\n\
+             有一张上传被内容审核拦下了：\n\n\
+             用户：{{email}}（UID {{uid}}）\n\
+             判定：{{label}} · {{score}} 分（阈值 {{threshold}}，服务商 {{provider}}）\n\
+             文件名：{{name}}\n\
+             时间：{{time}}\n\n\
+             该用户 24 小时内的违规次数：{{count}} 次。累计到 {{ban_after}} 次会自动临时暂停账号。\n\n\
+             策略可在后台「系统设置 → 内容审核」调整；审计日志里有每次拦截的完整记录。\n\n\
+             本邮件由系统自动发出，请勿直接回复。\n\
              Pixora 管理团队",
         )),
         _ => None,

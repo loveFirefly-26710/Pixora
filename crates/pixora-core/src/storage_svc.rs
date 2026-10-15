@@ -110,6 +110,11 @@ impl StorageService {
         let backends = self.repo.list_backends().await?;
         self.registry.clear();
 
+        // 本地后端的显示名统一成「本地磁盘」。历史上它有几种写法
+        // （空、驱动名、早期的占位名），后台列表里显示成 `local` 会让人
+        // 以为这里配的是别的东西
+        self.normalize_local_labels().await;
+
         if backends.is_empty() {
             return self.install_local_fallback().await;
         }
@@ -161,6 +166,37 @@ impl StorageService {
         self.registry.register(key, driver);
         self.registry.set_default(key);
         Ok(())
+    }
+
+    /// 把本地后端的显示名归一成「本地磁盘」。
+    ///
+    /// 只改显示名，不动驱动、配置与默认标记——它是后台列表上的一个字，
+    /// 不该有任何行为副作用。启动时跑一次，改过就不再重复写库。
+    async fn normalize_local_labels(&self) {
+        let backends = match self.repo.list_backends().await {
+            Ok(backends) => backends,
+            Err(err) => {
+                tracing::warn!(error = %err, "读取存储后端失败，跳过显示名归一");
+                return;
+            }
+        };
+        let expected = pixora_storage::names::label(driver_names::LOCAL);
+        for backend in backends {
+            if backend.driver != driver_names::LOCAL {
+                continue;
+            }
+            let current = backend.label.trim();
+            let stale = current.is_empty()
+                || current.eq_ignore_ascii_case(driver_names::LOCAL)
+                || current == "本地存储"
+                || current == "默认后端";
+            if !stale {
+                continue;
+            }
+            if let Err(err) = self.repo.update_backend_label(backend.id, expected).await {
+                tracing::warn!(backend_id = backend.id, error = %err, "改写后端显示名失败");
+            }
+        }
     }
 
     /// 一个后端行 → 一个驱动实例。
@@ -344,6 +380,56 @@ impl StorageService {
     ) -> Result<()> {
         let driver = self.resolve(driver_name, backend_id)?;
         driver.delete(key).await.map_err(AppError::from)
+    }
+
+    /// 收掉「后端配置已经不在了」的孤儿对象。返回 `true` 表示已经处理掉。
+    ///
+    /// 为什么会出孤儿：管理员把某个后端的配置行删掉之后，那个驱动就装配不出来了
+    /// （远端驱动连地址带凭据都在配置行里）。指向它的实体既读不出来、也删不掉，
+    /// GC 每轮都会失败、行会永远留着——数据库里那点字节也会永远留着。
+    ///
+    /// 本地与数据库内两种驱动的落点是「与配置无关」的：本地对象就在数据目录下，
+    /// 数据库对象就在 `storage_objects` 里。所以这两种可以照样收掉。
+    /// 远端驱动的对象在别人家的桶里，没有地址与凭据就碰不到——那种只能留着，
+    /// 由调用方记日志（删错桶比多留一行严重得多）。
+    ///
+    /// 上游还有一道闸：删后端时会先数一数上面挂着多少实体，有就拒绝删。
+    /// 这个方法兜的是「以前已经删掉了」以及「backend_id 与驱动对不上」的历史数据。
+    pub async fn delete_orphan_object(&self, driver_name: &str, key: &str) -> Result<bool> {
+        match driver_name {
+            pixora_storage::names::LOCAL => {
+                let path = self.local_root().join(key);
+                match tokio::fs::remove_file(&path).await {
+                    Ok(()) => Ok(true),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        // 文件本来就不在：那这一条的目的已经达到了
+                        Ok(true)
+                    }
+                    Err(err) => Err(AppError::StorageUnavailable(format!(
+                        "删除孤儿对象 {} 失败：{err}",
+                        path.display()
+                    ))),
+                }
+            }
+            pixora_storage::names::DATABASE => {
+                self.repo
+                    .db()
+                    .execute(
+                        "DELETE FROM storage_objects WHERE key = ?",
+                        pixora_repo::Args::new().text(key),
+                    )
+                    .await?;
+                Ok(true)
+            }
+            other => {
+                tracing::warn!(
+                    driver = other,
+                    key,
+                    "后端配置已删除，远端对象无法回收：请在对象存储侧自行清理"
+                );
+                Ok(false)
+            }
+        }
     }
 
     /// 在「用户/相册」镜像树里建硬链接。返回 false 表示文件系统不支持，
