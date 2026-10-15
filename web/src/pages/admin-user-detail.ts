@@ -9,12 +9,18 @@
 
 import { ApiError, request } from "../core/api";
 import { h } from "../core/dom";
-import { formatBytes, formatDateTime, formatNumber, toGigabytes } from "../core/format";
+import {
+  describeMinutes,
+  formatBytes,
+  formatDateTime,
+  formatNumber,
+  toGigabytes,
+} from "../core/format";
 import { confirmDialog, openModal } from "../core/modal";
 import { navigate } from "../core/router";
 import type { PageContext } from "../core/router";
-import { getState } from "../core/state";
-import { toastError, toastOk } from "../core/toast";
+import { canOperateAccount, getState } from "../core/state";
+import { toast, toastError, toastOk } from "../core/toast";
 import type { AdminUserRow, PolicyFields, UserActionRow } from "../core/types";
 import { openRateLogs } from "./ratelimit-cards";
 import {
@@ -108,8 +114,8 @@ export async function render(ctx: PageContext): Promise<void> {
         rateLimitCard(detail, () => void load()),
         h("div.note.d", {
           text:
-            "暂停和封禁的区别要写清楚，别让管理员随手点。两者都会让网页登录和 API 同时失效，" +
-            "区别在后续处理：暂停可申请解封、随时恢复；封禁会隐藏公开内容并阻断重新注册，需管理员手动解封。",
+            "暂停与封禁都会让网页登录和 API 同时失效，区别在后续：暂停可申请解封、随时恢复；" +
+            "封禁会隐藏公开内容并阻断重新注册，要管理员手动解封。",
         }),
       );
     } catch (err) {
@@ -137,8 +143,24 @@ function basicCard(detail: UserDetailPayload, reload: () => void): HTMLElement {
   );
   const quota = textInput({ value: toGigabytes(user.quota_bytes), mono: true });
 
+  // 安装时创建的那个管理员：别的管理员不能改它的邮箱、角色与配额。
+  // 灰掉输入框而不是让它点了报错——服务端同样会拒
+  const operable = canOperateAccount(user.uid);
+  if (!operable) {
+    email.readOnly = true;
+    role.disabled = true;
+    quota.readOnly = true;
+  }
+  // 访客账号是系统账号、不接受登录：邮箱与角色（连同下面那张密码卡）都不能改。
+  // 配额留着——管理员用它可以按住游客上传
+  if (user.guest) {
+    email.readOnly = true;
+    role.disabled = true;
+  }
+
   const errorLine = h("div.tip", { style: { color: "var(--danger)" } });
   const save = h("button.btn.pri", { type: "button", text: "保存修改" });
+  if (!operable) save.disabled = true;
 
   save.addEventListener("click", async () => {
     errorLine.textContent = "";
@@ -178,8 +200,21 @@ function basicCard(detail: UserDetailPayload, reload: () => void): HTMLElement {
     const done: string[] = [];
     try {
       if (Object.keys(patch).length > 0) {
-        await request(`/admin/users/${user.id}`, { method: "PATCH", json: patch });
-        if (patch.email) done.push(`邮箱已改为 ${patch.email}（验证状态已重置，确认邮件已发出）`);
+        const payload = await request<{ mail?: { delivered: boolean; detail?: string | null } }>(
+          `/admin/users/${user.id}`,
+          { method: "PATCH", json: patch },
+        );
+        if (patch.email) {
+          const mail = payload?.mail ?? null;
+          // 变更通知发不发得出去要如实说：管理员容易以为「改完他就知道了」
+          done.push(
+            mail?.delivered
+              ? `邮箱已改为 ${patch.email}，变更通知已发到新旧两个地址`
+              : `邮箱已改为 ${patch.email}，但变更通知没发出去：${
+                  mail?.detail ?? "已留在发件箱等重试"
+                }`,
+          );
+        }
         if (patch.role) done.push(`角色已改为${patch.role === "admin" ? "管理员" : "普通用户"}`);
       }
       if (quotaChanged && quotaBytes !== null) {
@@ -223,7 +258,11 @@ function basicCard(detail: UserDetailPayload, reload: () => void): HTMLElement {
     ),
     errorLine,
     h("div.tip", {
-      text: "改邮箱会重置验证状态并给对方发确认邮件，避免管理员误改把账号弄废。",
+      text: user.guest
+        ? "访客账号是系统账号，不接受登录，因此没有可设的密码，也发不出重置邮件。游客上传的图片都归在它名下。"
+        : operable
+          ? "改邮箱后账号立即以新地址登录（管理员填写即视为可信），并给新旧两个地址各发一封变更通知。"
+          : "这是安装时创建的管理员账号，只有它自己能改这些；要换主账号，先给另一个账号管理员权限。",
     }),
     h("div.tip", {
       text: `注册于 ${formatDateTime(user.created_at)} · 最近登录 ${
@@ -241,8 +280,24 @@ function passwordCard(user: DetailUser): HTMLElement {
   const next = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
   const repeat = textInput({ type: "password", placeholder: "再输一次" });
   const errorLine = h("div.tip", { style: { color: "var(--danger)" } });
+  // 安装账号的密码不给别的管理员重置，理由与改邮箱一样：那是主钥匙
+  const operable = canOperateAccount(user.uid);
 
   const reset = h("button.btn", { type: "button", text: "重置密码" });
+  if (!operable) {
+    next.readOnly = true;
+    repeat.readOnly = true;
+    reset.disabled = true;
+    reset.title = "安装时创建的管理员账号，只有它自己能改密码";
+  }
+  // 访客账号不接受登录（见 core/guest.rs）：给它设密码或发重置邮件都没有意义，
+  // 两张卡一起停掉。服务端同样会拒，这里只是不让管理员白点
+  if (user.guest) {
+    next.readOnly = true;
+    repeat.readOnly = true;
+    reset.disabled = true;
+    reset.title = "访客账号是系统账号，不接受登录";
+  }
   reset.addEventListener("click", async () => {
     errorLine.textContent = "";
     if (
@@ -261,9 +316,23 @@ function passwordCard(user: DetailUser): HTMLElement {
     reset.disabled = true;
     reset.textContent = "重置中…";
     try {
-      await request(`/admin/users/${user.id}`, { method: "PATCH", json: { password: next.value } });
-      // 不替用户决定「会话是否失效」——契约没写，就不在界面上编造
-      toastOk("密码已重置，请通过安全渠道把新密码告知用户");
+      const payload = await request<{ mail?: { delivered: boolean; detail?: string | null } }>(
+        `/admin/users/${user.id}`,
+        { method: "PATCH", json: { password: next.value } },
+      );
+      const mail = payload?.mail ?? null;
+      // 如实说明邮件出去没有：管理员容易以为「设完他就知道了」，
+      // 而实际上对方要收到那封信才拿得到密码
+      if (mail?.delivered) {
+        toastOk(`密码已重置，新密码已发到 ${user.email}；他下次登录会被要求自己改一个`);
+      } else if (mail) {
+        toast(
+          `密码已重置，但邮件没投出去：${mail.detail ?? "已留在发件箱等重试"}。` +
+            "配好 SMTP 后会自动重发，也可以先口头告诉他密码。",
+        );
+      } else {
+        toastOk("密码已重置");
+      }
       next.value = "";
       repeat.value = "";
     } catch (err) {
@@ -275,15 +344,21 @@ function passwordCard(user: DetailUser): HTMLElement {
   });
 
   const sendMail = h("button.btn", { type: "button", text: "发送密码重置邮件" });
+  if (user.guest) {
+    sendMail.disabled = true;
+    sendMail.title = "访客账号是系统账号，不接受登录";
+  }
   sendMail.addEventListener("click", async () => {
     sendMail.disabled = true;
     sendMail.textContent = "发送中…";
     try {
-      // 契约没有管理员专用的「发重置邮件」端点；公开的找回密码发码端点
-      // 就是「给这个邮箱发一封带验证码的重置邮件，由他本人设新密码」，
-      // 语义与按钮完全一致，用它比自己造一个端点更稳妥。
-      await request("/auth/password/code", { method: "POST", json: { email: user.email } });
-      toastOk(`重置邮件已发送至 ${user.email}`);
+      const result = await request<{ delivered: boolean; message: string }>(
+        `/admin/users/${user.id}/password-reset-mail`,
+        { method: "POST" },
+      );
+      // 发信结果原样告诉管理员：投出去了，或者卡在哪一步
+      if (result.delivered) toastOk(`重置邮件已投递到 ${user.email}`);
+      else toast(result.message);
     } catch (err) {
       toastError(err);
     } finally {
@@ -300,7 +375,9 @@ function passwordCard(user: DetailUser): HTMLElement {
     errorLine,
     h("div.tip", {
       style: { marginTop: "10px" },
-      text: "或者不发新密码，点下面的按钮给他发一封重置邮件，由他自己设。",
+      text:
+        "直接设的密码会随邮件发给用户，并要求他下次登录时自己改一个——" +
+        "不想经手密码就用下面那个按钮，让他在邮件里点链接自己设。",
     }),
     h("div", { style: { marginTop: "6px" } }, sendMail),
   );
@@ -437,6 +514,11 @@ function actionsCard(detail: UserDetailPayload): HTMLElement {
   const user = detail.user;
 
   const deleteButton = h("button.btn.dgr.sm", { type: "button", text: "删除账号" });
+  const operable = canOperateAccount(detail.user.uid);
+  if (!operable) {
+    deleteButton.disabled = true;
+    deleteButton.title = "安装时创建的管理员账号，不能删";
+  }
   deleteButton.addEventListener("click", async () => {
     if (user.id === getState().user?.id) {
       toastError(new Error("不能删除自己的账号"));
@@ -445,8 +527,9 @@ function actionsCard(detail: UserDetailPayload): HTMLElement {
     const ok = await confirmDialog({
       title: "删除账号",
       message:
-        `删除后 ${user.email}（u_${user.uid}）的全部相册与图片引用会一起消失，且不可撤销。` +
-        "<br>引用计数归零的物理文件由 GC 回收。",
+        `删除后 ${user.email}（u_${user.uid}）的相册、图片、令牌与会话一起消失，` +
+        "不再被别人引用的文件当场从磁盘上删掉，且无法撤销。" +
+        "<br>照着输入邮箱确认。",
       confirmText: "删除账号",
       danger: true,
       requireText: user.email,
@@ -454,8 +537,11 @@ function actionsCard(detail: UserDetailPayload): HTMLElement {
     if (!ok) return;
     deleteButton.disabled = true;
     try {
-      await request(`/admin/users/${user.id}`, { method: "DELETE" });
-      toastOk("账号已删除");
+      // 服务端要求把邮箱原样带回来：一步不可逆的操作，值得两道确认
+      await request(`/admin/users/${user.id}?confirm=${encodeURIComponent(user.email)}`, {
+        method: "DELETE",
+      });
+      toastOk(`${user.email} 及它的数据已删除`);
       navigate("/admin/users");
     } catch (err) {
       toastError(err);
@@ -514,9 +600,11 @@ function describeAction(record: UserActionRow): string {
   const detail = (record.detail ?? {}) as Record<string, unknown>;
   const pair = formatPair(detail);
   if (pair) parts.push(pair);
-  if ("duration_days" in detail) {
-    const days = detail.duration_days;
-    parts.push(typeof days === "number" && days > 0 ? `${days} 天内有效` : "永久生效");
+  if ("duration_minutes" in detail) {
+    const minutes = detail.duration_minutes;
+    parts.push(
+      typeof minutes === "number" && minutes > 0 ? `${describeMinutes(minutes)}内有效` : "永久生效",
+    );
   }
   if (record.actor_email) parts.push(`操作人 ${record.actor_email}`);
   if (record.mail_sent) parts.push("通知邮件已发送");
@@ -706,11 +794,26 @@ function openDispositionDialog(
   };
   chips.append(makeChip("suspend", "暂停使用（禁用）"), makeChip("ban", "封禁账号"));
 
-  const duration = select([
-    { value: "", label: "永久（手动解封）" },
-    { value: "7", label: "7 天" },
-    { value: "30", label: "30 天" },
+  // 生效时长：自己填，留空就是永久。单位给小时与天两档——
+  // 「封 12 小时」和「暂停 30 天」都是常见口径，只给天会逼人写小数
+  const durationValue = textInput({
+    type: "number",
+    mono: true,
+    placeholder: "留空 = 永久",
+    min: "1",
+  });
+  const durationUnit = select([
+    { value: "days", label: "天" },
+    { value: "hours", label: "小时" },
   ]);
+
+  /** 手填的时长换算成分钟；空、0、非数字一律按「永久」处理（不传这个字段）。 */
+  function durationMinutes(): number | null {
+    const value = Number(durationValue.value.trim());
+    if (!Number.isFinite(value) || value <= 0) return null;
+    const scale = durationUnit.value === "hours" ? 60 : 1440;
+    return Math.max(1, Math.round(value * scale));
+  }
   // 申诉邮箱默认取站点配置的注册发信邮箱，可改
   const appeal = textInput({ value: getState().site?.appeal_email ?? "", mono: true });
   const reason = textarea({
@@ -752,7 +855,18 @@ function openDispositionDialog(
       h(
         "div.row",
         null,
-        h("div.fld", null, h("label.f", { text: "生效时长" }), duration),
+        h(
+          "div.fld",
+          null,
+          h("label.f", { text: "生效时长" }),
+          h(
+            "div.row",
+            { style: { margin: "0", alignItems: "center" } },
+            durationValue,
+            h("div", { style: { flex: "0 0 90px" } }, durationUnit),
+          ),
+          h("div.tip", { text: "留空表示永久，只能手动解封；填了就到期自动恢复。" }),
+        ),
         h(
           "div.fld",
           null,
@@ -770,7 +884,7 @@ function openDispositionDialog(
         qtip(
           "warn",
           null,
-          "确认后立即生效：该用户当前所有会话被踢下线，API Token 全部进入暂停状态。解封时自动恢复，不用重新签发。",
+          "确认后立刻生效：所有会话踢下线，API Token 进入暂停；解封时自动恢复，不用重新签发。",
         ),
       ),
       errorLine,
@@ -788,13 +902,14 @@ function openDispositionDialog(
     errorLine.textContent = "";
     confirm.disabled = true;
     cancel.disabled = true;
+    const minutes = durationMinutes();
     try {
       const result = await request<StatusResult>(`/admin/users/${user.id}/status`, {
         method: "POST",
         json: {
           action: kind,
           reason: reason.value.trim(),
-          duration_days: duration.value ? Number(duration.value) : null,
+          duration_minutes: minutes,
           requirements: requirements.value.trim() || null,
           appeal_email: appeal.value.trim() || null,
           notify,
@@ -804,7 +919,7 @@ function openDispositionDialog(
       toastOk(
         `已踢下线 ${result.revoked_sessions ?? 0} 个会话、通知邮件${
           result.mail_sent ? "已发送" : "未发送"
-        }`,
+        }${minutes ? `；${describeMinutes(minutes)}后自动恢复` : "；未填时长，永久生效"}`,
       );
       reload();
     } catch (err) {
@@ -832,7 +947,7 @@ async function restoreUser(user: DetailUser, reload: () => void): Promise<void> 
       json: {
         action: "restore",
         reason: "管理员手动恢复账号",
-        duration_days: null,
+        duration_minutes: null,
         requirements: null,
         appeal_email: getState().site?.appeal_email ?? null,
         notify: true,

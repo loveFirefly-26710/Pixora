@@ -5,7 +5,7 @@
  * 图片的批量操作留在「我的相册」页：那里的勾选、预览、批量条是另一套交互，
  * 塞进同一页会两边都别扭。
  *
- * 删除的语义要写清楚：删相册不删图，里面的图片会回到「未分类」。
+ * 删除的语义要写清楚：删相册不删图，相册与其中的图片一起进回收站，整份可恢复。
  * 这一点在确认框里说明白，并带上具体张数。
  */
 
@@ -35,7 +35,7 @@ export async function render(ctx: PageContext): Promise<void> {
         "相册管理",
         readOnly
           ? "正在查看其他用户的相册：这一页只读。"
-          : "改名、改可见性、调顺序、删相册。删除相册不会删图片——里面的图会回到「未分类」。",
+          : "改名、改可见性、调顺序、删相册。删除相册会把相册与其中的图片一起移入回收站，保留期内可整份恢复。",
       ),
       readOnly
         ? null
@@ -317,8 +317,8 @@ async function deleteAlbum(album: Album, reload: Reload): Promise<void> {
     const detached = result.detached_images ?? 0;
     toastOk(
       detached > 0
-        ? `已删除「${album.name}」，${detached} 张图片移到了未分类`
-        : `已删除「${album.name}」`,
+        ? `「${album.name}」已移入回收站，${detached} 张图片一并进去，可整份恢复`
+        : `「${album.name}」已移入回收站`,
     );
     await reload();
   } catch (err) {

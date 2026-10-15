@@ -27,6 +27,9 @@ pub struct NewImage {
     pub original_name: String,
     pub title: Option<String>,
     pub visibility: String,
+    /// 这次上传来自哪个 IP、什么终端。访客上传靠它留痕，登录用户顺手也记
+    pub upload_ip: Option<String>,
+    pub upload_agent: Option<String>,
 }
 
 /// 彻底删除一条墓碑之后，需要调用方回收的实体 id。
@@ -762,14 +765,14 @@ impl Repo {
 
         let insert = self.db.sql_v(
             "INSERT INTO images (owner_id, album_id, blob_id, thumb_blob_id, original_name, title, \
-                                visibility, views, upload_time, deleted_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL) RETURNING id",
+                                visibility, views, upload_time, deleted_at, upload_ip, upload_agent) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?) RETURNING id",
             "INSERT INTO images (owner_id, album_id, blob_id, thumb_blob_id, original_name, title, \
-                                visibility, views, upload_time, deleted_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL)",
+                                visibility, views, upload_time, deleted_at, upload_ip, upload_agent) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)",
             "INSERT INTO images (owner_id, album_id, blob_id, thumb_blob_id, original_name, title, \
-                                visibility, views, upload_time, deleted_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL) RETURNING id",
+                                visibility, views, upload_time, deleted_at, upload_ip, upload_agent) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?) RETURNING id",
         );
         let image_id = if self.db.dialect() == crate::db::Dialect::MySql {
             sqlx::query(&insert)
@@ -781,6 +784,8 @@ impl Repo {
                 .bind(new.title.clone())
                 .bind(&new.visibility)
                 .bind(&now)
+                .bind(new.upload_ip.clone())
+                .bind(new.upload_agent.clone())
                 .execute(&mut *tx)
                 .await?;
             let row = sqlx::query(&self.db.sql("SELECT LAST_INSERT_ID() AS id"))
@@ -797,6 +802,8 @@ impl Repo {
                 .bind(new.title.clone())
                 .bind(&new.visibility)
                 .bind(&now)
+                .bind(new.upload_ip.clone())
+                .bind(new.upload_agent.clone())
                 .fetch_one(&mut *tx)
                 .await?;
             get_i64(&row, "id")?
@@ -920,7 +927,52 @@ impl Repo {
         Ok(removed)
     }
 
-    /// 批量移动到相册（传 `None` 即移出相册）。
+    /// 有哪些账号名下有「没有归属的图片」。
+    ///
+    /// 早期版本允许「移出相册」，留下了一批 `album_id` 为空的行；现在图片
+    /// 总要落在某个相册里（默认相册兜底），所以启动/对账时把它们收编。
+    pub async fn owners_with_unattached_images(&self) -> Result<Vec<i64>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT DISTINCT owner_id FROM images WHERE album_id IS NULL",
+                Args::new(),
+            )
+            .await?;
+        rows.iter().map(|row| get_i64(row, "owner_id")).collect()
+    }
+
+    /// 把某个账号名下没有归属的图片收进指定相册，并维护相册计数。
+    pub async fn attach_images_to_album(&self, owner_id: i64, album_id: i64) -> Result<u64> {
+        let mut tx = self.db.pool().begin().await?;
+        let moved = sqlx::query(
+            &self
+                .db
+                .sql("UPDATE images SET album_id = ? WHERE owner_id = ? AND album_id IS NULL"),
+        )
+        .bind(album_id)
+        .bind(owner_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if moved > 0 {
+            sqlx::query(&self.db.sql(
+                "UPDATE albums SET image_count = image_count + ?, updated_at = ? WHERE id = ?",
+            ))
+            .bind(moved as i64)
+            .bind(now_ts())
+            .bind(album_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(moved)
+    }
+
+    /// 批量移动到相册。
+    ///
+    /// `None` 表示「不指定」——落点是主人的**默认相册**，不再有「移出相册」：
+    /// 图片总得有个归属，界面上那个「未分类」状态已经取消了。
     pub async fn move_images(
         &self,
         ids: &[i64],
@@ -930,6 +982,15 @@ impl Repo {
         if ids.is_empty() {
             return Ok(0);
         }
+        // 不指定相册时落进默认相册：解析放在这里而不是各个调用方，
+        // 免得「有的入口会落进去、有的入口留下未分类」
+        let album_id = match album_id {
+            Some(id) => Some(id),
+            None => self
+                .find_album_by_slug(owner_id, crate::repo::albums::DEFAULT_ALBUM_SLUG)
+                .await?
+                .map(|album| album.id),
+        };
         let placeholders = vec!["?"; ids.len()].join(", ");
         let now = now_ts();
 

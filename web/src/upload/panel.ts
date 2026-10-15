@@ -16,12 +16,16 @@ import { toastError, toastRateLimited, toastWithCode } from "../core/toast";
 import type { AlbumList, UploadResult } from "../core/types";
 import { badge, qtip, statCard } from "../ui/widgets";
 import {
-  CONCURRENCY_OPTIONS,
+  concurrencyCap,
+  concurrencyOptions,
   getUploadQueue,
   type IncomingFile,
   type QueueItem,
   type QueueStats,
 } from "./queue";
+
+/** 并发档位超过这个数就改用数字输入：下拉里塞 40 个选项没人愿意滚。 */
+const CONCURRENCY_SELECT_MAX = 12;
 
 /** 目标相册下拉的候选。上传页与广场页共用；`uid` 只在管理员看别人的空间时有值。 */
 export async function loadAlbumOptions(
@@ -40,6 +44,13 @@ export interface UploadPanelOptions {
   onUploaded?: (result: UploadResult) => void;
   /** 一次队列跑完后的回调 */
   onFinished?: (stats: QueueStats) => void;
+  /**
+   * 访客模式：没有账号、也没有自建相册。
+   *
+   * 上传落到站点统一的访客相册里，所以相册选择整个收起来——摆一个只有一个
+   * 选项的下拉只会让人以为还能改。
+   */
+  guest?: boolean;
 }
 
 export interface UploadPanelHandle {
@@ -317,27 +328,30 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     h("option", { value: "private", text: "私有" }),
     h("option", { value: "public", text: "公开" }),
   );
-  // 并发上限可能被按用户压下来（策略里的 max_concurrent_uploads）：超出的档位直接禁用，
-  // 免得选了又被队列悄悄改回较小的值
-  const concurrencyCap = getState().user?.limits?.max_concurrent_uploads;
-  const concurrencySelect = h(
-    "select.f",
-    null,
-    ...CONCURRENCY_OPTIONS.map((value) =>
-      h("option", {
-        value: String(value),
-        text: value === 1 ? "1（逐张，推荐）" : String(value),
-        disabled: concurrencyCap !== undefined && value > concurrencyCap ? true : undefined,
-      }),
-    ),
-  );
+  // 并发档位按策略上限生成：管理员配 5，下拉里就是 1..5。
+  // 档位太多（管理员填了个大数）时换成数字输入，免得下拉长得像一堵墙
+  const cap = concurrencyCap();
+  const concurrencySelect =
+    cap <= CONCURRENCY_SELECT_MAX
+      ? h(
+          "select.f",
+          null,
+          ...concurrencyOptions(cap).map((value) =>
+            h("option", {
+              value: String(value),
+              text: value === 1 ? "1（逐张，推荐）" : String(value),
+            }),
+          ),
+        )
+      : h("input.f", { type: "number", min: "1", max: String(cap), mono: true });
+  const concurrencyValue = (): number => {
+    const raw = Number(concurrencySelect.value);
+    return Number.isFinite(raw) ? Math.max(1, Math.min(Math.floor(raw), cap)) : 1;
+  };
   visibilitySelect.value = queue.getSettings().visibility;
   concurrencySelect.value = String(queue.getSettings().concurrency);
 
-  const settingsTip = h("span.tip", {
-    style: { margin: "0", marginRight: "auto" },
-    text: "",
-  });
+  const settingsTip = h("span.tip", { style: { margin: "0", marginRight: "auto" }, text: "" });
   const clearBtn = h("button.btn", { type: "button", text: "清空" });
   const startBtn = h("button.btn.pri", { type: "button", text: "开始上传" });
   const inlineActions = h(
@@ -353,7 +367,9 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     h(
       "div.row",
       { style: { marginBottom: "12px" } },
-      h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "目标相册" }), albumSelect),
+      options.guest
+        ? null
+        : h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "目标相册" }), albumSelect),
       h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "标签（全部共用）" }), tagsInput),
       h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "可见性" }), visibilitySelect),
       h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "并发数" }), concurrencySelect),
@@ -423,7 +439,11 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   };
 
   setAlbumOptions(options.albums ?? [], options.albumId);
-  if ((options.albums?.length ?? 0) === 0) {
+  if (options.guest) {
+    // 访客没有相册清单可读，也不用读：服务端按账号落到访客相册
+    setAlbumPlaceholder("访客相册");
+    queue.setSettings({ albumId: null });
+  } else if ((options.albums?.length ?? 0) === 0) {
     setAlbumPlaceholder("正在读取相册…");
     void fetchAlbums();
   }
@@ -436,7 +456,9 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     queue.setSettings({ visibility: visibilitySelect.value === "public" ? "public" : "private" });
   });
   concurrencySelect.addEventListener("change", () => {
-    queue.setSettings({ concurrency: Number(concurrencySelect.value) || 1 });
+    // 越界的输入拉回区间：队列也会再夹一次，这里先把界面上的数字摆正
+    concurrencySelect.value = String(concurrencyValue());
+    queue.setSettings({ concurrency: concurrencyValue() });
   });
 
   clearBtn.addEventListener("click", () => {
@@ -796,9 +818,13 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
 
     // 队列不跨刷新保留：刷新后这张清单就该是空的（文件本身浏览器也存不下）
     const hasReselect = stats.needsReselect > 0;
+    // 这句每次更新都会重写，所以「访客」那一版也写在这里——
+    // 写进初始值里会被紧接着的这次更新覆盖掉
     settingsTip.textContent = hasReselect
       ? `${stats.needsReselect} 张需要重新选择文件（刷新后文件需要重新选）。`
-      : "刷新页面会清空这张清单；相册、标签、并发这些设置会记住。";
+      : options.guest
+        ? "刷新页面会清空这张清单；未登录上传的图片统一归入本站的「访客相册」，并记录上传来源。"
+        : "刷新页面会清空这张清单；相册、标签、并发这些设置会记住。";
   }
 
   function renderAll(): void {

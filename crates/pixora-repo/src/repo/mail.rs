@@ -207,6 +207,18 @@ impl Repo {
         Ok(())
     }
 
+    /// 删掉自定义模板，回到内置文案。返回是否真的删了一行。
+    pub async fn delete_email_template(&self, name: &str) -> Result<u64> {
+        let affected = self
+            .db
+            .execute(
+                "DELETE FROM email_templates WHERE name = ?",
+                Args::new().text(name),
+            )
+            .await?;
+        Ok(affected)
+    }
+
     // ---------- 一次性邮箱域名 ----------
 
     pub async fn disposable_domain_exists(&self, domain: &str) -> Result<bool> {

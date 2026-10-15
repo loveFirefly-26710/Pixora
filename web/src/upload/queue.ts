@@ -15,7 +15,7 @@
 
 import { ApiError, request } from "../core/api";
 import { extOf, normalizeExt } from "../core/format";
-import { getState } from "../core/state";
+import { getState, loadSite } from "../core/state";
 import {
   loadUploadSettings,
   loadLocalUploadSettings,
@@ -26,7 +26,29 @@ import type { HashCheck, UploadResult } from "../core/types";
 
 /** 并发数只允许 1 / 2 / 4：再大对单账号上传限额和服务器都没有好处。 */
 export type Concurrency = 1 | 2 | 4;
-export const CONCURRENCY_OPTIONS: Concurrency[] = [1, 2, 4];
+/**
+ * 并发档位的上限：策略里的「单用户并发上传数」。
+ *
+ * 用户可选 1..上限，而不是在一组固定的档位里挑——管理员配 5，就该能选到 5。
+ * 拿不到策略时按 1 走（服务端本来也会按生效策略拦）。
+ */
+export function concurrencyCap(): number {
+  const state = getState();
+  const value =
+    state.user?.limits?.max_concurrent_uploads ??
+    state.site?.guest_upload?.max_concurrent_uploads ??
+    1;
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : 1;
+}
+
+/**
+ * 下拉里列出来的档位。档位多的时候不必全列（32 个选项没人看），
+ * 这种情况下由面板换成数字输入，见 `panel.ts`。
+ */
+export function concurrencyOptions(cap = concurrencyCap()): number[] {
+  const top = Math.max(1, Math.min(cap, 32));
+  return Array.from({ length: top }, (_, index) => index + 1);
+}
 
 export type QueueStatus =
   | "hashing"
@@ -339,10 +361,29 @@ function createId(index: number): string {
   return `q${Date.now().toString(36)}${index.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
+/**
+ * 当前访问者能不能上传。
+ *
+ * 登录用户按自己的账号走；未登录的人只在站点开着「允许游客上传」时能传，
+ * 依据是 /site 下发的 `guest_upload`（关着时它是 null）。
+ *
+ * 这一道拦在入队口，是为了不替未授权的人白干活：算 SHA-256、生成缩略图、
+ * 预检、上传全都要花本机与服务器的资源，而「选中文件」这一步不该触发其中任何一环。
+ * 真正的许可仍在服务端——关着游客上传时 `/blobs/exists` 与 `/upload` 直接回 401，
+ * 文件哈希到不了服务端。
+ */
+export function uploadAllowed(): boolean {
+  const state = getState();
+  if (state.user) return true;
+  return state.site?.guest_upload?.enabled === true;
+}
+
 /** 服务端格式白名单优先；拿不到站点信息时退回常见图片扩展名，宁可多收也别把 HEIC 挡在外面。
  *  登录后以「我的生效策略」为准——管理员可以按用户单独放宽或收紧格式白名单。 */
 function isLikelyImage(file: File): boolean {
-  const formats = getState().user?.limits?.formats ?? getState().site?.formats ?? [];
+  const state = getState();
+  const formats =
+    state.user?.limits?.formats ?? state.site?.guest_upload?.formats ?? state.site?.formats ?? [];
   // 两边都归一：服务端给的白名单只有 jpg / tiff / heic 这几个名字，
   // 用户文件却常见 .jpeg / .tif / .heif。不归一的话这些文件会被当成
   // 「非图片」直接丢掉，而服务端其实完全收得下
@@ -365,8 +406,12 @@ function isLikelyImage(file: File): boolean {
  * 0 表示不限。
  */
 function effectiveBatchLimit(): number {
+  const state = getState();
   const value =
-    getState().user?.limits?.max_batch_size ?? getState().site?.max_batch_size ?? 1000;
+    state.user?.limits?.max_batch_size ??
+    state.site?.guest_upload?.max_batch_size ??
+    state.site?.max_batch_size ??
+    1000;
   if (!Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);
 }
@@ -381,17 +426,17 @@ function effectiveBatchLimit(): number {
  * 0 表示不限。
  */
 function effectiveQueueDepth(): number {
+  const state = getState();
   const value =
-    getState().user?.limits?.queue_depth ?? getState().site?.queue_depth ?? 0;
+    state.user?.limits?.queue_depth ??
+    state.site?.guest_upload?.queue_depth ??
+    state.site?.queue_depth ??
+    0;
   if (!Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);
 }
 
-/** 单用户并发上限：策略里的值，客户端选的并发数不能超过它。 */
-function effectiveConcurrencyCap(): number {
-  const fallback = CONCURRENCY_OPTIONS[CONCURRENCY_OPTIONS.length - 1];
-  return getState().user?.limits?.max_concurrent_uploads ?? fallback;
-}
+
 
 class UploadQueue {
   private items: QueueItem[] = [];
@@ -420,6 +465,8 @@ class UploadQueue {
   private thumbBridge = new WorkerBridge("thumb.worker.js");
   private warnedNoHash = false;
   private warnedNoThumb = false;
+  /** 「游客上传被关掉」这条路只走一次：一批请求会连着撞上同一个 401 */
+  private guestClosed = false;
 
   // ---- 订阅与广播 ----
 
@@ -501,6 +548,18 @@ class UploadQueue {
   // ---- 入队 ----
 
   addFiles(incoming: IncomingFile[]): number {
+    // 入队口先判许可：未登录且站点没开游客上传时，文件连队列都不进，
+    // 后面的算哈希、预检、上传自然都不会发生。放在最前面，是因为这几步
+    // 一旦跑起来就会动本机 CPU、也会向服务端发请求
+    if (!uploadAllowed()) {
+      this.emit({
+        kind: "notice",
+        tone: "warn",
+        text: "本站未开放游客上传，文件没有加入队列。登录后即可上传。",
+      });
+      return 0;
+    }
+
     const accepted: IncomingFile[] = [];
     let rejected = 0;
     for (const entry of incoming) {
@@ -512,7 +571,7 @@ class UploadQueue {
         this.emit({
           kind: "notice",
           tone: "warn",
-          text: `${rejected} 个文件不在图片格式白名单里，已忽略。`,
+          text: `${rejected} 个文件不在图片格式白名单内，已忽略。`,
         });
       }
       return 0;
@@ -540,7 +599,7 @@ class UploadQueue {
         this.emit({
           kind: "notice",
           tone: "warn",
-          text: `队列里已经有 ${this.items.length} 张（上限 ${depth} 张），先传完或清空再加新的。`,
+          text: `队列已有 ${this.items.length} 张（上限 ${depth} 张），请先完成或清空后再添加。`,
         });
         return 0;
       }
@@ -580,8 +639,8 @@ class UploadQueue {
         kind: "notice",
         tone: "warn",
         text:
-          `单批次最多 ${batchLimit} 张，这次多选的 ${overBatch} 张没有加入。` +
-          "再选一次就能接着传剩下的。",
+          `单批次上限 ${batchLimit} 张，本次多选的 ${overBatch} 张未加入。` +
+          "可再次选择以继续上传。",
       });
     }
     if (skipped > 0) {
@@ -589,17 +648,19 @@ class UploadQueue {
         kind: "notice",
         tone: "warn",
         text:
-          `队列上限是 ${depth} 张（队列深度阈值），超出的 ${skipped} 张没有加入。` +
-          "先传完这一批，再继续选剩下的文件。",
+          `队列上限为 ${depth} 张（队列深度阈值），超出的 ${skipped} 张未加入。` +
+          "请先完成本批上传，再继续添加。",
       });
     }
     if (rejected > 0) {
       this.emit({
         kind: "notice",
         tone: "warn",
-        text: `已加入 ${accepted.length} 张，另有 ${rejected} 个非图片文件被忽略。`,
+        text: `已添加 ${accepted.length} 张；另有 ${rejected} 个非图片文件已忽略。`,
       });
     }
+    // 能收下这一批就说明许可又回来了（比如刚登录，或者管理员重新开了游客上传）
+    this.guestClosed = false;
     this.emit({ kind: "items" });
     this.pump();
     return accepted.length;
@@ -652,14 +713,11 @@ class UploadQueue {
 
   setSettings(patch: Partial<StoredUploadSettings>): void {
     const next: StoredUploadSettings = { ...this.settings, ...patch };
-    // 管理员可以按用户把并发上限压下来（比如 1）：客户端选的 4 不能越过它。
-    // 结果必须落在 CONCURRENCY_OPTIONS 之内，否则下拉框会显示成空
-    const cap = effectiveConcurrencyCap();
-    const allowed = CONCURRENCY_OPTIONS.filter((value) => value <= cap);
-    const wanted = CONCURRENCY_OPTIONS.includes(next.concurrency as Concurrency)
-      ? (next.concurrency as Concurrency)
-      : 1;
-    const concurrency = (allowed.includes(wanted) ? wanted : (allowed[allowed.length - 1] ?? 1)) as Concurrency;
+    // 并发落在 1..策略上限 之间：管理员按用户把上限压到 1 时，客户端选的 4
+    // 不能越过它；反过来也不能低于 1
+    const cap = concurrencyCap();
+    const wanted = Number.isFinite(next.concurrency) ? Math.floor(next.concurrency) : 1;
+    const concurrency = Math.max(1, Math.min(wanted, cap)) as Concurrency;
     this.settings = {
       albumId: typeof next.albumId === "number" ? next.albumId : null,
       tags: typeof next.tags === "string" ? next.tags : "",
@@ -901,6 +959,9 @@ class UploadQueue {
             : `预检结果：${candidates.length} 张都是新文件，将全部上传。`,
       });
     } catch (err) {
+      // 未登录却撞上 401：站点多半刚把游客上传关掉，重拉站点信息后停队，
+      // 别继续逐张试（本机白算哈希，服务端白收一堆请求）
+      if (this.handleGuestRevoked(err)) return;
       // 预检失败不阻塞主流程：照常上传，服务端靠 dedup 自己判重
       for (const item of candidates) item.checked = true;
       this.emit({ kind: "notice", tone: "warn", text: "预检失败，将逐张上传，由服务器判重。" });
@@ -1064,6 +1125,14 @@ class UploadQueue {
   }
 
   private handleFailure(item: QueueItem, err: unknown): void {
+    // 未登录 + 401 = 游客上传被关：停队、刷新站点信息，不再逐张重试
+    if (this.handleGuestRevoked(err)) {
+      item.status = "ready";
+      item.progress = 0;
+      item.note = "本站已关闭游客上传";
+      return;
+    }
+
     const apiError = err instanceof ApiError ? err : null;
     const permanent = isPermanentError(err);
 
@@ -1124,6 +1193,30 @@ class UploadQueue {
     }
 
     this.emit({ kind: "error", error: err });
+  }
+
+  /**
+   * 未登录却撞上 401：站点把「允许游客上传」关掉了。
+   *
+   * 手上的站点信息是进页面时拉的，这会儿已经不作数了——重拉一次，让
+   * `uploadAllowed()` 回到准的（下一次添加文件会在入队口直接被挡下），同时停掉
+   * 队列：继续逐张试只会一张一张吃 401，本机白算哈希、服务端白收请求。
+   * 返回 true 表示这次失败已经处理过，调用方不必再走常规的失败处置。
+   */
+  private handleGuestRevoked(err: unknown): boolean {
+    // 登录用户的 401 是「会话过期」，归 api.ts 那个统一处理器管
+    if (getState().user) return false;
+    if (!(err instanceof ApiError) || err.status !== 401) return false;
+    this.stop();
+    if (this.guestClosed) return true;
+    this.guestClosed = true;
+    void loadSite();
+    this.emit({
+      kind: "notice",
+      tone: "warn",
+      text: "本站已关闭游客上传，队列已停止；登录后可以继续上传。",
+    });
+    return true;
   }
 
   private maybeFinish(): void {

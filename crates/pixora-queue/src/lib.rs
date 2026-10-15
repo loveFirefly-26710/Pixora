@@ -142,6 +142,11 @@ pub fn spawn(state: Arc<AppState>, config: QueueConfig) -> Vec<tokio::task::Join
                 if let Err(err) = gc::purge_expired(&state).await {
                     tracing::warn!(error = %err, "过期数据清理失败");
                 }
+                match state.attach_orphan_images().await {
+                    Ok(0) => {}
+                    Ok(moved) => tracing::info!(moved, "把没有归属的图片收进默认相册"),
+                    Err(err) => tracing::warn!(error = %err, "收编无归属图片失败"),
+                }
                 let emptied = gc::clean_empty_blob_dirs(&state).await;
                 if emptied > 0 {
                     tracing::info!(removed = emptied, "清掉数据目录里的空目录");

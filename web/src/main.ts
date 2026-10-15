@@ -9,7 +9,14 @@
 import "./styles/tokens.css";
 import "./styles/components.css";
 
-import { route, setNavigateHook, setNotFound, setOutlet, startRouter, navigate } from "./core/router";
+import {
+  navigate,
+  route,
+  setNavigateHook,
+  setNotFound,
+  setOutlet,
+  startRouter,
+} from "./core/router";
 import { bootstrap, getState, setUser, subscribe, updateUser } from "./core/state";
 import { mountShell, refreshNav } from "./ui/shell";
 import { openModal } from "./core/modal";
@@ -37,6 +44,7 @@ import { render as adminStoragePage } from "./pages/admin-storage";
 import { render as adminQuotaPage } from "./pages/admin-quota";
 import { render as adminIpPage } from "./pages/admin-ip";
 import { render as adminSettingsPage } from "./pages/admin-settings";
+import { render as passwordRequiredPage } from "./pages/password-required";
 import { render as adminTermsPage } from "./pages/admin-terms";
 import { installPage } from "./pages/install";
 
@@ -64,6 +72,8 @@ function registerRoutes(): void {
   route("/account/api", accountApiPage, { auth: true });
   route("/account/terms", accountTermsPage, { auth: true });
   route("/recycle", recyclePage, { auth: true });
+  // 管理员直接设过密码的账号会被送到这里，改完才放行其它页面
+  route("/password-required", passwordRequiredPage, { auth: true });
 
   route("/admin/users", adminUsersPage, { auth: true, admin: true });
   route("/admin/users/:id", adminUserDetailPage, { auth: true, admin: true });
@@ -164,7 +174,11 @@ async function main(): Promise<void> {
   // 会话超时的收尾动作。放在这里而不是 api.ts：那里是被路由与状态依赖的
   // 底层模块，反向 import 会绕成环
   onSessionExpired(() => {
+    // 没登录过的访客也会拿到 401（`/me` 就是这么答的），那不是「会话过期」：
+    // 把人从广场赶去登录页，还弹一句「登录已过期」，纯属吓唬人
+    const wasLoggedIn = getState().user !== null;
     setUser(null);
+    if (!wasLoggedIn) return;
     const here = location.hash.replace(/^#/, "") || "/";
     if (here.startsWith("/login")) return;
     toast("登录已过期，请重新登录");
@@ -185,6 +199,8 @@ async function main(): Promise<void> {
   subscribe(() => {
     // 用户登出后把管理页踢回首页，避免停留在无权页面
     if (!getState().user && window.location.hash.startsWith("#/admin")) navigate("/", { replace: true });
+    // 「必须改密码」的转跳在路由守卫里（core/router.ts）：那里管得住
+    // 登录成功后的那一次跳转，订阅回调管不住
   });
 
   await promptTermsIfNeeded();

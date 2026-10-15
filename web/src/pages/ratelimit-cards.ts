@@ -14,8 +14,8 @@ import { ApiError, request, requestPage } from "../core/api";
 import { h, mount } from "../core/dom";
 import { formatBytes, formatDateTime, formatNumber, parseSize, toGigabytes } from "../core/format";
 import { confirmDialog, openModal } from "../core/modal";
+import { canOperateAccount } from "../core/state";
 import { toastError, toastOk } from "../core/toast";
-import { CONCURRENCY_OPTIONS } from "../upload/queue";
 import type { PolicyFields, RateLimitAdmin } from "../core/types";
 import {
   badge,
@@ -27,7 +27,6 @@ import {
   progressBar,
   qtip,
   responsiveTable,
-  select,
   spinner,
   statusBadge,
   switchRow,
@@ -213,7 +212,7 @@ export function breachCard(draft: RateLimitDraft): HTMLElement {
     h(
       "div",
       { style: { marginTop: "6px" } },
-      qtip("warn", null, "临时封禁只针对 API，不影响该用户网页登录。和「账号暂停」不是一回事，别混用。"),
+      qtip("warn", null, "临时封禁只掐 API，不影响该用户网页登录；和「账号暂停」不是一回事。"),
     ),
     h("div.flexline", { style: { marginTop: "10px" } }, rateLogsButton()),
   );
@@ -412,7 +411,7 @@ export function usersCard(
       { style: { padding: "12px 14px", borderTop: "1px solid var(--border)", background: "#fafafa" } },
       h("div.tip", {
         style: { margin: "0" },
-        text: "改「全局默认」时，所有「继承默认」的用户立刻跟着变；标了「自定义」的用户不受影响。按人放宽或收紧，用这一行的「编辑」。",
+        text: "改「全局默认」时，标了「继承默认」的用户立刻跟着变，标了「自定义」的不受影响。按人调整用这一行的「编辑」。",
       }),
     ),
   );
@@ -473,15 +472,22 @@ function userRow(
   };
   live.set(row.uid, cells);
 
+  const operable = canOperateAccount(row.uid);
   const actions = h(
     "div.act",
     null,
     h("button.btn.sm", {
       type: "button",
       text: "编辑",
-      on: { click: () => void editOverride(reload, data, formatOptions, row) },
+      disabled: !operable,
+      title: operable ? "" : "安装时创建的管理员账号，不能改它的额度",
+      on: {
+        click: () => {
+          if (operable) void editOverride(reload, data, formatOptions, row);
+        },
+      },
     }),
-    row.custom && row.role !== "admin"
+    row.custom && row.role !== "admin" && operable
       ? h("button.btn.sm", {
           type: "button",
           text: "恢复默认",
@@ -598,14 +604,14 @@ function editOverride(
     );
   }
 
-  // 并发数：与上传界面同一个下拉（客户端队列的并发上限）
-  const concurrencySelect = select(
-    CONCURRENCY_OPTIONS.map((value) => ({
-      value: String(value),
-      label: value === 1 ? "1（逐张，推荐）" : String(value),
-    })),
-    String(base.max_concurrent_uploads || 1),
-  );
+  // 并发上限：这个人「同时传几张」的上限。上传页能选的档位就是 1..这个值，
+  // 管理员填几，用户那边就能选到几
+  const concurrencyInput = textInput({
+    value: String(base.max_concurrent_uploads || 1),
+    type: "number",
+    mono: true,
+    min: "1",
+  });
 
   /** 勾选框里勾了哪些（空 = 跟随全局）。 */
   const pickedFormats = (): string[] =>
@@ -652,7 +658,7 @@ function editOverride(
         "div.row",
         null,
         field("最大高度", inputs.maxHeight, "像素；0 表示不限"),
-        field("并发上传数", concurrencySelect, "与上传界面同一个下拉：客户端队列的并发上限"),
+        field("并发上传数", concurrencyInput, "上传页的并发档位上限（1..这个值）；0 或留空跟随全局默认"),
       ),
       h(
         "div.fld",
@@ -695,7 +701,7 @@ function editOverride(
       upload_per_hour: intOf(inputs.uploadPerHour),
       upload_per_day: intOf(inputs.uploadPerDay),
       upload_bytes_per_day: sizeOf(inputs.uploadBytesPerDay, "GB"),
-      max_concurrent_uploads: Number(concurrencySelect.value) || 1,
+      max_concurrent_uploads: intOf(concurrencyInput),
       max_batch_size: intOf(inputs.maxBatch),
       max_file_size: sizeOf(inputs.maxFileSize, "MB"),
       max_pixels: Number.isFinite(pixelsInWan) ? Math.max(0, Math.round(pixelsInWan)) * 10000 : 0,

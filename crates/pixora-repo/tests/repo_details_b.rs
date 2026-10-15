@@ -12,7 +12,7 @@ use pixora_repo::model::{now, now_ts, status, ts};
 use pixora_repo::repo::audit::{AuditEntry, AuditFilter};
 use pixora_repo::repo::backends::{BackendPatch, NewBackend};
 use pixora_repo::repo::blobs::NewBlob;
-use pixora_repo::repo::images::ImageDeletion;
+use pixora_repo::repo::images::{ImageDeletion, ImageFilter};
 use pixora_repo::repo::iprules::{IpRuleFilter, NewIpRule};
 use pixora_repo::repo::ratelimit::{kind, scope};
 use pixora_repo::repo::terms::NewTermsVersion;
@@ -102,6 +102,8 @@ async fn seed_image(repo: &Repo, owner_id: i64, sha256: String, size: i64) -> i6
             original_name: format!("{}.png", &blob.sha256[..8]),
             title: None,
             visibility: "private".to_string(),
+            upload_ip: None,
+            upload_agent: None,
         },
         size,
         &[],
@@ -1269,5 +1271,153 @@ async fn audit_insert_filter_count_and_purge() {
             .iter()
             .all(|(action, count)| action != "rate_limited" || *count == 3),
         "旧流水被清掉后计数一起变"
+    );
+}
+
+// ============================================================
+// 删除账号
+// ============================================================
+
+/// 删账号要把从属数据一起带走，并且只还自己那一份引用计数。
+///
+/// 这是删账号最容易漏的两处：外键级联删行不会动 `blobs.ref_count`（计数停在
+/// 原地，GC 就永远收不走文件），而共享实体上挂着别人的引用，删多了会连带
+/// 把别人还在用的文件回收掉。
+#[tokio::test]
+async fn deleting_a_user_takes_its_rows_and_only_its_own_refs() {
+    let (repo, _dir) = sqlite_repo().await;
+    let chen = repo
+        .create_user(&sample_user("chenyu@example.com", "4001"))
+        .await
+        .expect("建用户");
+    let li = repo
+        .create_user(&sample_user("li@example.com", "4002"))
+        .await
+        .expect("建用户");
+
+    // 同一份文件被两个人引用（内容寻址下很常见），另有一份只属于 chen
+    seed_image(&repo, chen.id, "c".repeat(64), 500).await;
+    seed_image(&repo, li.id, "c".repeat(64), 500).await;
+    let private = seed_image(&repo, chen.id, "d".repeat(64), 700).await;
+    let shared = repo
+        .find_blob_by_sha(&"c".repeat(64), "original")
+        .await
+        .expect("查共享实体")
+        .expect("共享实体在");
+
+    // 顺手给 chen 建一个相册与一条令牌，级联是否成立看它们
+    let album = repo
+        .insert_default_album(chen.id, "默认相册")
+        .await
+        .expect("相册");
+    repo.create_api_token(&pixora_repo::repo::tokens::NewApiToken {
+        user_id: chen.id,
+        name: "冒烟令牌".to_string(),
+        token_hash: "f".repeat(64),
+        display: "px_live_abcdef12".to_string(),
+        scopes: vec!["upload".to_string()],
+        expires_at: None,
+    })
+    .await
+    .expect("令牌");
+
+    let returned = repo.delete_user(chen.id).await.expect("删账号");
+    assert_eq!(returned.len(), 2, "返回这个账号用过的两个实体");
+
+    // 只属于 chen 的实体：计数归零，等回收
+    assert_eq!(
+        repo.find_blob_by_id(private).await.unwrap().unwrap().ref_count,
+        0,
+        "自己的引用还回去"
+    );
+    // 共享实体：还剩 li 那一份引用，文件不能被收走
+    assert_eq!(
+        repo.find_blob_by_id(shared.id).await.unwrap().unwrap().ref_count,
+        1,
+        "别人还在用的实体，计数只减自己那一份"
+    );
+
+    // 从属数据随外键级联消失
+    assert!(repo.find_user_by_id(chen.id).await.unwrap().is_none());
+    assert!(
+        repo.find_album_by_id(album.id).await.unwrap().is_none(),
+        "相册随账号一起删"
+    );
+    assert!(
+        repo.list_api_tokens(chen.id).await.unwrap().is_empty(),
+        "令牌随账号一起删"
+    );
+    assert_eq!(
+        repo.count_images(&ImageFilter {
+            owner_id: Some(chen.id),
+            ..Default::default()
+        })
+        .await
+        .unwrap(),
+        0,
+        "图片引用随账号一起删"
+    );
+    // 另一个人的东西一件都不能少
+    assert_eq!(
+        repo.count_images(&ImageFilter {
+            owner_id: Some(li.id),
+            ..Default::default()
+        })
+        .await
+        .unwrap(),
+        1,
+        "另一个人的图还在"
+    );
+    assert!(repo.find_user_by_id(li.id).await.unwrap().is_some());
+}
+
+/// 删相册时，里面的图片改挂到默认相册——图片永远该有个归属。
+///
+/// 早先靠外键 `ON DELETE SET NULL`，结果是图片散在「未分类」里；那个状态
+/// 已经不对外了，所以删之前先把它们收进默认相册。
+#[tokio::test]
+async fn deleting_an_album_reattaches_its_images_to_the_default_one() {
+    let (repo, _dir) = sqlite_repo().await;
+    let chen = repo
+        .create_user(&sample_user("chenyu@example.com", "4101"))
+        .await
+        .expect("建用户");
+    let fallback = repo
+        .insert_default_album(chen.id, "默认相册")
+        .await
+        .expect("默认相册");
+    let other = repo
+        .create_album(&pixora_repo::repo::albums::NewAlbum {
+            owner_id: chen.id,
+            name: "自建相册".to_string(),
+            slug: "mine".to_string(),
+            description: None,
+            visibility: "private".to_string(),
+            sort_order: 1,
+        })
+        .await
+        .expect("自建相册");
+
+    let image_id = seed_image(&repo, chen.id, "e".repeat(64), 300).await;
+    // 先把它挪进自建相册
+    repo.move_images(&[image_id], chen.id, Some(other.id))
+        .await
+        .expect("移进自建相册");
+    assert_eq!(
+        repo.find_image(image_id).await.unwrap().unwrap().album_id,
+        Some(other.id)
+    );
+
+    repo.delete_album(other.id).await.expect("删相册");
+    assert_eq!(
+        repo.find_image(image_id).await.unwrap().unwrap().album_id,
+        Some(fallback.id),
+        "删相册后图片该回到默认相册，而不是没有归属"
+    );
+    // 默认相册的计数跟着涨：它不是靠外键改的，得自己维护
+    assert_eq!(
+        repo.find_album_by_id(fallback.id).await.unwrap().unwrap().image_count,
+        1,
+        "默认相册的计数要与事实对上"
     );
 }

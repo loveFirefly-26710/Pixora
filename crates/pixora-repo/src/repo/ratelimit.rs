@@ -420,7 +420,7 @@ impl Repo {
 }
 
 /// 管理页共用的用户列 + 「有没有覆盖」派生列，与 `users.rs` 的口径一致。
-const USER_POLICY_SQL: &str = "SELECT u.id, u.uid, u.email, u.role, u.status, u.quota_bytes, \
+const USER_POLICY_SQL: &str = "SELECT u.id, u.uid, u.email, u.email_verified, u.role, u.status, u.quota_bytes, \
         u.used_bytes, u.created_at, u.last_login_at, \
         (SELECT COUNT(*) FROM images i WHERE i.owner_id = u.id AND i.deleted_at IS NULL) AS image_count, \
         (SELECT COUNT(*) FROM rate_limit_policies r WHERE r.user_id = u.id) AS rate_custom \

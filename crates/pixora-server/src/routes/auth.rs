@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -95,7 +95,7 @@ pub async fn register(
 /// `POST /api/v1/auth/login` — 公开。
 ///
 /// `totp` 与 `recovery_code` 二选一：开了二次验证且都没带时，领域层回
-/// `TOTP_REQUIRED`（400 + `totp_required: true`），前端据此弹出补输框——
+/// `TOTP_REQUIRED`（400 + `totp_required: true`），前端据此翻到第二步——
 /// 所以这里不能把它当成错误吞掉，原样透传。
 pub async fn login(
     State(state): State<Arc<AppState>>,
@@ -116,11 +116,15 @@ pub async fn login(
     // 恢复码也接受 `recovery_code` 这个更直白的字段名
     let recovery = field_opt_str(&body, "recovery_code").or_else(|| field_opt_str(&body, "recovery"));
     let remember = super::field_opt_bool(&body, "remember").unwrap_or(false);
+    // 二次验证用哪种码由客户端说明：动态码、邮箱验证码都是 6 位数字，
+    // 服务端分不清；不说就按动态码验
+    let method = field_opt_str(&body, "code_method").unwrap_or_default();
 
     match state
-        .login(
+        .login_with_method(
             &email,
             &password,
+            &method,
             totp.as_deref(),
             recovery.as_deref(),
             &rectx.device(),
@@ -163,6 +167,30 @@ pub async fn login(
             });
             (axum::http::StatusCode::BAD_REQUEST, Json(body)).into_response()
         }
+        Err(err) => error_response(err),
+    }
+}
+
+/// `POST /api/v1/auth/login/email-code` ← `{ "email": "…" }` — 公开。
+///
+/// 登录第二步的「改用邮箱验证码」。不管账号存不存在、开没开二次验证，都回同一句
+/// 「已发送」：这条路径最容易被拿来试探账号与二次验证状态，回答必须一致。
+pub async fn login_email_code(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let email = match field_str(&body, "email") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    match state.send_login_code(&email, &rectx.device()).await {
+        Ok(()) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "sent": true,
+            "message": "如果该账号开启了二次验证，验证码已发到邮箱",
+        }))),
         Err(err) => error_response(err),
     }
 }
@@ -227,6 +255,68 @@ pub async fn password_code(
             "resend_after": sent.resend_after,
             "debug_code": sent.debug_code,
         }))),
+        Err(err) => error_response(err),
+    }
+}
+
+/// `GET /api/v1/auth/password/link?token=…` — 公开。
+///
+/// 重置页先用它换一句「给哪个账号设密码」。邮箱是打了码的：这一页可能被旁人
+/// 瞄到，而链接本身就是凭据，不必把完整地址摊在屏幕上。
+pub async fn password_link_info(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    // 链接令牌是可以被猜错的，按「登录」这一档限流：猜的人多了也要挡住
+    if let Err(err) = state
+        .ensure_ip_allowed(rectx.ip.as_deref(), pixora_core::ipguard::scope::LOGIN)
+        .await
+    {
+        return error_response(err);
+    }
+    let token = query.get("token").map(String::as_str).unwrap_or_default();
+    match state.reset_link_info(token).await {
+        Ok(info) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "email": info.email,
+            "expires_at": info.expires_at,
+        }))),
+        Err(err) => error_response(err),
+    }
+}
+
+/// `POST /api/v1/auth/password/link` ← `{ "token": "pxr_…", "password": "…" }` — 公开。
+///
+/// 点邮件里的链接设新密码。令牌用一次就废；同样会踢掉全部会话并清 Cookie。
+pub async fn password_link_reset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let token = match field_str(&body, "token") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    let password = match field_str(&body, "password") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    if password.len() > 200 {
+        return bad_request("密码过长");
+    }
+
+    match state
+        .reset_password_by_token(&token, &password, &rectx.device())
+        .await
+    {
+        Ok(email) => with_cookies(
+            finish::<serde_json::Value>(Ok(serde_json::json!({ "ok": true, "email": email }))),
+            clear_cookies(&state),
+        ),
         Err(err) => error_response(err),
     }
 }

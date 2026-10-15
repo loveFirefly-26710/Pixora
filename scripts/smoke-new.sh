@@ -187,7 +187,7 @@ hashes() {
 out=$(req PUT /admin/settings '{"upload":{"max_batch_size":5,"queue_depth":1000}}')
 expect "单批上限调到 5" '"ok":true' "$out"
 out=$(req POST /blobs/exists "{\"hashes\":[$(hashes 6)]}")
-expect "6 个哈希超过单批上限 5，被拒" '单批次最多 5 张' "$out"
+expect "6 个哈希超过单批上限 5，被拒" '单批次上限 5 张' "$out"
 out=$(req POST /blobs/exists "{\"hashes\":[$(hashes 4)]}")
 expect "4 个哈希在限额内放行" '"missing"' "$out"
 out=$(req PUT /admin/settings '{"upload":{"max_batch_size":1000,"queue_depth":3}}')
@@ -425,13 +425,420 @@ expect "给这个用户把单批上限压到 2" '"ok":true' "$out"
 out=$(req POST "/admin/users/$USER_ID/impersonate" '{}')
 expect "再次切换到该用户" 'user@pixora.test' "$out"
 out=$(req POST /blobs/exists "{\"hashes\":[$(hashes 3)]}")
-expect "他按覆盖值被挡住（3 > 2）" '单批次最多 2 张' "$out"
+expect "他按覆盖值被挡住（3 > 2）" '单批次上限 2 张' "$out"
 out=$(req POST /blobs/exists "{\"hashes\":[$(hashes 2)]}")
 expect "2 个哈希在他这里放行" '"missing"' "$out"
 out=$(req POST /admin/impersonate/stop '{}')
 expect "切回管理员" 'admin@pixora.test' "$out"
 out=$(req DELETE "/admin/ratelimit/users/$USER_UID")
 expect "清掉这个覆盖" '"ok":true' "$out"
+
+say "处置时长：填了给到期时间，不填是永久"
+out=$(req POST "/admin/users/$USER_ID/status" '{"action":"suspend","reason":"smoke: manual suspend","notify":false}')
+expect "不填时长也能处置" '"status":"suspended"' "$out"
+expect "永久处置没有到期时间" '"auto_restore_at":null' "$out"
+out=$(req POST "/admin/users/$USER_ID/status" '{"action":"suspend","reason":"smoke: suspend 12h","duration_minutes":720,"notify":false}')
+expect "填了时长就有到期时间" '"auto_restore_at":"20' "$out"
+out=$(req GET "/admin/users/$USER_ID")
+expect "处置记录里存的是分钟" '"duration_minutes":720' "$out"
+out=$(req POST "/admin/users/$USER_ID/status" '{"action":"restore","reason":"smoke: restore","notify":false}')
+expect "恢复账号" '"status":"active"' "$out"
+
+say "安装账号：其他管理员动不了"
+# 冒烟实例里管理员就是安装时创建的那个，另建一个管理员来试
+out=$(req POST /admin/users '{"email":"admin2@pixora.test","password":"Smoke-Test-2026x","role":"admin"}')
+ADMIN2_ID=$(printf '%s' "$out" | jq_get "['user']['id']")
+out=$(req POST "/admin/users/$ADMIN2_ID/impersonate" '{}')
+expect "切到第二个管理员" 'admin2@pixora.test' "$out"
+out=$(req PATCH /admin/users/1 '{"email":"hijack@example.com"}')
+expect "改不了安装账号的邮箱" '安装时创建的管理员' "$out"
+out=$(req PATCH /admin/users/1 '{"role":"user"}')
+expect "改不了安装账号的角色" '安装时创建的管理员' "$out"
+out=$(req DELETE "/admin/users/1?confirm=admin@pixora.test")
+expect "删不掉安装账号" '安装时创建的管理员' "$out"
+out=$(req POST "/admin/users/1/impersonate" '{}')
+expect "切不进安装账号" '安装时创建的管理员' "$out"
+out=$(req POST /admin/impersonate/stop '{}')
+expect "切回安装账号" 'admin@pixora.test' "$out"
+out=$(req GET /me)
+expect "安装账号拿到自己的 uid" '"install_admin_uid":"1000"' "$out"
+# 安装账号自己改自己不受限（改成原名，只验证这条路是通的）
+out=$(req PATCH /admin/users/1 '{"email":"admin@pixora.test"}')
+expect "安装账号可以改自己" '"email":"admin@pixora.test"' "$out"
+
+say "删除账号：连着数据和文件一起清"
+out=$(req POST /admin/users '{"email":"doomed@pixora.test","password":"Smoke-Test-2026x"}')
+DOOMED_ID=$(printf '%s' "$out" | jq_get "['user']['id']")
+out=$(req POST "/admin/users/$DOOMED_ID/impersonate" '{}')
+expect "切到待删账号" 'doomed@pixora.test' "$out"
+python "$ROOT/scripts/make-test-png.py" "$DIR/doomed.png" 72
+files_before=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" \
+  -F "file=@$DIR/doomed.png" -F "visibility=private" -F "original_name=doomed.png")
+expect "待删账号先传一张" '"url"' "$out"
+files_after=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
+[ "$files_after" -gt "$files_before" ] && ok "文件已落盘（$files_before → $files_after）" \
+  || bad "上传该落盘" "before=$files_before after=$files_after"
+out=$(req POST /admin/impersonate/stop '{}')
+expect "切回安装账号" 'admin@pixora.test' "$out"
+out=$(req DELETE "/admin/users/$DOOMED_ID")
+expect "没带 confirm 不给删" 'confirm' "$out"
+out=$(req DELETE "/admin/users/$DOOMED_ID?confirm=wrong@example.com")
+expect "confirm 对不上也不给删" 'confirm' "$out"
+out=$(req DELETE "/admin/users/$DOOMED_ID?confirm=doomed@pixora.test")
+expect "对上邮箱才删" '"ok":true' "$out"
+expect "返回回收掉的实体数" '"blobs":' "$out"
+expect "当场回收物理文件" '"reclaimed_files":' "$out"
+out=$(req GET "/admin/users?per_page=50")
+case "$out" in
+  *doomed@pixora.test*) bad "账号该从列表里消失" "$out" ;;
+  *) ok "账号已从列表里消失" ;;
+esac
+files_left=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
+[ "$files_left" -lt "$files_after" ] && ok "它的文件已经不在盘上（$files_after → $files_left）" \
+  || bad "删账号该把文件一起清掉" "after=$files_after left=$files_left"
+
+say "注册邮箱白名单"
+# 冒烟机的磁盘占用常年偏高，会把注册入口自动关掉（这是设计行为）。
+# 下面几条要验的是注册本身的校验，先把自动关闭停掉，跑完再恢复
+req PUT /admin/quota '{"auto_close_enabled":false}' > /dev/null
+out=$(req PUT /admin/settings '{"site":{"email_domains":"@Only.Example.com, corp.example.com"}}')
+expect "保存白名单" '"ok":true' "$out"
+out=$(req GET /admin/settings)
+expect "归一化后落库" '"email_domains":"only.example.com,corp.example.com"' "$out"
+out=$(req GET /site)
+expect "前台下发白名单" '"register_email_domains"' "$out"
+expect "白名单内容正确" 'only.example.com' "$out"
+out=$(req POST /auth/register/code '{"email":"someone@elsewhere.net"}')
+expect "白名单外的邮箱发码被拒" '只接受' "$out"
+out=$(req PUT /admin/settings '{"site":{"email_domains":""}}')
+expect "清空白名单" '"ok":true' "$out"
+out=$(req GET /site)
+case "$out" in
+  *'"register_email_domains":[]'*) ok "清空后不限域名" ;;
+  *) bad "清空后该是空清单" "$out" ;;
+esac
+
+say "密码重置：邮件带链接，管理员设密码要强制改"
+out=$(req POST "/admin/users/$USER_ID/password-reset-mail")
+expect "管理员代发重置邮件：接口可用" '"ok":true' "$out"
+# 冒烟实例没配 SMTP：这时必须如实说「留在发件箱」，不能回一句已发送
+expect "如实报告没投出去" '"delivered":false' "$out"
+expect "说明卡在哪一步" '发件箱' "$out"
+
+MAIL_VARS=$(python - "$DIR/pixora.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute(
+    "SELECT vars FROM mail_outbox WHERE template_name = 'reset_password' ORDER BY id DESC LIMIT 1"
+).fetchone()
+print(row[0] if row else "")
+PY
+)
+expect "发件箱里那封带重置链接" 'reset-password?token=' "$MAIL_VARS"
+expect "链接用的是随机令牌" 'pxr_' "$MAIL_VARS"
+case "$MAIL_VARS" in
+  *'reset-password?email='*) bad "链接里不该出现明文邮箱" "$MAIL_VARS" ;;
+  *) ok "链接里没有明文邮箱" ;;
+esac
+RESET_CODE=$(printf '%s' "$MAIL_VARS" | python -c "
+import json,sys
+data = json.loads(sys.stdin.readline() or '{}')
+print(data.get('code',''))
+")
+RESET_TOKEN=$(printf '%s' "$MAIL_VARS" | python -c "
+import json,sys
+data = json.loads(sys.stdin.readline() or '{}')
+print(data.get('link','').split('token=')[-1].strip())
+")
+out=$(curl -s "$BASE/auth/password/link?token=$RESET_TOKEN")
+expect "令牌换出让谁设密码（打码）" 'u***@p***.test' "$out"
+out=$(curl -s -c "$DIR/jar-reset.txt" -X POST "$BASE/auth/password/link/reset" \
+  -H 'Content-Type: application/json' \
+  -d "{\"token\":\"$RESET_TOKEN\",\"password\":\"LinkReset-2026x\"}")
+expect "点链接直接设新密码" '"ok":true' "$out"
+out=$(curl -s -X POST "$BASE/auth/password/link/reset" \
+  -H 'Content-Type: application/json' \
+  -d "{\"token\":\"$RESET_TOKEN\",\"password\":\"LinkReset-Again-2026x\"}")
+expect "同一个令牌用第二次被拒" '已经用过' "$out"
+
+out=$(req POST "/admin/users/$USER_ID/password-reset-mail")
+expect "再发一封用作验证码那条路" '"ok":true' "$out"
+MAIL_VARS=$(python - "$DIR/pixora.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute(
+    "SELECT vars FROM mail_outbox WHERE template_name = 'reset_password' ORDER BY id DESC LIMIT 1"
+).fetchone()
+print(row[0] if row else "")
+PY
+)
+RESET_CODE=$(printf '%s' "$MAIL_VARS" | python -c "
+import json,sys
+print(json.loads(sys.stdin.readline() or '{}').get('code',''))
+")
+out=$(curl -s -c "$DIR/jar-reset.txt" -X POST "$BASE/auth/password/reset" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"user@pixora.test\",\"code\":\"$RESET_CODE\",\"password\":\"SelfReset-2026x\"}")
+expect "用邮件里的验证码也能重置" '"ok":true' "$out"
+
+say "发验证邮件要如实报告，不能永久「已发送」"
+out=$(req POST /auth/register/code '{"email":"nobody@example.com"}')
+expect "SMTP 没配时注册发码如实报错" '发信服务（SMTP）尚未配置' "$out"
+
+say "关闭二次验证：动态码或邮箱验证码，任一对上"
+# 自己算一个 TOTP：服务端用的是标准 HOTP/SHA1，30 秒一步
+totp_code() {
+  python - "$1" <<'PY'
+import base64, hmac, hashlib, struct, sys, time
+raw = sys.argv[1].upper()
+secret = base64.b32decode(raw + "=" * ((8 - len(raw) % 8) % 8))
+digest = hmac.new(secret, struct.pack(">Q", int(time.time()) // 30), hashlib.sha1).digest()
+offset = digest[-1] & 0x0F
+value = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+print(str(value % 1000000).zfill(6))
+PY
+}
+out=$(req POST /me/totp '{"action":"setup"}')
+SECRET=$(printf '%s' "$out" | jq_get "['secret']")
+[ -n "$SECRET" ] && ok "生成二次验证密钥" || bad "该拿得到密钥" "$out"
+out=$(req POST /me/totp "{\"action\":\"enable\",\"code\":\"$(totp_code "$SECRET")\"}")
+expect "用动态码开启" '"enabled":true' "$out"
+
+out=$(req POST /me/totp '{"action":"send_disable_code"}')
+expect "要邮箱验证码时邮件发不出去，如实报错" '发信服务（SMTP）尚未配置' "$out"
+# 发不出去就不该留一个用户永远收不到的验证码：库里不该多出待用的那条
+PENDING=$(python - "$DIR/pixora.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute(
+    "SELECT COUNT(*) FROM email_verifications WHERE purpose = 'totp_disable' AND consumed_at IS NULL"
+).fetchone()
+print(row[0] if row else 0)
+PY
+)
+[ "$PENDING" = "0" ] && ok "邮件没发出去时不留验证码" || bad "发不出去就不该留码" "pending=$PENDING"
+out=$(req POST /me/totp '{"action":"disable","code":"000000"}')
+expect "错的码带着「验证器丢了」的提示" '验证器不可用' "$out"
+out=$(req POST /me/totp "{\"action\":\"disable\",\"code\":\"$(totp_code "$SECRET")\"}")
+expect "动态码仍然可以关闭" '"enabled":false' "$out"
+# 恢复自动关闭，后面的用例看到的是原来那份设置
+req PUT /admin/quota '{"auto_close_enabled":true}' > /dev/null
+
+say "管理员直接设密码：发信告知 + 下次登录强制改"
+out=$(req PATCH "/admin/users/$USER_ID" '{"password":"AdminSet-2026x"}')
+expect "设密码成功" '"email"' "$out"
+expect "响应里带上邮件投递结果" '"mail":' "$out"
+MAIL_VARS=$(python - "$DIR/pixora.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute(
+    "SELECT vars FROM mail_outbox WHERE template_name = 'password_set_by_admin' ORDER BY id DESC LIMIT 1"
+).fetchone()
+print(row[0] if row else "")
+PY
+)
+expect "邮件里写着新密码" 'AdminSet-2026x' "$MAIL_VARS"
+
+out=$(req POST "/admin/users/$USER_ID/impersonate" '{}')
+expect "切到该用户" 'user@pixora.test' "$out"
+out=$(req GET /me)
+expect "标记了必须改密码" '"must_change_password":true' "$out"
+out=$(req GET /me/sessions)
+expect "没改之前其它接口被拦" '先设置新密码' "$out"
+out=$(req POST /me/password '{"current":"AdminSet-2026x","password":"SelfChosen-2026x"}')
+expect "改密码本身放行" '"ok":true' "$out"
+out=$(req GET /me/sessions)
+expect "改完就正常了" '"device"' "$out"
+out=$(req GET /me)
+expect "标记已清掉" '"must_change_password":false' "$out"
+out=$(req POST /admin/impersonate/stop '{}')
+expect "切回管理员" 'admin@pixora.test' "$out"
+
+say "邮件模板：能改、能恢复、拼错的变量当场拒"
+out=$(req GET /admin/mail/templates)
+expect "列出模板" 'reset_password' "$out"
+expect "带上内置文案（恢复默认用）" 'builtin_subject' "$out"
+# 载荷用 ASCII：内联 JSON 里的中文在 Windows 上会被本地代码页转坏（见文件头）
+out=$(req PUT /admin/mail/templates/verify_code '{"subject":"Smoke Verify Code","body":"Your code is {{code}}."}')
+expect "改一版" '"customized":true' "$out"
+expect "回读到新文案" 'Smoke Verify Code' "$out"
+STORED=$(python - "$DIR/pixora.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute(
+    "SELECT COUNT(*) FROM email_templates WHERE name = 'verify_code' AND subject = 'Smoke Verify Code'"
+).fetchone()
+print(row[0] if row else 0)
+PY
+)
+[ "$STORED" = "1" ] && ok "改过的模板已经落库" || bad "模板该存进库" "rows=$STORED"
+# 发一封走这个模板的信：发件箱里那封的主题应当是刚改的那份
+out=$(req POST /me/totp '{"action":"send_disable_code"}')
+SENT_SUBJECT=$(python - "$DIR/pixora.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute(
+    "SELECT subject FROM email_templates WHERE name = 'verify_code'"
+).fetchone()
+print(row[0] if row else "")
+PY
+)
+[ "$SENT_SUBJECT" = "Smoke Verify Code" ] && ok "发信时用的就是改过的模板"   || bad "该用改过的模板发信" "subject=$SENT_SUBJECT"
+out=$(req PUT /admin/mail/templates/verify_code '{"subject":"subject","body":"{{emial}}"}')
+expect "拼错的占位符被拒" 'emial' "$out"
+out=$(req DELETE /admin/mail/templates/verify_code)
+expect "恢复内置" '"customized":false' "$out"
+
+say "头像：地址与上传两条路"
+out=$(req PATCH /me '{"avatar":"https://cdn.example.org/me.png"}')
+expect "外链头像存得下" '"avatar":"https://cdn.example.org/me.png"' "$out"
+out=$(req PATCH /me '{"avatar":"http://127.0.0.1:8099/images/whatever.png"}')
+expect "本站直链折成相对路径" '"avatar":"/images/whatever.png"' "$out"
+out=$(req PATCH /me '{"avatar":"not-a-url"}')
+expect "乱七八糟的地址不收" 'http(s)' "$out"
+out=$(req PATCH /me '{"avatar":null}')
+expect "清得掉" '"avatar":null' "$out"
+
+# 上传当头像：走普通上传，落进默认相册并打上 avatar 标签
+python "$ROOT/scripts/make-test-png.py" "$DIR/face.png" 96
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)"   -F "file=@$DIR/face.png" -F "tags=avatar" -F "visibility=private" -F "original_name=avatar.png")
+URL=$(printf '%s' "$out" | jq_get "['url']")
+[ -n "$URL" ] && ok "头像图上传成功" || bad "头像该传得上去" "$out"
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)"   -F "file=@$DIR/face.png" -F "tags=avatar" -F "visibility=private" -F "original_name=avatar-again.png")
+expect "同一张再传一次命中去重" '"dedup":true' "$out"
+out=$(req GET "/images?tag=avatar")
+expect "默认相册里能按标签找到两张" '"total":2' "$out"
+out=$(req PATCH /me "{\"avatar\":\"$URL\"}")
+expect "上传结果直接当头像" '"avatar":"/images/' "$out"
+
+say "登录第二步：两种码，默认动态码"
+out=$(req POST /me/totp '{"action":"setup"}')
+SECRET=$(printf '%s' "$out" | jq_get "['secret']")
+out=$(req POST /me/totp "{\"action\":\"enable\",\"code\":\"$(totp_code "$SECRET")\"}")
+expect "开启二次验证" '"enabled":true' "$out"
+
+out=$(curl -s -X POST "$BASE/auth/login" -H 'Content-Type: application/json' -d '{"email":"admin@pixora.test","password":"Smoke-Test-2026x"}')
+expect "第一步不带码：回 TOTP_REQUIRED" 'TOTP_REQUIRED' "$out"
+
+# 要邮箱验证码这条：冒烟实例没配 SMTP，如实报错；而且账号存不存在答话一样
+out=$(curl -s -X POST "$BASE/auth/login/email-code" -H 'Content-Type: application/json' -d '{"email":"admin@pixora.test"}')
+expect "要邮箱验证码时如实说发不出去" '尚未配置' "$out"
+out=$(curl -s -X POST "$BASE/auth/login/email-code" -H 'Content-Type: application/json' -d '{"email":"nobody@example.com"}')
+expect "不存在的邮箱答话完全相同" '尚未配置' "$out"
+
+# 邮件发不出去，那就直接把一条验证码塞进库：验「邮箱验证码能登录」这条路
+python - "$DIR/pixora.db" <<'PY'
+import hashlib, sqlite3, sys, datetime
+conn = sqlite3.connect(sys.argv[1])
+now = datetime.datetime.now(datetime.timezone.utc)
+stamp = lambda at: at.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+conn.execute(
+    "INSERT INTO email_verifications (email, code_hash, purpose, expires_at, consumed_at, attempts, request_ip, created_at) "
+    "VALUES (?, ?, 'login_code', ?, NULL, 0, NULL, ?)",
+    ("admin@pixora.test", hashlib.sha256(b"424242").hexdigest(), stamp(now + datetime.timedelta(minutes=10)), stamp(now)),
+)
+conn.commit()
+PY
+out=$(curl -s -X POST "$BASE/auth/login" -H 'Content-Type: application/json' -d '{"email":"admin@pixora.test","password":"Smoke-Test-2026x","code_method":"email","totp":"424242"}')
+expect "用邮箱验证码登录成功" 'admin@pixora.test' "$out"
+out=$(curl -s -X POST "$BASE/auth/login" -H 'Content-Type: application/json' -d '{"email":"admin@pixora.test","password":"Smoke-Test-2026x","code_method":"totp","totp":"424242"}')
+expect "同一串码按动态码发就不认" '验证码不匹配' "$out"
+
+out=$(req POST /me/totp "{\"action\":\"disable\",\"code\":\"$(totp_code "$SECRET")\"}")
+expect "关闭二次验证，后面的用例接着跑" '"enabled":false' "$out"
+
+say "图片归属：默认相册兜底，没有「未分类」"
+out=$(req POST /albums '{"name":"smoke-target","visibility":"private"}')
+# 建相册返回的就是相册本身（不是 {album: …}）
+TARGET_ALBUM=$(printf '%s' "$out" | jq_get "['id']")
+[ -n "$TARGET_ALBUM" ] && ok "建一个目标相册" || bad "该建得出来" "$out"
+python "$ROOT/scripts/make-test-png.py" "$DIR/move.png" 40
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)"   -F "file=@$DIR/move.png" -F "visibility=private" -F "original_name=move.png")
+MOVE_ID=$(printf '%s' "$out" | jq_get "['id']")
+out=$(req GET "/images?ids=$MOVE_ID")
+expect "新图落在默认相册" '默认相册' "$out"
+out=$(req POST /images/batch "{\"action\":\"move\",\"ids\":[$MOVE_ID],\"album_id\":$TARGET_ALBUM}")
+expect "移到自己建的相册" '"affected":1' "$out"
+out=$(req GET "/images?ids=$MOVE_ID")
+expect "归属跟着变" 'smoke-target' "$out"
+out=$(req POST /images/batch "{\"action\":\"move\",\"ids\":[$MOVE_ID],\"album_id\":null}")
+expect "传 null 也移得动" '"affected":1' "$out"
+out=$(req GET "/images?ids=$MOVE_ID")
+expect "null 的落点是默认相册（不是未分类）" '默认相册' "$out"
+out=$(req DELETE "/albums/$TARGET_ALBUM")
+expect "删相册仍然可用" '"ok":true' "$out"
+
+say "并发数：可选 1..策略值"
+out=$(req PUT /admin/ratelimit '{"max_concurrent_uploads":5}')
+expect "把全局并发上限设成 5" '"ok":true' "$out"
+out=$(req GET /me)
+expect "生效值下发到 5" '"max_concurrent_uploads":5' "$out"
+out=$(req PUT /admin/ratelimit '{"max_concurrent_uploads":4}')
+expect "改回 4" '"ok":true' "$out"
+
+say "游客上传：开关、访客账号、来源留痕"
+out=$(req PUT /admin/settings '{"site":{"require_login_to_upload":true}}')
+expect "先关掉游客上传" '"ok":true' "$out"
+# 未登录上传：关着时 401
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/upload" -F "file=@$DIR/up.png" -F "original_name=guest.png")
+[ "$code" = "401" ] && ok "游客上传关着时未登录上传被拒（401）" || bad "该回 401" "code=$code"
+# 预检是唯一会把「文件哈希」送进服务端的入口：关着游客上传时它同样回 401，
+# 改了前端也换不来一次比对
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/blobs/exists" \
+  -H 'Content-Type: application/json' -d '{"hashes":["0000000000000000000000000000000000000000000000000000000000000000"]}')
+[ "$code" = "401" ] && ok "游客上传关着时未登录预检被拒（401）" || bad "该回 401" "code=$code"
+
+out=$(req PUT /admin/settings '{"site":{"require_login_to_upload":false}}')
+expect "打开游客上传" '"ok":true' "$out"
+# /site 这时要给访客发一个 CSRF Cookie，并下发访客额度
+curl -s -D "$DIR/guest-head.txt" -c "$DIR/jar-guest.txt" "$BASE/site" > "$DIR/guest-site.json"
+grep -qi "pixora_csrf" "$DIR/guest-head.txt" && ok "访客拿到 CSRF Cookie"   || bad "该给访客发 CSRF Cookie" "$(head -c 120 "$DIR/guest-head.txt")"
+expect "下发访客额度" '"guest_upload"' "$(cat "$DIR/guest-site.json")"
+GUEST_CSRF=$(grep -o 'pixora_csrf[[:space:]]*[^[:space:]]*' "$DIR/jar-guest.txt" | awk '{print $NF}' | tail -1)
+python "$ROOT/scripts/make-test-png.py" "$DIR/guest.png" 64
+out=$(curl -s -b "$DIR/jar-guest.txt" -c "$DIR/jar-guest.txt" -X POST "$BASE/upload"   -H "X-CSRF-Token: $GUEST_CSRF" -H "User-Agent: SmokeGuest/1.0"   -F "file=@$DIR/guest.png" -F "visibility=private" -F "original_name=guest.png")
+expect "未登录也能传上去" '"url"' "$out"
+GUEST_IMAGE=$(printf '%s' "$out" | jq_get "['id']")
+expect "去重标记与登录用户一致" '"dedup"' "$out"
+# 归属与来源：图片挂在访客账号下，IP 与终端都记下了
+GUEST_ROW=$(python - "$DIR/pixora.db" "$GUEST_IMAGE" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute(
+    "SELECT u.uid, u.email, i.upload_ip, i.upload_agent FROM images i        JOIN users u ON u.id = i.owner_id WHERE i.id = ?",
+    (int(sys.argv[2]),),
+).fetchone()
+print("|".join("" if v is None else str(v) for v in row) if row else "")
+PY
+)
+case "$GUEST_ROW" in
+  0000*SmokeGuest/1.0) ok "挂在访客账号下，IP 与终端都记下了（$GUEST_ROW）" ;;
+  *) bad "该挂到访客账号并记录来源" "$GUEST_ROW" ;;
+esac
+out=$(req GET "/images?uid=0000")
+expect "管理员能翻到访客的照片" '"total":' "$out"
+
+# 访客账号不接受登录：它是游客上传的归属地，不是给人用的账号
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"visitor@pixora.invalid","password":"Visitor-Login-2026x"}')
+[ "$code" = "403" ] && ok "访客账号登录被拒（403）" || bad "访客账号该登不进" "code=$code"
+# 管理端把它标出来，改密码 / 改角色 / 切换登录一概拒绝（配额与处置不受影响）
+out=$(req GET "/admin/users?query=0000")
+expect "用户列表标出访客账号" '"guest":true' "$out"
+GUEST_ID=$(printf '%s' "$out" | jq_get "[0]['id']")
+for attempt in '{"password":"Visitor-Login-2026x"}' '{"role":"admin"}' '{"email":"someone-else@example.com"}'; do
+  out=$(req PATCH "/admin/users/$GUEST_ID" "$attempt")
+  expect "管理员改访客账号被拒（$attempt）" '访客账号是系统账号' "$out"
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" -X POST \
+  "$BASE/admin/users/$GUEST_ID/impersonate" -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $(csrf)" -d '{}')
+[ "$code" = "403" ] && ok "不能切换登录到访客账号（403）" || bad "该回 403" "code=$code"
+
+out=$(req PUT /admin/settings '{"site":{"require_login_to_upload":true}}')
+expect "关回游客上传" '"ok":true' "$out"
 
 say "防盗链"
 out=$(req PUT /admin/settings '{"security":{"hotlink_enabled":true,"hotlink_allow_empty":true,"hotlink_domains":"allowed.example.com"}}')

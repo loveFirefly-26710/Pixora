@@ -7,4 +7,4 @@ pub mod smtp;
 pub mod template;
 
 pub use smtp::{MailConfig, MailError, MailSecurity, Mailer};
-pub use template::{render, render_subject, MailVars};
+pub use template::{placeholders, render, render_subject, spec, url_encode, MailVars, CATALOG};

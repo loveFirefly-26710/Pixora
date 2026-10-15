@@ -905,13 +905,16 @@ export async function render(ctx: PageContext): Promise<void> {
     const count = selectedCount();
     if (count === 0) return;
     const albums = state.albums?.albums ?? [];
+    // 没有「移出相册」这个选项：图片总得有归属，不指定就落在默认相册
     const selectEl = h(
       "select.f",
       null,
-      h("option", { value: "", text: "移出相册（未分类）" }),
       ...albums.map((album) => h("option", { value: String(album.id), text: album.name })),
     );
-    if (state.albumId !== null) selectEl.value = "";
+    // 默认相册排在最前（服务端保证它存在），选它＝回到默认相册
+    const fallback = albums.find((album) => album.slug === "default") ?? albums[0];
+    const elsewhere = albums.find((album) => album.id !== state.albumId);
+    selectEl.value = String(state.albumId === null ? (fallback?.id ?? "") : (elsewhere?.id ?? fallback?.id ?? ""));
 
     const handle = openModal({
       title: `移动 ${count} 张图片`,
@@ -924,6 +927,10 @@ export async function render(ctx: PageContext): Promise<void> {
           on: {
             click: async () => {
               const albumId = selectEl.value ? Number(selectEl.value) : null;
+              if (albumId === null) {
+                toastError(new Error("请选择目标相册"));
+                return;
+              }
               handle.close();
               try {
                 const affected = await runBatch("move", { album_id: albumId });
@@ -1125,7 +1132,7 @@ export async function render(ctx: PageContext): Promise<void> {
         line("尺寸", formatDimensions(item.width, item.height)),
         line("大小", formatBytes(item.size)),
         line("格式", item.ext.toUpperCase()),
-        line("相册", item.album_name ?? "未分类"),
+        line("相册", item.album_name ?? "默认相册"),
         line("上传", formatDateTime(item.upload_time)),
         line("可见性", item.visibility === "public" ? "公开" : "私有"),
         h("div", { style: { marginTop: "10px", color: "var(--muted)" }, text: "SHA-256" }),

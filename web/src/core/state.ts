@@ -63,6 +63,19 @@ export function isAdmin(): boolean {
   return state.user?.role === "admin";
 }
 
+/**
+ * 这个账号能不能被当前管理员操作。
+ *
+ * 安装时创建的管理员是这套部署的主钥匙：别的管理员不能改它、切进去用、
+ * 处置或删掉，它自己操作自己不受限。服务端按同一条规则拒，界面这里提前
+ * 把入口关掉，免得点了才吃一句报错。
+ */
+export function canOperateAccount(uid: string): boolean {
+  const installUid = state.user?.install_admin_uid ?? null;
+  if (!installUid || uid !== installUid) return true;
+  return uid === state.user?.uid;
+}
+
 export function addons(): { baseUrl: string; uploadPrefix: string } {
   return {
     baseUrl: state.site?.base_url ?? location.origin,

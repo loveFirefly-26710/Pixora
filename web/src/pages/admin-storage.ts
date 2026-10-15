@@ -187,15 +187,17 @@ function view(reload: () => void, data: StorageAdmin): Node[] {
         ),
       ),
     ),
-    // 卡片流：这几张卡片高度差得多（运行时路径 / 默认存储 / 分布 / 容量），
-    // 两两一行会把短的那张撑出大片空白
+    // 卡片流：这几张卡片高度差得多（默认存储 / 分布 / 容量 / 运行时路径），
+    // 两两一行会把短的那张撑出大片空白。
+    // 顺序也是排版的一部分：`columns` 是按 DOM 顺序往两列里灌的，把最短的
+    // 「运行时路径」排在最后，它落进右列下方那块空位，两列高度才接近
     h(
       "div.cardflow",
       null,
-      pathsCard(reload, data),
       defaultDriverCard(reload, data),
       distributionCard(reload, data),
       capacityCard(reload, data),
+      pathsCard(reload, data),
     ),
     backendsCard(reload, data),
   ];
@@ -413,8 +415,8 @@ function distributionCard(reload: () => void, data: StorageAdmin): HTMLElement {
     }),
     h("div.tip", {
       text:
-        "占用按「仍被引用的实体」算，含缩略图；同一份文件被多张图引用时只算一次。" +
-        "彻底删除的文件会先出现在「待回收」里，后台清理或点「立即回收」之后消失。",
+        "占用按仍被引用的实体算（含缩略图），同一份文件被多张图引用只算一次。" +
+        "彻底删除当场回收文件；远端删除失败的会留在「待回收」等后台重试。",
     }),
   );
 }

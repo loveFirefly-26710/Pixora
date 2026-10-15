@@ -66,6 +66,28 @@ function gridColumnsStyle(): string {
   return `--plaza-cols: ${clamped};`;
 }
 
+/**
+ * 广场没有内容时的占位提示，占满网格区并上下居中（`.empty.fill`）。
+ *
+ * 「一张公开图都没有」和「搜索没命中」是两件事：前者要说清广场现在是空的、
+ * 以及怎么让它有内容；后者只要提醒换个词。都落在网格区里，别留一排灰框。
+ */
+function emptyGridHint(query: PlazaQuery, loggedIn: boolean): HTMLElement {
+  const node =
+    query.q || query.tag
+      ? emptyState("🖼", "没有匹配的图片，请更换关键词。")
+      : emptyState(
+          "🖼",
+          "广场还没有公开图片",
+          h("div.tip", {
+            style: { margin: "0" },
+            text: loggedIn ? "上传一张，即可在广场展示。" : "登录后可上传自己的图片。",
+          }),
+        );
+  node.classList.add("fill");
+  return node;
+}
+
 export async function render(ctx: PageContext): Promise<void> {
   const query = readQuery(ctx);
   const user = currentUser();
@@ -112,8 +134,12 @@ export async function render(ctx: PageContext): Promise<void> {
 
   let loadFirstPage: () => Promise<void> = async () => {};
 
-  if (user) {
+  // 上传区：登录用户看得到；未登录的人只在站点开着「允许游客上传」时看到
+  // （上传会落到访客账号里，见 core/guest.rs）
+  const guestUpload = !user && (site?.guest_upload?.enabled ?? false);
+  if (user || guestUpload) {
     const panel = createUploadPanel({
+      guest: !user,
       onUploaded: () => {
         // 传完把列表刷回第一页：按时间排序时新图在最前面；
         // 随机排序下也刷一次——重新洗牌后新图有机会出现在第一屏，
@@ -215,13 +241,7 @@ export async function render(ctx: PageContext): Promise<void> {
 
       if (reset) grid.replaceChildren();
       if (currentPage === 1 && page.items.length === 0) {
-        // 广场空着时不摆占位提示：没有内容就是没有内容，「还没有公开图片」这类
-        // 文案只是噪音。搜索或标签没命中时才给一句说明，那才是要看的反馈
-        if (query.q || query.tag) {
-          grid.replaceChildren(emptyState("🖼", "没有匹配的图片，换个关键词试试。"));
-        } else {
-          grid.replaceChildren();
-        }
+        grid.replaceChildren(emptyGridHint(query, Boolean(user)));
       } else {
         for (const item of page.items) {
           grid.append(

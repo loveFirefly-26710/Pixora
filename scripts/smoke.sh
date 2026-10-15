@@ -495,7 +495,16 @@ DUP="$(api POST /api/v1/admin/users -H 'Content-Type: application/json' \
     -d '{"email":"smoke-user@example.com","password":"SmokeUser2026Abc"}')"
 expect_json "${DUP}" "d['error']['code']" "CONFLICT" "重复邮箱建号被拒"
 
-api DELETE "/api/v1/admin/users/${NEW_ID}" >/dev/null
+# 删账号要带上账号邮箱做二次确认：不带或带错都该被拒，只有对上才真删
+NO_CONFIRM="$(api DELETE "/api/v1/admin/users/${NEW_ID}")"
+expect_json "${NO_CONFIRM}" "d['error']['code']" "BAD_REQUEST" "不带 confirm 不给删账号"
+WRONG_CONFIRM="$(api DELETE "/api/v1/admin/users/${NEW_ID}?confirm=wrong@example.com")"
+expect_json "${WRONG_CONFIRM}" "d['error']['code']" "BAD_REQUEST" "confirm 对不上也不给删"
+STILL_THERE="$(api GET "/api/v1/admin/users/${NEW_ID}")"
+expect_json "${STILL_THERE}" "d['data']['user']['email']" "smoke-user@example.com" "两次拒绝之后账号还在"
+
+DELETED="$(api DELETE "/api/v1/admin/users/${NEW_ID}?confirm=smoke-user@example.com")"
+expect_json "${DELETED}" "d['data']['ok']" "True" "对上邮箱才真删"
 ROWS_AFTER="$(api GET /api/v1/admin/users)"
 expect_json "${ROWS_AFTER}" "d['meta']['total']" "1" "测试账号已删除，用户数回到 1"
 

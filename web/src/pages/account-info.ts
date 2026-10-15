@@ -9,7 +9,7 @@
  */
 
 import { ApiError, request } from "../core/api";
-import { h } from "../core/dom";
+import { h, mount } from "../core/dom";
 import {
   formatBytes,
   formatDate,
@@ -17,12 +17,15 @@ import {
   formatNumber,
   percent,
 } from "../core/format";
+import { confirmDialog } from "../core/modal";
 import type { PageContext } from "../core/router";
-import { updateUser } from "../core/state";
+import { loadMe, updateUser } from "../core/state";
+import { toastError, toastOk } from "../core/toast";
 import type { UserLimits, UserProfile } from "../core/types";
 import {
   badge,
   card,
+  field,
   pageHead,
   progressBar,
   qtip,
@@ -51,10 +54,15 @@ export async function render(ctx: PageContext): Promise<void> {
         h(
           "div.row",
           { style: { marginBottom: "14px" } },
+          avatarCard(payload.user, () => void load()),
           identityCard(payload.user),
-          usageCard(payload.user),
         ),
-        limitsCard(payload.user.limits),
+        h(
+          "div.row",
+          { style: { marginBottom: "14px" } },
+          usageCard(payload.user),
+          limitsCard(payload.user.limits),
+        ),
       );
     } catch (err) {
       body.replaceChildren(errorBlock(err, () => void load()));
@@ -62,6 +70,172 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   await load();
+}
+
+/**
+ * 头像卡：上传一张，或填一个图片地址。
+ *
+ * 上传走的是普通上传接口（落进默认相册、打上 `avatar` 标签），所以头像也是
+ * 图库里的正经一张图：能在相册里看到、占配额、走内容审核。服务端内容是
+ * 寻址的，同一张图再传一次会复用那份字节、只多一条引用——正是「已存在就
+ * 复制一份过来」的意思。
+ */
+function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
+  const preview = h("div.avatar-preview");
+  const paint = (url: string): void => {
+    if (url) {
+      mount(preview, h("img", { src: url, alt: "当前头像" }));
+    } else {
+      mount(preview, h("span", { text: (user.email[0] ?? "U").toUpperCase() }));
+    }
+  };
+  paint(user.avatar ?? "");
+
+  const urlInput = textInput({
+    value: user.avatar && /^https?:/.test(user.avatar) ? user.avatar : "",
+    mono: true,
+    placeholder: "https://example.com/me.png",
+  });
+
+  const fileInput = h("input", { type: "file", accept: "image/*", style: { display: "none" }, "aria-hidden": "true" });
+  const uploadBtn = h("button.btn.sm.pri", { type: "button", text: "上传图片" });
+  uploadBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (file) void uploadAvatar(file, uploadBtn, reload);
+  });
+
+  const saveUrl = h("button.btn.sm", { type: "button", text: "应用地址" });
+  saveUrl.addEventListener("click", async () => {
+    const value = urlInput.value.trim();
+    if (!value) {
+      toastError(new Error("请填写图片地址，或上传一张图片"));
+      urlInput.focus();
+      return;
+    }
+    await saveAvatar(saveUrl, value, reload);
+  });
+
+  const remove = h("button.btn.sm.dgr", { type: "button", text: "移除头像" });
+  remove.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "移除头像",
+      message: "仅解除头像引用；该图片仍保留在相册中。",
+      confirmText: "移除",
+      danger: true,
+    });
+    if (!ok) return;
+    await saveAvatar(remove, "", reload);
+  });
+
+  return card(
+    "头像",
+    h(
+      "div.flexline",
+      { style: { alignItems: "center", gap: "14px", flexWrap: "wrap" } },
+      preview,
+      h(
+        "div",
+        { style: { flex: "1 1 220px", minWidth: "200px" } },
+        h("div", { text: "建议使用正方形图片。上传后将存入「默认相册」，并标记 avatar 标签。" }),
+        h("div.tip", { style: { marginTop: "6px" }, text: "也可直接填写图片地址（外链或本站直链）。" }),
+      ),
+      h("div", { style: { flex: "0 0 auto", display: "flex", gap: "8px", flexWrap: "wrap" } }, uploadBtn, remove),
+      fileInput,
+    ),
+    h(
+      "div.row",
+      { style: { marginTop: "10px", alignItems: "flex-end" } },
+      h("div", { style: { flex: "1 1 260px" } }, field("图片地址", urlInput)),
+      h("div", { style: { flex: "0 0 auto", paddingBottom: "13px" } }, saveUrl),
+    ),
+  );
+}
+
+/** 保存头像地址。空串表示移除。 */
+async function saveAvatar(button: HTMLButtonElement, value: string, reload: () => void): Promise<void> {
+  button.disabled = true;
+  const label = button.textContent ?? "";
+  button.textContent = "保存中…";
+  try {
+    const payload = await request<{ avatar: string | null }>("/me", {
+      method: "PATCH",
+      json: { avatar: value },
+    });
+    updateUser({ avatar: payload.avatar });
+    toastOk(payload.avatar ? "头像已更新" : "头像已移除");
+    reload();
+  } catch (err) {
+    toastError(err);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+/**
+ * 上传头像：先在本机压到 256px 再传，然后拿回来的直链设为头像。
+ *
+ * 走的是普通上传接口，所以头像和相册里任何一张图是同一类东西：同一个默认
+ * 相册、配额一起算、内容审核一样过。相同内容再传一次不会重复占盘。
+ */
+async function uploadAvatar(file: File, button: HTMLButtonElement, reload: () => void): Promise<void> {
+  if (file.size > 20 * 1024 * 1024) {
+    toastError(new Error("头像图片不得超过 20 MiB，请压缩后重试"));
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "处理中…";
+  try {
+    const blob = await downscaleToSquare(file, 256);
+    const form = new FormData();
+    form.append("file", blob, "avatar.jpg");
+    // 不指定相册 = 落到用户的默认相册；标签固定成 avatar
+    form.append("tags", "avatar");
+    form.append("visibility", "private");
+    form.append("original_name", "avatar.jpg");
+    const uploaded = await request<{ url: string; dedup: boolean }>("/upload", { method: "POST", form });
+    await request("/me", { method: "PATCH", json: { avatar: uploaded.url } });
+    await loadMe();
+    toastOk(uploaded.dedup ? "该图片已存在于图库，已直接引用为头像" : "头像已上传并应用");
+    reload();
+  } catch (err) {
+    toastError(err);
+  } finally {
+    button.disabled = false;
+    button.textContent = "上传图片";
+  }
+}
+
+/** 本机裁剪成正方形并缩到 `size` 像素：头像是圆的，长方形留着也是被裁掉。 */
+async function downscaleToSquare(file: File, size: number): Promise<Blob> {
+  const bitmap: ImageBitmap | HTMLImageElement =
+    typeof createImageBitmap === "function"
+      ? await createImageBitmap(file)
+      : await new Promise<HTMLImageElement>((resolve, reject) => {
+          const image = new Image();
+          const url = URL.createObjectURL(file);
+          image.onload = () => resolve(image);
+          image.onerror = () => reject(new Error("图片无法读取，请更换后重试"));
+          image.src = url;
+        });
+
+  const width = bitmap instanceof HTMLImageElement ? bitmap.naturalWidth : bitmap.width;
+  const height = bitmap instanceof HTMLImageElement ? bitmap.naturalHeight : bitmap.height;
+  if (width <= 0 || height <= 0) throw new Error("图片无法读取，请更换后重试");
+
+  const side = Math.min(width, height);
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("浏览器不支持本地压缩，请改用图片地址");
+  context.drawImage(bitmap, (width - side) / 2, (height - side) / 2, side, side, 0, 0, size, size);
+  if (bitmap instanceof ImageBitmap) bitmap.close();
+
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
+  if (!blob) throw new Error("压缩失败，请改用图片地址");
+  return blob;
 }
 
 /** 身份卡：邮箱 / UID / 角色 / 状态 / 注册与最近登录时间。 */

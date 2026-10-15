@@ -66,6 +66,8 @@ export async function render(ctx: PageContext): Promise<void> {
   try {
     const albums = await loadAlbums();
     if (!user) {
+      // 路由本来就把未登录的人拦在门外（/upload 标了 auth）；这里再兜一句，
+      // 免得会话中途失效时页面只剩一片空白。游客上传不走这个页面——它归广场
       mount(
         bodyHost,
         h(
@@ -98,7 +100,7 @@ export async function render(ctx: PageContext): Promise<void> {
         qtip(
           "info",
           null,
-          "刷新页面会清空待上传清单（浏览器不允许把文件本身存下来）；上传设置（相册、标签、可见性、并发）会记住。传完的图片在「相册」页里，随时能复制直链。",
+          "刷新将清空待上传列表（浏览器无法保留文件本身）；相册、标签、可见性、并发设置会被记住。已上传的图片可在「相册」页复制直链。",
         ),
       ),
     );

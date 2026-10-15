@@ -13,6 +13,8 @@ use crate::error::Result;
 pub const SESSION_PREFIX: &str = "pxs_";
 /// API 令牌前缀。
 pub const API_PREFIX: &str = "px_live_";
+/// 重置链接令牌前缀。
+pub const RESET_PREFIX: &str = "pxr_";
 
 fn random_bytes(len: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
@@ -33,6 +35,15 @@ pub fn new_session_token() -> Result<String> {
 /// 新 API 令牌。只在生成时返回明文。
 pub fn new_api_token() -> Result<String> {
     Ok(format!("{API_PREFIX}{}", random_hex(24)?))
+}
+
+/// 新重置链接令牌。
+///
+/// 链接里带的是它，不是邮箱与验证码：那些是明文参数，转发一次链接就等于
+/// 把「谁的账号 + 当前有效的验证码」一起递了出去。令牌是随机数，库里也只存
+/// 哈希，用一次就废。
+pub fn new_reset_token() -> Result<String> {
+    Ok(format!("{RESET_PREFIX}{}", random_hex(32)?))
 }
 
 /// 新 CSRF 令牌（双提交 Cookie 用）。

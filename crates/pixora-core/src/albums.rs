@@ -3,8 +3,9 @@
 //! 相册是「用户 → 相册 → 图片」中间的那一层，`slug` 决定物理目录名，
 //! 所以新建时要净化：目录名要能跨平台安全落盘，也不能带出路径穿越。
 //!
-//! 删除相册**不删图片**：图片只是解除关联（移入「未分类」）。删相册顺手删图
-//! 是很多图床的默认行为，也是最容易造成数据损失的按钮，这里刻意不这么做。
+//! 删除相册**不删图片**：相册与其中的图片一起进回收站，保留期内可整份恢复。
+//! 「删相册顺手删图」是很多图床的默认行为，也是最容易造成数据损失的按钮，
+//! 这里刻意不这么做。
 
 use chrono::Utc;
 use pixora_repo::model::{visibility, Album, User};
@@ -175,6 +176,25 @@ impl AppState {
     /// 只是图片标记成「随相册删除」，恢复相册时只带回这一批。
     ///
     /// 回收站关着（保留 0 天）时直接彻底删：相册行与其中的图片一起消失。
+    /// 把没有归属的图片收进各自的默认相册。返回收编的张数。
+    ///
+    /// 「未分类」这个状态已经取消（移动对话框里没有「移出相册」了），但早期
+    /// 版本留下过 `album_id` 为空的行。默认相册不存在就顺手建一个——它本来就是
+    /// 「上传不指定相册」的落脚点。
+    pub async fn attach_orphan_images(&self) -> Result<u64> {
+        let owners = self.repo.owners_with_unattached_images().await?;
+        let mut total = 0u64;
+        for owner_id in owners {
+            let album = self.repo.insert_default_album(owner_id, "默认相册").await?;
+            let moved = self.repo.attach_images_to_album(owner_id, album.id).await?;
+            if moved > 0 {
+                tracing::info!(owner_id, moved, "把没有归属的图片收进默认相册");
+            }
+            total += moved;
+        }
+        Ok(total)
+    }
+
     pub async fn delete_album(&self, viewer: &Viewer, album_id: i64) -> Result<i64> {
         let album = self.require_owned_album(viewer, album_id).await?;
         // 默认相册是「上传不指定相册」的落脚点，删掉之后没有重建它的入口，
@@ -501,6 +521,8 @@ mod tests {
             login_fail_count: 0,
             locked_until: None,
             auto_unsuspend_at: None,
+            must_change_password: false,
+            avatar: None,
             created_at: pixora_repo::model::now(),
             last_login_at: None,
             last_login_ip: None,

@@ -935,16 +935,19 @@ impl AppState {
         }
     }
 
-    /// 到期的自动暂停：把账号放回 active。
+    /// 到期的临时处置：把账号放回 active。
     ///
     /// 每个鉴权入口都会先调一次，所以「到期」这个动作不需要另外的定时任务——
-    /// 用户下次访问就是恢复的时刻。手工暂停（`auto_unsuspend_at` 为空）不受影响。
+    /// 用户下次访问就是恢复的时刻。管理员手填了时长的暂停/封禁与内容审核的
+    /// 自动暂停走同一条路；没填时长的（`auto_unsuspend_at` 为空）是永久处置，
+    /// 只能人工解封。
     pub async fn lift_expired_suspension(
         &self,
         user: &pixora_repo::model::User,
     ) -> Option<pixora_repo::model::User> {
+        use pixora_repo::model::status;
         let until = user.auto_unsuspend_at?;
-        if user.status != pixora_repo::model::status::SUSPENDED {
+        if user.status != status::SUSPENDED && user.status != status::BANNED {
             return None;
         }
         if until > chrono::Utc::now() {
@@ -973,7 +976,7 @@ impl AppState {
                 user.id,
                 None,
                 "auto_unsuspend",
-                Some("内容审核自动暂停到期"),
+                Some("处置到期，账号已自动恢复"),
                 &serde_json::json!({ "until": until.to_rfc3339() }),
                 false,
                 now,
@@ -983,11 +986,11 @@ impl AppState {
             crate::audit::actions::ACCOUNT_RESTORE,
             Some(user.id),
             &user.uid,
-            serde_json::json!({ "auto": true, "reason": "内容审核暂停到期" }),
+            serde_json::json!({ "auto": true, "reason": "处置到期" }),
             None,
         )
         .await;
-        tracing::info!(uid = %user.uid, "内容审核自动暂停已到期，账号已恢复");
+        tracing::info!(uid = %user.uid, "临时处置已到期，账号已恢复");
 
         self.repo.find_user_by_id(user.id).await.ok().flatten()
     }

@@ -427,6 +427,24 @@ pub async fn session_cookies(
     headers
 }
 
+/// 单独发一个 CSRF Cookie。
+///
+/// 游客上传也要过双提交校验，可访客没有会话、也就没有随会话下发的令牌，
+/// 所以 `/site` 会补一个。它本身不授权任何东西，只是「同一个浏览器」的凭据。
+pub fn csrf_cookie(token: &str, secure_cookies: bool) -> String {
+    let secure = if secure_cookies { "; Secure" } else { "" };
+    format!("{CSRF_COOKIE}={token}; Path=/; SameSite=Lax{secure}")
+}
+
+/// 把一串已经拼好的 Set-Cookie 值包成响应头。
+pub fn cookie_headers(cookie: String) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        headers.append(header::SET_COOKIE, value);
+    }
+    headers
+}
+
 /// 清空两个 Cookie。
 pub fn clear_cookies(state: &AppState) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -657,6 +675,8 @@ mod tests {
             login_fail_count: 0,
             locked_until: None,
             auto_unsuspend_at: None,
+            must_change_password: false,
+            avatar: None,
             created_at: Utc::now(),
             last_login_at: None,
             last_login_ip: None,

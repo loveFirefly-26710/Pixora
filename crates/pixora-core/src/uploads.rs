@@ -41,6 +41,9 @@ pub struct UploadInput {
     /// 客户端算好的哈希（可选）
     pub client_sha256: Option<String>,
     pub content_type: Option<String>,
+    /// 上传来源：IP 与终端。访客上传靠它留痕，登录用户顺手也记
+    pub upload_ip: Option<String>,
+    pub upload_agent: Option<String>,
 }
 
 impl UploadInput {
@@ -52,7 +55,17 @@ impl UploadInput {
             original_name: original_name.into(),
             client_sha256: None,
             content_type: None,
+            upload_ip: None,
+            upload_agent: None,
         }
+    }
+
+    /// 记下这次上传的来源（路由从请求上下文里取）。
+    pub fn with_origin(mut self, ip: Option<&str>, agent: Option<&str>) -> Self {
+        self.upload_ip = ip.map(str::to_string);
+        // UA 可能很长，留 255 就够认出「哪个浏览器 / 客户端」
+        self.upload_agent = agent.map(|value| value.chars().take(255).collect::<String>());
+        self
     }
 
     fn normalized_visibility(&self) -> String {
@@ -282,7 +295,7 @@ impl AppState {
         let limits = self.effective_upload_limits(user).await?;
         if limits.max_batch > 0 && hashes.len() as i64 > limits.max_batch {
             return Err(AppError::bad_request(format!(
-                "单批次最多 {} 张（单批次最大张数），这次预检了 {} 个；请分批上传",
+                "单批次上限 {} 张（单批次最大张数），本次预检 {} 个；请分批上传",
                 limits.max_batch,
                 hashes.len()
             )));
@@ -291,7 +304,7 @@ impl AppState {
         let upload_settings = self.settings.upload().await?;
         if upload_settings.queue_depth > 0 && hashes.len() as i64 > upload_settings.queue_depth {
             return Err(AppError::bad_request(format!(
-                "单次最多预检 {} 个文件（队列深度阈值），这次是 {} 个；请分批上传",
+                "单次最多预检 {} 个文件（队列深度阈值），本次 {} 个；请分批上传",
                 upload_settings.queue_depth,
                 hashes.len()
             )));
@@ -428,6 +441,10 @@ impl AppState {
                         "size": outcome.size,
                         "ext": outcome.ext,
                         "storage": outcome.storage_type,
+                        // 访客上传落到访客账号上：审计里标出来，
+                        // 翻记录时才分得清哪些是游客传的
+                        "guest": user.uid == crate::guest::GUEST_UID,
+                        "agent": input.upload_agent,
                     }),
                     ip,
                 )
@@ -568,6 +585,8 @@ impl AppState {
                     original_name: input.original_name.clone(),
                     title: None,
                     visibility: input.normalized_visibility(),
+                    upload_ip: input.upload_ip.clone(),
+                    upload_agent: input.upload_agent.clone(),
                 },
                 size,
                 &input.tags,
