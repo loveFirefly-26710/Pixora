@@ -16,6 +16,7 @@ import { ApiError, request } from "../core/api";
 import { h, mount } from "../core/dom";
 import { formatBytes, formatNumber, parseSize } from "../core/format";
 import { confirmDialog, promptDialog } from "../core/modal";
+import { openMailTemplates } from "./mail-templates";
 import type { PageContext } from "../core/router";
 import { toastError, toastOk } from "../core/toast";
 import { currentUser, loadMe, loadSite } from "../core/state";
@@ -93,6 +94,8 @@ interface SettingsDraft {
   recycleRetention: HTMLInputElement;
   requireLogin: boolean;
   registerEnabled: boolean;
+  /** 允许注册的邮箱域名白名单，逗号分隔；空 = 不限 */
+  emailDomains: HTMLInputElement;
   maxFileBytes: HTMLInputElement;
   maxBatchSize: HTMLInputElement;
   maxPixels: HTMLInputElement;
@@ -215,6 +218,11 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     }),
     requireLogin: data.site.require_login_to_upload,
     registerEnabled: data.site.register_enabled,
+    emailDomains: textInput({
+      value: data.site.email_domains ?? "",
+      mono: true,
+      placeholder: "example.com, corp.example.com",
+    }),
     maxFileBytes: textInput({ value: formatBytes(data.upload.max_file_bytes), mono: true }),
     maxBatchSize: textInput({ value: String(data.upload.max_batch_size), type: "number", mono: true }),
     maxPixels: textInput({ value: String(Math.round(data.upload.max_pixels / 10000)), type: "number", mono: true }),
@@ -381,7 +389,7 @@ function siteCard(draft: SettingsDraft): HTMLElement {
     field(
       "回收站保留天数",
       draft.recycleRetention,
-      "删除的图片与相册先留在回收站，这个天数内可以恢复；到期由后台彻底删除。填 0 表示关闭回收站（删除即彻底删除）。",
+      "删除的图片与相册先留在回收站，这个天数内可恢复；到期由后台彻底删除。填 0 关闭回收站。",
     ),
     switchRow("拒绝游客上传", "上传必须登录", draft.requireLogin, (next) => {
       draft.requireLogin = next;
@@ -389,6 +397,11 @@ function siteCard(draft: SettingsDraft): HTMLElement {
     switchRow("允许用户注册", "关闭后只能由管理员创建账号", draft.registerEnabled, (next) => {
       draft.registerEnabled = next;
     }),
+    field(
+      "允许注册的邮箱域名",
+      draft.emailDomains,
+      "逗号分隔，例如 example.com, corp.example.com；子域自动算命中。留空表示不限域名",
+    ),
     h("div.tip", { text: "注册相关的默认配额和容量阈值在「配额与容量」里配。" }),
   );
 }
@@ -472,14 +485,14 @@ function uploadCard(
       field(
         "单批次最大张数",
         draft.maxBatchSize,
-        "一次选择最多收多少张；上传页按它截断，服务端也在批量预检那一步按它卡条数。0 表示不限",
+        "一次选择最多收多少张；上传页按它截断，服务端也在预检那一步卡条数。0 = 不限",
       ),
     ),
     h(
       "div.row",
       null,
       field("像素上限", unitInput(draft.maxPixels, "万"), "超出的图片直接拒绝，防止解压炸弹"),
-      field("单用户并发上传数", rateDraft.maxConcurrent, "客户端队列同时传几张；与用户额度里的同一项"),
+      field("单用户并发上传数", rateDraft.maxConcurrent, "上传页同时传几张；与用户额度里的同一项"),
     ),
     h(
       "div.row",
@@ -490,7 +503,7 @@ function uploadCard(
     field(
       "队列深度阈值",
       draft.queueDepth,
-      "同时堆在队列里与在途的上传任务上限；超过就回 429，客户端队列也按它限长。0 表示不限",
+      "队列与在途任务的上限；超过回 429，客户端队列也按它限长。0 = 不限",
     ),
     h("div.tip", {
       text: `当前队列深度 ${formatNumber(rate.queue_depth.current)}，阈值 ${formatNumber(
@@ -502,8 +515,7 @@ function uploadCard(
     result,
     h("div.tip", {
       text:
-        "勾选即生效，无需重启，也不用点保存。JPG 即 JPEG（库里统一存成 jpg）。" +
-        "上传页顶部那句「支持 …」按这份清单生成，改完立刻跟着变，不用刷新页面。",
+        "勾选即生效，不用保存也不用重启。JPG 即 JPEG。上传页那句「支持 …」按这份清单生成，改完立刻跟着变。",
     }),
   );
 }
@@ -576,7 +588,7 @@ function securityCard(draft: SettingsDraft): HTMLElement {
     field(
       "允许的来源",
       draft.hotlinkDomains,
-      "逗号分隔，例如 blog.example.com, cdn.example.com；子域自动算命中。留空表示只放本站",
+      "逗号分隔，例如 blog.example.com, cdn.example.com；子域自动算命中。留空只放本站",
     ),
     h("div.tip", {
       text: "只影响直链与缩略图；站内页面的图片不受影响。开启前先确认没有第三方站正在引用你的图。",
@@ -620,7 +632,7 @@ function moderationCard(draft: SettingsDraft): HTMLElement {
       );
     } else if (provider === "tencent") {
       providerTips.textContent =
-        "腾讯云图片内容安全：需要 SecretId 与 SecretKey；Region 留空默认 ap-guangzhou。";
+        "腾讯云图片内容安全：填 SecretId 与 SecretKey；Region 留空默认 ap-guangzhou。";
       rows.push(
         h(
           "div.row",
@@ -637,7 +649,7 @@ function moderationCard(draft: SettingsDraft): HTMLElement {
       );
     } else {
       providerTips.textContent =
-        "阿里云内容安全：需要 AccessKeyId 与 AccessKeySecret；Region 留空默认 cn-shanghai。";
+        "阿里云内容安全：填 AccessKeyId 与 AccessKeySecret；Region 留空默认 cn-shanghai。";
       rows.push(
         h(
           "div.row",
@@ -708,7 +720,7 @@ function moderationCard(draft: SettingsDraft): HTMLElement {
       },
     ),
     h("div.tip", {
-      text: "密钥加密存储，界面只显示「已配置」。拦截与自动暂停都会写审计日志，动作名 moderation_block / moderation_ban。",
+      text: "密钥加密存储，界面只显示「已配置」。拦截与自动暂停都写审计日志（moderation_block / moderation_ban）。",
     }),
   );
 }
@@ -761,6 +773,11 @@ function thumbCard(draft: SettingsDraft): HTMLElement {
 function mailCard(draft: SettingsDraft): HTMLElement {
   const result = h("div", { style: { marginTop: "8px" } });
   const testBtn = h("button.btn.sm", { type: "button", text: "测试发信" });
+  const templateBtn = h("button.btn.sm", {
+    type: "button",
+    text: "管理邮件模板",
+    on: { click: () => openMailTemplates() },
+  });
 
   testBtn.addEventListener("click", async () => {
     const fallback = draft.fromEmail.value.trim() || currentUser()?.email || "";
@@ -805,10 +822,10 @@ function mailCard(draft: SettingsDraft): HTMLElement {
     switchRow("反临时邮箱 · 第三方校验 API", "需在服务端配置密钥，命中即拒", draft.thirdPartyCheck, (next) => {
       draft.thirdPartyCheck = next;
     }),
-    h("div.flexline", { style: { marginTop: "10px" } }, testBtn),
+    h("div.flexline", { style: { marginTop: "10px" } }, testBtn, templateBtn),
     result,
     h("div.tip", {
-      text: "这一栏只有改动过才会提交：没配邮件也不影响保存其他设置。要让邮箱验证真正发得出去，SMTP 服务器、发信账号、密码、发信邮箱四项都要填对。",
+      text: "只有改动过才会提交，没配邮件也不影响其他设置。要让验证邮件真的发得出去，下面四项都要填对。",
     }),
   );
 }
@@ -893,7 +910,7 @@ function appearanceCard(
     ),
     fileInput,
     h("div.tip", {
-      text: "上传的图会先在本机压到 1920px 再存进数据库（不落文件系统），上传完立刻生效。地址改完要点下面的「保存设置」。",
+      text: "上传的图先在本机压到 1920px 再存进数据库，不落文件系统，上传完立刻生效。换了地址记得点「保存设置」。",
     }),
   );
 }
@@ -1094,6 +1111,7 @@ async function save(
       recycle_retention_days: Math.min(365, Math.max(0, intOf(draft.recycleRetention))),
       require_login_to_upload: draft.requireLogin,
       register_enabled: draft.registerEnabled,
+      email_domains: draft.emailDomains.value.trim(),
     },
     upload: {
       max_file_bytes: maxFile,

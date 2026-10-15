@@ -239,6 +239,10 @@ pub struct User {
     pub locked_until: Option<DateTime<Utc>>,
     /// 内容审核自动暂停的到期时间。到点自动恢复；管理员手工暂停的行这里为空。
     pub auto_unsuspend_at: Option<DateTime<Utc>>,
+    /// 管理员直接设过密码：下次登录必须自己改一个。没改之前只放行 /me 与改密码本身
+    pub must_change_password: bool,
+    /// 头像：站内相对路径（`/images/x.png`）或外链。空 = 没设，界面回落到邮箱首字母
+    pub avatar: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_login_at: Option<DateTime<Utc>>,
     pub last_login_ip: Option<String>,
@@ -247,8 +251,8 @@ pub struct User {
 impl User {
     pub const COLUMNS: &'static str = "id, uid, email, email_verified, password_hash, role, status, \
          status_reason, status_changed_at, status_changed_by, totp_secret, totp_enabled, \
-         quota_bytes, used_bytes, login_fail_count, locked_until, auto_unsuspend_at, created_at, \
-         last_login_at, last_login_ip";
+         quota_bytes, used_bytes, login_fail_count, locked_until, auto_unsuspend_at, \
+         must_change_password, avatar, created_at, last_login_at, last_login_ip";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -269,6 +273,8 @@ impl User {
             login_fail_count: get_i32(row, "login_fail_count")?,
             locked_until: get_opt_ts(row, "locked_until")?,
             auto_unsuspend_at: get_opt_ts(row, "auto_unsuspend_at")?,
+            must_change_password: get_bool(row, "must_change_password")?,
+            avatar: get_opt_str(row, "avatar")?,
             created_at: get_ts(row, "created_at")?,
             last_login_at: get_opt_ts(row, "last_login_at")?,
             last_login_ip: get_opt_str(row, "last_login_ip")?,
@@ -307,6 +313,9 @@ pub struct UserSummary {
     pub id: i64,
     pub uid: String,
     pub email: String,
+    /// 邮箱验证状态：后台详情页要据此显示徽章（以前没带这个字段，
+    /// 界面上一律显示「未验证」，把已激活的账号也说成没验证）
+    pub email_verified: bool,
     pub role: String,
     pub status: String,
     pub quota_bytes: i64,
@@ -324,6 +333,7 @@ impl UserSummary {
             id: get_i64(row, "id")?,
             uid: get_str(row, "uid")?,
             email: get_str(row, "email")?,
+            email_verified: get_bool(row, "email_verified")?,
             role: get_str(row, "role")?,
             status: get_str(row, "status")?,
             quota_bytes: get_i64(row, "quota_bytes")?,
@@ -1303,6 +1313,8 @@ mod tests {
             login_fail_count: 0,
             locked_until: None,
             auto_unsuspend_at: None,
+            must_change_password: false,
+            avatar: None,
             created_at: now(),
             last_login_at: None,
             last_login_ip: None,

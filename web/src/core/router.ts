@@ -145,6 +145,14 @@ async function dispatch(): Promise<void> {
     outlet.append(renderForbidden());
     return;
   }
+  // 管理员直接设过密码的账号：改掉之前哪儿也去不了，服务端同样只放行
+  // /me 与改密码。放在这里而不是各页面自己判——登录成功后那一次跳转
+  // 也走 dispatch，所以「登录完先落地再被 403 弹回来」这种事不会发生。
+  // 不限于需要登录的路由：带标记的人落在广场也是不能用的状态
+  if (path !== "/password-required" && getState().user?.must_change_password) {
+    navigate("/password-required", { replace: true });
+    return;
+  }
   // 会话与站点信息没到位时不渲染页面，避免闪一下空架子
   if (!getState().ready && route.auth) {
     outlet.append(renderLoading());

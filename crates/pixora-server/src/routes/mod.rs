@@ -104,6 +104,27 @@ pub async fn require_user(
     ip: Option<&str>,
     method: &Method,
 ) -> Result<Authenticated, Response> {
+    let auth = require_user_allow_pending(state, headers, ip, method).await?;
+    // 管理员直接设过密码的账号，在改掉之前只放行 /me 与改密码本身（那两个
+    // 入口走 require_user_allow_pending）。拦在这里而不是逐个端点加判断：
+    // 默认拒绝，漏掉一处也不会留下口子
+    if auth.user.must_change_password {
+        return Err(error_response(AppError::forbidden(
+            "管理员已重置你的密码，请先设置新密码后再继续使用",
+        )));
+    }
+    Ok(auth)
+}
+
+/// 与 `require_user` 相同，但不拦「必须改密码」的账号。
+///
+/// 只给 /me（前端要知道为什么被拦）与 /me/password（改密码本身）用。
+pub async fn require_user_allow_pending(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    ip: Option<&str>,
+    method: &Method,
+) -> Result<Authenticated, Response> {
     let auth = match authenticate_optional(state, headers, ip).await {
         Ok(Some(auth)) => auth,
         Ok(None) => return Err(error_response(AppError::Unauthorized)),
@@ -127,20 +148,28 @@ pub async fn require_admin(
     path: &str,
 ) -> Result<Authenticated, Response> {
     let auth = require_user(state, headers, ip, method).await?;
-    if !auth.is_admin() {
+    // 两种拒绝：那个不接受登录的访客账号（见 core/guest.rs），以及角色不是管理员
+    // 的普通用户。访客排在前面判，是为了让「后台只认人的账号」这件事不依赖于
+    // 「访客账号恰好没有管理员角色」——给它改了角色也进不来
+    let denial = if pixora_core::guest::is_guest(&auth.user) {
+        Some("访客账号不能进入管理后台")
+    } else if !auth.is_admin() {
+        Some("需要管理员权限")
+    } else {
+        None
+    };
+    if let Some(reason) = denial {
         let target = auth.user.uid.clone();
         state
             .audit(
                 pixora_repo::repo::audit::AuditEntry::new(ADMIN_DENIED)
                     .actor(Some(auth.user.id))
                     .target(target)
-                    .detail(serde_json::json!({ "path": path }))
+                    .detail(serde_json::json!({ "path": path, "reason": reason }))
                     .ip(ip.map(str::to_string)),
             )
             .await;
-        return Err(error_response(AppError::Forbidden(
-            "需要管理员权限".into(),
-        )));
+        return Err(error_response(AppError::Forbidden(reason.to_string())));
     }
     Ok(auth)
 }
@@ -338,6 +367,10 @@ pub async fn user_view(state: &Arc<AppState>, user: &User) -> pixora_core::Resul
         "last_login_at": user.last_login_at.map(crate::http::rfc3339),
         "last_login_ip": user.last_login_ip,
         "totp_enabled": user.totp_enabled,
+        // 头像：站内相对路径或外链，界面直接塞进 <img src>
+        "avatar": user.avatar,
+        // 管理员设过密码、用户还没自己改：前端据此把人送到改密码页
+        "must_change_password": user.must_change_password,
         "login_alert": login_alert,
         "new_device_guard": new_device_guard,
         "quota_bytes": user.quota_bytes,
@@ -364,6 +397,13 @@ pub async fn user_view(state: &Arc<AppState>, user: &User) -> pixora_core::Resul
             "max_concurrent_uploads": upload.max_concurrent_uploads,
             "queue_depth": state.settings.upload().await?.queue_depth,
             "unlimited": limits.unlimited,
+        },
+        // 安装时创建的那个管理员账号。界面据此把对它的操作入口关掉（服务端本来
+        // 也会拒）；普通用户拿到的是 null
+        "install_admin_uid": if user.is_admin() {
+            state.install_admin_uid().await.ok().flatten()
+        } else {
+            None
         },
     }))
 }
@@ -559,6 +599,22 @@ mod tests {
     fn assert_error(body: &serde_json::Value, code: &str) {
         assert_eq!(body["error"]["code"], code, "错误码要与契约一致：{body}");
         assert!(body["data"].is_null(), "失败响应里 data 必须是 null：{body}");
+    }
+
+    fn patch_json(uri: &str, cookie: Option<&str>, csrf: Option<&str>, body: serde_json::Value) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("PATCH")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(cookie) = cookie {
+            builder = builder.header("cookie", cookie);
+        }
+        if let Some(csrf) = csrf {
+            builder = builder.header("x-csrf-token", csrf);
+        }
+        builder
+            .body(Body::from(body.to_string()))
+            .expect("构造请求")
     }
 
     #[tokio::test]
@@ -760,6 +816,159 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = body_json(response).await;
         assert_error(&body, "UNAUTHORIZED");
+    }
+
+    /// 关着游客上传时，未登录的批量预检也回 401。
+    ///
+    /// 预检是唯一会把「文件哈希」送进服务端的入口（客户端本地算完再来问哪些已有）。
+    /// 它跟着 `/upload` 一起挡在鉴权后面，改前端代码也换不来一次比对——
+    /// 既不给「某个文件在不在站里」的探测口子，也不让请求白占服务端。
+    #[tokio::test]
+    async fn preflight_needs_a_token_when_guest_upload_is_off() {
+        let (state, _dir) = test_state().await;
+        assert!(
+            !state.guest_upload_enabled().await.expect("读站点设置"),
+            "默认就是「拒绝游客上传」，这个用例的前提是它关着"
+        );
+
+        let response = app(state)
+            .oneshot(post_json(
+                "/api/v1/blobs/exists",
+                None,
+                None,
+                serde_json::json!({ "hashes": ["a".repeat(64)] }),
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = body_json(response).await;
+        assert_error(&body, "UNAUTHORIZED");
+    }
+
+    /// 访客账号不接受登录：它是游客上传的归属地，不是给人用的账号。
+    #[tokio::test]
+    async fn guest_account_cannot_log_in() {
+        let (state, _dir) = test_state().await;
+        let guest = state.ensure_guest_user().await.expect("访客账号");
+
+        let response = app(state)
+            .oneshot(post_json(
+                "/api/v1/auth/login",
+                None,
+                None,
+                serde_json::json!({
+                    "email": guest.email,
+                    "password": "Visitor-Login-2026x",
+                }),
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = body_json(response).await;
+        assert_error(&body, "FORBIDDEN");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("访客账号"),
+            "拒绝的理由要写明白：{body}"
+        );
+    }
+
+    /// 管理员也打不开这扇门：改密码、改邮箱、改成管理员、切进去用，全都拒绝。
+    ///
+    /// 这几样是「让访客账号变成能用的账号」的全部途径（密码重置的两条路都收尾在
+    /// `apply_new_password`，那里同样挡着）。配额、状态不受影响——那是管理员
+    /// 按住游客上传的手段。
+    #[tokio::test]
+    async fn admin_cannot_open_or_impersonate_the_guest_account() {
+        let (state, _dir) = test_state().await;
+        let admin = add_user(&state, "root@example.com", "1000", true).await;
+        let cookie = login_cookie(&state, &admin).await;
+        let csrf = "csrf-1000";
+        let guest = state.ensure_guest_user().await.expect("访客账号");
+
+        for (field, body) in [
+            ("password", serde_json::json!({ "password": "Visitor-Login-2026x" })),
+            ("email", serde_json::json!({ "email": "someone-else@example.com" })),
+            ("role", serde_json::json!({ "role": "admin" })),
+        ] {
+            let response = app(state.clone())
+                .oneshot(patch_json(
+                    &format!("/api/v1/admin/users/{}", guest.id),
+                    Some(&cookie),
+                    Some(csrf),
+                    body,
+                ))
+                .await
+                .expect("发请求");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "改 {field} 必须被拒"
+            );
+            let payload = body_json(response).await;
+            assert_error(&payload, "FORBIDDEN");
+        }
+
+        let after = state
+            .repo
+            .find_user_by_id(guest.id)
+            .await
+            .expect("读用户")
+            .expect("访客账号还在");
+        assert_eq!(after.password_hash, "!", "口令哈希不能被换掉");
+        assert_eq!(after.email, guest.email, "邮箱不能被改");
+        assert_eq!(after.role, "user", "角色不能被提成管理员");
+
+        // 免登录切换同样要拒：那是给访客账号发一张登录凭据
+        let response = app(state.clone())
+            .oneshot(post_json(
+                &format!("/api/v1/admin/users/{}/impersonate", guest.id),
+                Some(&cookie),
+                Some(csrf),
+                serde_json::json!({}),
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let payload = body_json(response).await;
+        assert_error(&payload, "FORBIDDEN");
+
+        // 被拒之后不该留下会话：访客账号名下必须一张凭据都没有
+        let sessions = state
+            .repo
+            .list_sessions(guest.id)
+            .await
+            .expect("读会话");
+        assert!(sessions.is_empty(), "访客账号不能留下任何会话：{sessions:?}");
+    }
+
+    /// 后台入口对访客账号关门。
+    ///
+    /// 它连登录都进不来（上一个用例），这里验的是第二道：即便手里有了会话，
+    /// 后台也认不出它——「后台只认人的账号」不依赖它恰好没有管理员角色。
+    #[tokio::test]
+    async fn guest_account_is_turned_away_from_the_admin_panel() {
+        let (state, _dir) = test_state().await;
+        let guest = state.ensure_guest_user().await.expect("访客账号");
+        // 造一个直接指向访客账号的会话：登录进不来，就用会话本身来试这道门
+        let cookie = login_cookie(&state, &guest).await;
+
+        let response = app(state)
+            .oneshot(get("/api/v1/admin/users", Some(&cookie)))
+            .await
+            .expect("发请求");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = body_json(response).await;
+        assert_error(&body, "FORBIDDEN");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("访客账号"),
+            "要说清是访客账号被挡，而不是泛泛的权限不足：{body}"
+        );
     }
 
     /// 上传链路端到端：Bearer 鉴权 → multipart 收件 → 魔数与尺寸解析 →

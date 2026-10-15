@@ -466,6 +466,8 @@ mod tests {
             login_fail_count: 0,
             locked_until: None,
             auto_unsuspend_at: None,
+            must_change_password: false,
+            avatar: None,
             created_at: Utc::now(),
             last_login_at: None,
             last_login_ip: None,

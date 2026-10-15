@@ -210,6 +210,11 @@ impl AppState {
         // 默认相册是上传不指定相册时的落点，缺了它第一次上传就得报错
         let album = self.repo.insert_default_album(user.id, "默认相册").await?;
 
+        // 记下这个账号：它是安装账号，别的管理员动不了它（改资料、处置、切换登录、删除）
+        self.settings
+            .set(keys::INSTALL_ADMIN_UID, &user.uid)
+            .await?;
+
         let site_name = input.site_name.trim();
         if !site_name.is_empty() {
             self.settings.set(keys::SITE_NAME, site_name).await?;

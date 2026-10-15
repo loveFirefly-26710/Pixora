@@ -163,6 +163,43 @@ async fn read_small_field(
 // 端点
 // ============================================================
 
+/// 这次上传算谁头上：登录的人，或者（站点允许时）访客账号。
+///
+/// 上传结果总要有归属——配额、回收站、内容审核、按用户的频率限制全挂在账号
+/// 上——所以未登录的请求落到那个访客账号上，来源记进图片行与审计。
+/// 站点关着「允许游客上传」时按原来的规矩：401。
+async fn resolve_uploader(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    ip: Option<&str>,
+    method: &Method,
+) -> Result<pixora_repo::model::User, Response> {
+    match crate::http::authenticate_optional(state, headers, ip).await {
+        Ok(Some(auth)) => {
+            if let Err(resp) = super::ensure_scope(&auth, "upload") {
+                return Err(resp);
+            }
+            if let Err(err) = crate::http::verify_csrf(Some(&auth), headers, method) {
+                return Err(crate::http::error_response(err));
+            }
+            Ok(auth.user)
+        }
+        Ok(None) => match state.guest_uploader().await {
+            // 站点开着游客上传：这时才轮到双提交校验（访客的令牌由 /site 下发）。
+            // 顺序反过来的话，关着游客上传的站点会先答 403，而正确答案是 401
+            Ok(Some(user)) => {
+                if let Err(err) = crate::http::verify_csrf(None, headers, method) {
+                    return Err(crate::http::error_response(err));
+                }
+                Ok(user)
+            }
+            Ok(None) => Err(crate::http::error_response(AppError::Unauthorized)),
+            Err(err) => Err(crate::http::error_response(err)),
+        },
+        Err(err) => Err(crate::http::error_response(err)),
+    }
+}
+
 /// `POST /api/v1/blobs/exists` — 上传前预检。
 ///
 /// 条数上限由领域层拦（`check_hashes`）：1000 是协议硬顶，再按这个账号生效的
@@ -177,14 +214,11 @@ pub async fn blobs_exists(
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
-        Ok(auth) => auth,
+    let uploader = match resolve_uploader(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(user) => user,
         Err(resp) => return resp,
     };
-    if let Err(resp) = super::ensure_scope(&auth, "upload") {
-        return resp;
-    }
-
+    // 预检按「生效的上传策略」判条数：访客用的是访客账号那套额度
     let hashes: Vec<String> = body
         .get("hashes")
         .and_then(|value| value.as_array())
@@ -197,7 +231,7 @@ pub async fn blobs_exists(
         })
         .unwrap_or_default();
 
-    match state.check_hashes(&auth.user, &hashes).await {
+    match state.check_hashes(&uploader, &hashes).await {
         Ok(outcome) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "exist": outcome.exist,
             "missing": outcome.missing,
@@ -215,15 +249,12 @@ pub async fn upload(
     mut multipart: Multipart,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
-        Ok(auth) => auth,
+    let uploader = match resolve_uploader(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(user) => user,
         Err(resp) => return resp,
     };
-    if let Err(resp) = super::ensure_scope(&auth, "upload") {
-        return resp;
-    }
 
-    match collect_upload(&state, &auth.user, &mut multipart, rectx.ip.as_deref()).await {
+    match collect_upload(&state, &uploader, &mut multipart, &rectx).await {
         Ok(Some(outcome)) => {
             finish::<serde_json::Value>(Ok(upload_payload(&outcome, csrf_of(&headers))))
         }
@@ -265,7 +296,7 @@ async fn collect_upload(
     state: &Arc<AppState>,
     user: &pixora_repo::model::User,
     multipart: &mut Multipart,
-    ip: Option<&str>,
+    ctx: &crate::http::RequestContext,
 ) -> Result<Option<UploadOutcome>, AppError> {
     let mut parts = UploadParts::new();
     // 文件字段的附加信息只能在它自己身上读到，先存下来
@@ -382,7 +413,11 @@ async fn collect_upload(
             .unwrap_or_else(|| "upload".to_string()),
         client_sha256: parts.sha256.clone(),
         content_type,
-    };
+        upload_ip: None,
+        upload_agent: None,
+    }
+    // 来源记在图片行上：访客上传时这是唯一的「谁传的」线索
+    .with_origin(ctx.ip.as_deref(), ctx.user_agent.as_deref());
     let thumb = parts.thumb.take().map(|bytes| {
         let len = bytes.len() as i64;
         (
@@ -393,7 +428,9 @@ async fn collect_upload(
 
     // 到这里元数据齐了：把临时文件当读流交给领域层（它自己再流式落到内容寻址目录）
     let reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> = Box::new(received.reader().await?);
-    let outcome = state.upload_file(user, input, reader, thumb, ip).await?;
+    let outcome = state
+        .upload_file(user, input, reader, thumb, ctx.ip.as_deref())
+        .await?;
     Ok(Some(outcome))
 }
 

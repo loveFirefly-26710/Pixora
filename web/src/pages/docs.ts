@@ -282,7 +282,7 @@ ${base}/api/v1/random?tag=风景
 # 要元数据（url / 尺寸 / 标签）就加 format=json
 curl "${base}/api/v1/random?format=json"`,
         ),
-        h("div.tip", { text: "302 而非 301：随机结果不该被缓存。挑不到图片时返回 404；站点关闭广场公开浏览后，未登录调用会一并关闭。" }),
+        h("div.tip", { text: "302 而非 301：随机结果不该被缓存。挑不到图返回 404；关闭广场公开浏览后，未登录调用一并关闭。" }),
       ),
     ),
   );
@@ -291,7 +291,7 @@ curl "${base}/api/v1/random?format=json"`,
     qtip(
       "info",
       "关于这份文档",
-      "它与仓库里的 docs/api-contract.md 同步维护。改接口时先改契约文档，再改实现与这一页——三处一致才不会让对接的人踩空。",
+      "它与仓库里的 docs/api-contract.md 同步维护：改接口时三处一起改，对接的人才不会踩空。",
     ),
   );
 }

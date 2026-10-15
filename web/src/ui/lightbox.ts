@@ -134,7 +134,7 @@ export function openLightbox(
         h("br"),
         `格式 ${item.ext.toUpperCase()}`,
         h("br"),
-        `相册 ${item.album_name ?? "未分类"}`,
+        `相册 ${item.album_name ?? "默认相册"}`,
         h("br"),
         `上传 ${formatDateTime(item.upload_time)}`,
       ),

@@ -6,6 +6,8 @@ export interface SiteInfo {
   upload_prefix: string;
   registration_open: boolean;
   registration_closed_reason: string | null;
+  /** 允许注册的邮箱域名白名单；空数组 = 不限域名 */
+  register_email_domains?: string[];
   plaza_public: boolean;
   formats: string[];
   max_file_bytes: number;
@@ -28,6 +30,19 @@ export interface SiteInfo {
   recycle_retention_days: number;
   /** 会话有效期：闲置多少分钟掉线、最长多少天 */
   session?: { idle_minutes: number; absolute_days: number };
+  /**
+   * 未登录也能上传时下发访客账号那套额度；关着就是 null。
+   *
+   * 客户端队列照着它限流，否则本地会排一堆、服务端一件件拒。
+   */
+  guest_upload?: {
+    enabled: boolean;
+    max_file_bytes: number;
+    max_batch_size: number;
+    max_concurrent_uploads: number;
+    queue_depth: number;
+    formats: string[];
+  } | null;
 }
 
 export interface UserLimits {
@@ -75,6 +90,10 @@ export interface UserProfile {
   last_login_at: string | null;
   last_login_ip: string | null;
   totp_enabled: boolean;
+  /** 管理员直接设过密码：改掉之前只放行 /me 与改密码，前端把人钉在改密码页 */
+  must_change_password?: boolean;
+  /** 头像：站内相对路径或外链；空 = 没设，界面回落到邮箱首字母 */
+  avatar?: string | null;
   login_alert: boolean;
   new_device_guard: boolean;
   recovery_codes_remaining: number;
@@ -82,6 +101,13 @@ export interface UserProfile {
   used_bytes: number;
   stats: UserStats;
   limits: UserLimits;
+  /**
+   * 安装时创建的那个管理员账号的 UID（普通用户拿到的是 null）。
+   *
+   * 它是这套部署的主钥匙：别的管理员不能改它、切进去用或删掉。界面据此
+   * 关掉那些入口——服务端本来也会拒，这里只是不让人白点一下。
+   */
+  install_admin_uid?: string | null;
 }
 
 /** 所有图片列表共用的形状。 */
@@ -218,6 +244,10 @@ export interface TermsPayload {
 }
 
 export interface AdminUserRow {
+  /** 邮箱是否已验证：后台详情页的徽章读它 */
+  email_verified?: boolean;
+  /** 访客账号：不接受登录，详情页据此灰掉改邮箱、改角色、改密码 */
+  guest?: boolean;
   id: number;
   uid: string;
   email: string;
@@ -446,6 +476,8 @@ export interface AdminSettings {
     plaza_public: boolean;
     require_login_to_upload: boolean;
     register_enabled: boolean;
+    /** 允许注册的邮箱域名白名单，逗号分隔；空 = 不限域名 */
+    email_domains: string;
     plaza_grid_columns: number;
     recycle_retention_days: number;
   };

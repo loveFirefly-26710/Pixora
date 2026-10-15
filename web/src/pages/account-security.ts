@@ -317,7 +317,7 @@ async function openEnableTotp(hooks: VerifyHooks): Promise<void> {
 
     const blocks: Node[] = [
       h("div.tip", {
-        text: "用验证器 App（Google Authenticator / 1Password / 微软验证器等）添加账号，然后输入它显示的动态码。",
+        text: "用验证器 App（Google Authenticator / 1Password / 微软验证器等）添加账号，再输入它显示的动态码。",
       }),
     ];
     if (qrBlock) blocks.push(qrBlock);
@@ -360,13 +360,15 @@ async function openEnableTotp(hooks: VerifyHooks): Promise<void> {
   }
 }
 
-/** TOTP 关闭：同样要求 6 位码，防止会话被盗后被顺手关掉二次验证。 */
+/** TOTP 关闭：要求动态码或邮箱验证码，防止会话被盗后被顺手关掉二次验证。 */
 function openDisableTotp(hooks: VerifyHooks): void {
-  const codeInput = textInput({ placeholder: "6 位数字", name: "totp-code" });
+  const codeInput = textInput({ placeholder: "6 位动态码或邮箱验证码", name: "totp-code" });
   codeInput.setAttribute("inputmode", "numeric");
   codeInput.setAttribute("maxlength", "6");
   codeInput.setAttribute("autocomplete", "one-time-code");
 
+  const mailBtn = h("button.btn", { type: "button", text: "改用邮箱验证码" });
+  const mailStatus = h("div.tip", { style: { margin: "6px 0 0" } });
   const cancel = h("button.btn", { type: "button", text: "取消" });
   const confirm = h("button.btn.dgr", { type: "button", text: "关闭二次验证", disabled: true });
 
@@ -376,14 +378,21 @@ function openDisableTotp(hooks: VerifyHooks): void {
       qtip(
         "warn",
         "关闭后账号只靠密码保护",
-        "建议先确认恢复码可用，再决定是否关闭。关闭需要输入当前的动态码。",
+        "建议先确认恢复码可用，再决定是否关闭。",
       ),
       h(
         "div.fld",
         { style: { marginTop: "12px" } },
         h("label.f", { text: "动态码" }),
         codeInput,
+        h("div.tip", {
+          text:
+            "填验证器 App 里的 6 位动态码；手机丢了、换机没导出过验证器的话，" +
+            "点下面的按钮收一个邮箱验证码，用它也能关。",
+        }),
       ),
+      h("div.flexline", { style: { marginTop: "4px" } }, mailBtn),
+      mailStatus,
     ],
     footer: [cancel, confirm],
     dismissable: true,
@@ -395,6 +404,29 @@ function openDisableTotp(hooks: VerifyHooks): void {
     codeInput.value = code;
     confirm.disabled = code.length !== 6;
   });
+
+  mailBtn.addEventListener("click", async () => {
+    mailBtn.disabled = true;
+    mailBtn.textContent = "发送中…";
+    mailStatus.textContent = "";
+    try {
+      const result = await request<{ delivered: boolean; message: string }>("/me/totp", {
+        method: "POST",
+        json: { action: "send_disable_code" },
+      });
+      // 发信结果原样说：投出去了，或者卡在哪一步（SMTP 没配、投递失败）
+      mailStatus.textContent = result.delivered
+        ? `验证码已发到你的邮箱，10 分钟内有效。`
+        : result.message;
+      codeInput.focus();
+    } catch (err) {
+      mailStatus.textContent = err instanceof ApiError ? err.message : "验证码没能发出去，请稍后重试。";
+    } finally {
+      mailBtn.disabled = false;
+      mailBtn.textContent = "改用邮箱验证码";
+    }
+  });
+
   cancel.addEventListener("click", () => handle.close());
   confirm.addEventListener("click", async () => {
     confirm.disabled = true;

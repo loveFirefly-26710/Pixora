@@ -218,7 +218,7 @@ pub async fn user_update(
         return bad_request("没有可修改的字段（email / password / role）");
     }
 
-    let detail = match state
+    let (detail, mail) = match state
         .admin_update_user(
             &auth.user,
             user_id,
@@ -229,16 +229,52 @@ pub async fn user_update(
         )
         .await
     {
-        Ok(detail) => detail,
+        Ok((detail, mail)) => (detail, mail),
         Err(err) => return crate::http::error_response(err),
     };
 
     // 与详情同一个形状：补 `limits` 别名，并按契约第 11 章带上 csrf_token
     let mut body = serde_json::to_value(&detail).unwrap_or_else(|_| serde_json::json!({}));
     add_user_detail_extras(&mut body, &detail);
+    // 设过密码的话再把邮件投递结果带上：界面要如实说「密码发出去了没有」
+    body["mail"] = serde_json::to_value(&mail).unwrap_or(serde_json::Value::Null);
     body["csrf_token"] = serde_json::to_value(cookie_value(&headers, CSRF_COOKIE))
         .unwrap_or(serde_json::Value::Null);
     finish::<serde_json::Value>(Ok(body))
+}
+
+/// `POST /api/v1/admin/users/{id}/password-reset-mail` — 管理员代发重置邮件。
+///
+/// 与「直接设一个新密码」是两条路：这条把链接发给用户，让他自己设。
+/// 返回真实的投递结果——管理员点的是「帮我发封信」，不能只回一句已发送。
+pub async fn user_password_reset_mail(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(user_id): Path<i64>,
+) -> Response {
+    let (rectx, auth) = admin_guard!(
+        state,
+        headers,
+        method,
+        peer,
+        "/admin/users/{id}/password-reset-mail"
+    );
+
+    match state
+        .admin_send_reset_mail(&auth.user, user_id, rectx.ip.as_deref())
+        .await
+    {
+        Ok(delivery) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "ok": true,
+            "delivered": delivery.delivered,
+            "detail": delivery.detail,
+            "message": delivery.describe(),
+            "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+        }))),
+        Err(err) => crate::http::error_response(err),
+    }
 }
 
 /// `POST /api/v1/admin/users/{id}/quota` — 单个用户调配额。
@@ -289,7 +325,9 @@ pub async fn user_status(
     let input = pixora_core::admin::DispositionInput {
         action,
         reason: field_opt_str(&body, "reason"),
-        duration_days: field_opt_i64(&body, "duration_days"),
+        // 时长单位为分钟：界面上可以填小时或天，换算在这里之前就做完。
+        // 不填或填 0 = 永久，只能人工解封
+        duration_minutes: field_opt_i64(&body, "duration_minutes"),
         requirements: field_opt_str(&body, "requirements"),
         appeal_email: field_opt_str(&body, "appeal_email"),
         // 默认发通知：处置不通知用户，用户只会觉得「网站坏了」
@@ -303,22 +341,35 @@ pub async fn user_status(
     )
 }
 
-/// `DELETE /api/v1/admin/users/{id}` — 删除账号（内容随外键级联，物理文件等 GC）。
+/// `DELETE /api/v1/admin/users/{id}?confirm=<邮箱>` — 删除账号。
+///
+/// 账号名下的图片、相册、令牌、会话一起删，不再被别人引用的物理文件当场回收。
+/// 不可逆，所以要求把账号邮箱原样填进 `confirm`：界面让管理员照着敲一遍。
 pub async fn user_delete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
     Path(user_id): Path<i64>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/users/{id}");
 
     match state
-        .admin_delete_user(&auth.user, user_id, rectx.ip.as_deref())
+        .admin_delete_user(
+            &auth.user,
+            user_id,
+            query.get("confirm").map(String::as_str),
+            rectx.ip.as_deref(),
+        )
         .await
     {
-        Ok(()) => finish::<serde_json::Value>(Ok(serde_json::json!({
+        Ok(outcome) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "ok": true,
+            "email": outcome.email,
+            "uid": outcome.uid,
+            "blobs": outcome.blobs,
+            "reclaimed_files": outcome.reclaimed_files,
             "csrf_token": cookie_value(&headers, CSRF_COOKIE),
         }))),
         Err(err) => crate::http::error_response(err),
@@ -1597,6 +1648,7 @@ pub async fn settings_get(
             "plaza_public": site.plaza_public,
             "require_login_to_upload": site.require_login_to_upload,
             "register_enabled": site.register_enabled,
+            "email_domains": site.email_domains.to_value(),
             "plaza_grid_columns": site.plaza_grid_columns,
             "recycle_retention_days": state
                 .settings
@@ -1697,7 +1749,7 @@ pub async fn settings_put(
 
     if let Some(site) = body.get("site").and_then(|value| value.as_object()) {
         let site = serde_json::Value::Object(site.clone());
-        let writes: [(&str, Option<String>); 7] = [
+        let writes: [(&str, Option<String>); 8] = [
             (keys::SITE_NAME, field_opt_str(&site, "name")),
             (keys::SITE_BASE_URL, field_opt_str(&site, "base_url")),
             (
@@ -1711,6 +1763,16 @@ pub async fn settings_put(
             (
                 keys::REGISTER_ENABLED,
                 field_opt_bool(&site, "register_enabled").map(|value| value.to_string()),
+            ),
+            (
+                keys::REGISTER_EMAIL_DOMAINS,
+                // 不能用 field_opt_str：它把空串当「这次没给」，而清空白名单
+                // 恰恰就是要写一个空串。先归一再落库，判定时就不必猜格式
+                site.get("email_domains")
+                    .and_then(|value| value.as_str())
+                    .map(|value| {
+                        pixora_core::settings::RegisterDomains::parse(Some(value)).to_value()
+                    }),
             ),
             (
                 keys::PLAZA_GRID_COLUMNS,
@@ -2022,6 +2084,64 @@ async fn write_settings(
         }
     }
     Ok(())
+}
+
+/// `GET /api/v1/admin/mail/templates` — 邮件模板列表（内置 + 改过的）。
+pub async fn mail_templates_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+) -> Response {
+    let (_rectx, _auth) = admin_guard!(state, headers, method, peer, "/admin/mail/templates");
+    finish(state.mail_template_list().await)
+}
+
+/// `PUT /api/v1/admin/mail/templates/{name}` ← `{ "subject": "…", "body": "…" }`。
+pub async fn mail_template_put(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/mail/templates/{name}");
+    let subject = match field_str(&body, "subject") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    let body_text = match field_str(&body, "body") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    finish(
+        state
+            .mail_template_save(auth.user.id, &name, &subject, &body_text, rectx.ip.as_deref())
+            .await,
+    )
+}
+
+/// `DELETE /api/v1/admin/mail/templates/{name}` — 恢复内置文案。
+pub async fn mail_template_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(name): Path<String>,
+) -> Response {
+    let (rectx, auth) = admin_guard!(
+        state,
+        headers,
+        method,
+        peer,
+        "/admin/mail/templates/{name}"
+    );
+    finish(
+        state
+            .mail_template_reset(auth.user.id, &name, rectx.ip.as_deref())
+            .await,
+    )
 }
 
 /// `POST /api/v1/admin/settings/mail/test` — 发一封测试信。

@@ -113,6 +113,10 @@ API 客户端：
   "name": "Pixora", "base_url": "https://img.example.com",
   "upload_prefix": "images",
   "registration_open": true, "registration_closed_reason": null,
+  "register_email_domains": ["example.com"],
+  // 站点允许未登录上传时才有这一段：客户端队列按访客账号那套额度限流
+  "guest_upload": { "enabled": true, "max_file_bytes": 20971520, "max_batch_size": 1000,
+                    "max_concurrent_uploads": 5, "queue_depth": 500, "formats": ["jpg","png"] },
   "plaza_public": true, "plaza_grid_columns": 3, "recycle_retention_days": 30,
   "formats": ["jpg","png","gif","webp","avif","heic","tiff","bmp","svg"],
   "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
@@ -138,15 +142,39 @@ API 客户端：
 
 ### `POST /api/v1/auth/login` — 公开
 
-请求：`{ "email": "a@b.com", "password": "…", "totp": "123456", "remember": true }`
+请求：`{ "email": "a@b.com", "password": "…", "totp": "123456", "recovery_code": "1234-5678", "remember": true }`
+
+`totp` 与 `recovery_code` 二选一。开了二次验证的账号，第一次提交（两者都不带）会拿到
+`TOTP_REQUIRED`，前端据此翻到第二步；第二步把动态码或一枚恢复码带上来再提交。
+
 响应：`{ "data": { "user": {...见 3.1...}, "csrf_token": "…" } }`，同时 `Set-Cookie: pixora_session=…; HttpOnly; SameSite=Lax`。
-错误：`INVALID_CREDENTIALS`、`ACCOUNT_LOCKED`（带 `locked_until`）、`ACCOUNT_PENDING`、`ACCOUNT_SUSPENDED`、`ACCOUNT_BANNED`、`IP_BLOCKED`、`RATE_LIMITED`、`TOTP_REQUIRED`（400，附 `totp_required: true` 表示需要补输动态码）。
+错误：`INVALID_CREDENTIALS`、`ACCOUNT_LOCKED`（带 `locked_until`）、`ACCOUNT_PENDING`、`ACCOUNT_SUSPENDED`、`ACCOUNT_BANNED`、`IP_BLOCKED`、`RATE_LIMITED`、`TOTP_REQUIRED`（400，附 `totp_required: true`，表示还差一步动态码）。
 
 ### `POST /api/v1/auth/logout`
 
 清除服务端会话与 Cookie。响应 `{ "data": { "ok": true } }`。
 
-### `POST /api/v1/auth/password/code` — 公开
+### `POST /api/v1/auth/password/code`
+
+发出的邮件里同时带一条重置链接（`{base_url}/#/reset-password?token=pxr_…`）与那串验证码。
+链接里放的是**一次性随机令牌**，不是邮箱与验证码——那两个是明文参数，转发一次链接就等于
+把「谁的账号 + 当前有效的验证码」一起递了出去。令牌 1 小时内有效，用一次即废；站点地址
+没配时只给验证码，不硬塞一个点不开的链接。
+
+发信能力（SMTP 是否配置）在查账号之前先判，所以「发不出去」这句话对所有人一样，
+不构成「这个邮箱注册过没有」的探针。
+
+### `GET /api/v1/auth/password/link?token=pxr_…`
+
+重置页先换一句「给哪个账号设密码」：`{ "data": { "email": "u***@e***.com", "expires_at": "…" } }`。
+邮箱是打了码的。链接无效、用过、过期都返回 `BAD_REQUEST` 并附一句能照着做的话。
+
+### `POST /api/v1/auth/password/link/reset` ← `{ "token": "pxr_…", "password": "…" }`
+
+点邮件里的链接设新密码。令牌在验证通过后立即作废；成功会吊销该用户全部会话并清掉
+`must_change_password`（密码是用户自己选的）。
+
+ — 公开
 
 找回密码发码：`{ "email": "a@b.com" }`。响应同注册发码。
 
@@ -165,13 +193,18 @@ API 客户端：
     "status": "active", "email_verified": true, "created_at": "2026-08-02T00:00:00Z",
     "last_login_at": "2026-10-14T12:28:00Z", "last_login_ip": "203.0.113.18",
     "totp_enabled": true, "login_alert": true, "new_device_guard": true,
+    "avatar": "/images/9f2a7c41.png",
+    // 管理员直接设过密码、用户还没自己改：为 true 时只放行 /me 与改密码
+    "must_change_password": false,
     "quota_bytes": 10737418240, "used_bytes": 2576980377,
     "stats": { "album_count": 3, "image_count": 1284, "public_count": 216, "tag_count": 42 },
     "limits": { "api_per_minute": 120, "upload_per_minute": 30, "upload_per_day": 2000,
                 "upload_bytes_per_day": 5368709120, "max_file_size": 20971520,
                 "max_batch_size": 1000, "max_pixels": 80000000,
                 "formats": ["jpg", "png", "webp"], "max_concurrent_uploads": 4,
-                "unlimited": false }
+                "unlimited": false },
+    // 仅管理员可见：安装时创建的那个管理员账号的 UID
+    "install_admin_uid": "1000"
   },
   "csrf_token": "…"
 } }
@@ -179,11 +212,35 @@ API 客户端：
 
 ### `PATCH /api/v1/me`
 
-可改：`login_alert`、`new_device_guard`。响应同 3.1 的 `user`。
+可改：`login_alert`、`new_device_guard`、`avatar`。响应同 3.1 的 `user`。
+
+`avatar` 是字符串或 `null`：站内直链会在入库前折成相对路径（`/images/x.png`），
+换域名、加反代前缀都不会让满库头像裂掉；`/` 开头的路径原样存，外链（`http(s)://`）
+原样存；空串与 `null` 都是「清掉」。上传头像不另开端点：走普通 `POST /upload`
+（不指定相册即落到默认相册、带上 `avatar` 标签），把响应里的 `url` 交给这个接口。
+
+### 邮件模板（管理员）
+
+- `GET /api/v1/admin/mail/templates` → 全部模板：`name`、`label`、`when`（什么时候发）、
+  `vars`（可用占位符）、当前 `subject`/`body`、`customized`（是否改过）、`builtin_subject`/`builtin_body`。
+- `PUT /api/v1/admin/mail/templates/{name}` ← `{ "subject": "…", "body": "…" }`。
+  占位符必须在 `vars` 里，写错了返回 `BAD_REQUEST` 并列出可用的那几个——
+  拼错的变量渲染时会被静默清掉，只有收信人会发现少一段话。
+- `DELETE /api/v1/admin/mail/templates/{name}` → 删掉自定义文案，回到内置。
+
+### `POST /api/v1/me/totp` 的 `send_disable_code`
+
+`{ "action": "send_disable_code" }` → 往账号邮箱发一个 6 位验证码，让「验证器丢了」的人
+还能关闭二次验证。响应 `{ "ok": true, "delivered": true, "message": "邮件已投递" }`；
+发不出去时 `delivered: false` 且 `message` 说明原因。`disable` 接受动态码或这个邮箱验证码，
+任一对上即关闭。
 
 ### `POST /api/v1/me/password`
 
-`{ "current": "…", "password": "新密码" }`。成功后会吊销其他设备会话（保留当前会话）。
+`{ "current": "…", "password": "新密码" }`。成功后会吊销其他设备会话（保留当前会话），
+并清掉 `must_change_password`——管理员直接设过密码的账号改完这一下就恢复正常使用。
+
+「必须改密码」状态下这个端点是放行的（另一个是 `GET /me`），其余接口一律 403。
 
 ### `GET /api/v1/me/sessions`
 
@@ -270,7 +327,8 @@ API 客户端：
 返回 `BAD_REQUEST`。
 
 `PATCH` 可改 `name`、`description`、`visibility`、`sort_order`、`cover_blob_id`。
-`DELETE` 会解除图片与相册的关联（图片本身保留，移入「未分类」）。
+`DELETE` 把相册与其中的图片一起移进回收站（保留期内可整份恢复）；相册行被彻底删掉时，
+里面的图片改挂到主人的默认相册——图片永远有个归属，「未分类」这个状态已经不对外了。
 
 ### `GET /api/v1/images` — read
 
@@ -302,11 +360,32 @@ API 客户端：
 
 ### `PATCH /api/v1/images/{id}` — write
 
-`{ "title": "…", "visibility": "public", "album_id": 7, "tags": ["风景"] }`，字段省略即不改，`album_id: null` 表示移出相册。
+`{ "title": "…", "visibility": "public", "album_id": 7, "tags": ["风景"] }`，字段省略即不改。
+`album_id: null` 是「不指定」——落点是主人的默认相册，不再有「移出相册」那种没有归属的状态。
 
 ### `DELETE /api/v1/images/{id}` — write
 
 软删引用并递减引用计数；物理文件在计数归零后由 GC 回收。
+
+### 未登录上传（游客）
+
+站点把「拒绝游客上传」关掉时，`POST /upload` 与 `POST /blobs/exists` 接受未登录的请求：
+
+- 上传结果落到一个固定的访客账号（`uid` 是 `0000`，邮箱 `visitor@pixora.invalid`，
+  密码哈希写成一个永远验不过去的值）名下。配额、回收站、内容审核、按用户的频率限制
+  都跟着它走——管理员可以在「用户管理」里给这个账号单独调配额，或者干脆暂停它来
+  按住游客上传。
+- 这个账号不接受登录：`POST /auth/login` 对它回 403，管理员的改邮箱、改密码、改角色
+  与「切换登录」同样被拒（调配额、暂停封禁不受影响）。管理端用户对象带 `"guest": true`
+  的就是它。
+- 客户端在入队口就按 `GET /site` 下发的 `guest_upload` 判许可：站点关着游客上传时，
+  未登录的人选中的文件不进队列，本机不再计算 SHA-256，也不会发出预检——省掉两头的
+  无用功。这一道只管少做无用的事，许可本身仍在服务端。
+- 校验方式不变：访客的 CSRF Cookie 由 `GET /site` 下发，写请求照旧要带
+  `X-CSRF-Token` 那双提交头。
+- 每次上传都在 `images.upload_ip` / `images.upload_agent` 两列记下来源，审计日志里
+  也带 `guest` 与 `agent` 两个字段。
+- 站点开着「拒绝游客上传」时，未登录的上传与预检都返回 401。
 
 ### `POST /api/v1/images/batch` — write
 
@@ -453,27 +532,47 @@ API 客户端：
 { "id": 42, "uid": "1001", "email": "chenyu@example.com", "role": "user",
   "status": "active", "status_label": "正常", "quota_bytes": 10737418240,
   "used_bytes": 2576980377, "image_count": 1284, "rate_custom": false,
-  "created_at": "…", "last_login_at": "…" }
+  "created_at": "…", "last_login_at": "…",
+  // 是不是那个拒不登录的访客账号（见「未登录上传（游客）」）
+  "guest": false }
 ```
 
 - `GET /api/v1/admin/users/{id}` → `{ "user": UserRow, "actions": [...], "policy": {...} , "limits": {...} }`
 - `POST /api/v1/admin/users` → 管理端直接建号：`{ "email": "…", "password": "…", "role": "user" | "admin" }`
   （`role` 省略即普通用户；邮箱直接标记为已验证，不再发验证邮件；配额取当前默认值，建完可在详情页调）
   响应与 `GET /admin/users/{id}` 同一个形状。
-- `PATCH /api/v1/admin/users/{id}` → `{ "email": "…", "password": "…", "role": "user" }`（改邮箱会重置验证状态并写入处置记录；角色改名同时禁止降级最后一个管理员、禁止改自己）
+- `PATCH /api/v1/admin/users/{id}` → `{ "email": "…", "password": "…", "role": "user" }`（改邮箱会重置验证状态并写入处置记录；角色改名同时禁止降级最后一个管理员、禁止改自己；访客账号不接受登录，这三样对它一律 403）
+
+  传了 `password` 时：新密码随邮件发给用户，并置上 `must_change_password`——他下次登录
+  会被要求自己改一个，改完之前账号只能访问 `/me` 与 `/me/password`。响应里多一个 `mail`
+  字段说明邮件投递结果：`{ "delivered": true, "detail": null }`；`delivered` 为 false 时
+  `detail` 说明卡在哪一步（例如 SMTP 未配置，邮件留在发件箱等重试）。
+- `POST /api/v1/admin/users/{id}/password-reset-mail` → 管理员代发重置邮件
+
+  与「直接设密码」是两条路：这条把带链接的邮件发给用户，由他自己设。响应
+  `{ "data": { "ok": true, "delivered": false, "detail": "SMTP 未配置，邮件已留在发件箱…",
+  "message": "…" } }`——`message` 是可以直接显示给管理员的一句话。
 - `POST /api/v1/admin/users/{id}/quota` → `{ "quota_bytes": 53687091200 }`（超额拒绝并说明还差多少）
 - `POST /api/v1/admin/users/{id}/status` → 处置：
 
 ```json
 { "action": "suspend" | "ban" | "restore",
   "reason": "上传违规内容，违反服务条款第 3 条",
-  "duration_days": null, "requirements": "本人手持身份证的清晰照片…",
+  "duration_minutes": 43200, "requirements": "本人手持身份证的清晰照片…",
   "appeal_email": "admin@example.com", "notify": true }
 ```
 
-响应：`{ "data": { "status": "suspended", "revoked_sessions": 3, "mail_sent": true } }`
+`duration_minutes` 为 `null` 或 0 表示永久，只能人工解封；填了由鉴权入口在到期时自动恢复。
 
-- `DELETE /api/v1/admin/users/{id}` → 删除账号（内容随外键级联，物理文件由 GC 回收）
+响应：`{ "data": { "status": "suspended", "revoked_sessions": 3, "mail_sent": true, "auto_restore_at": "2026-11-15T…" } }`
+
+- `DELETE /api/v1/admin/users/{id}?confirm=<账号邮箱>` → 删除账号
+
+账号名下的图片、相册、令牌、会话随外键级联删除，引用计数一并还回去；不再被别人引用的
+物理文件当场回收（共享实体与远端失败留给后台 GC）。这一步不可逆，所以要把账号邮箱原样
+填进 `confirm`。安装时创建的管理员账号删不得，其他管理员也不能改它。
+
+响应：`{ "data": { "ok": true, "email": "…", "uid": "…", "blobs": 12, "reclaimed_files": 10 } }`
 - `GET /api/v1/admin/stats` →
 
 ```json
@@ -624,6 +723,7 @@ API 客户端：
 { "data": {
   "site": { "name": "Pixora", "base_url": "https://img.example.com",
             "plaza_public": true, "require_login_to_upload": true, "register_enabled": true,
+            "email_domains": "example.com",
             "plaza_grid_columns": 3, "recycle_retention_days": 30 },
   "upload": { "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
               "queue_depth": 500, "formats": ["jpg","png"] },

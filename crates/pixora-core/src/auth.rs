@@ -11,7 +11,7 @@
 //!   - 登录失败要分两种提示：账号不存在与密码错误给同一个文案（不给撞库者线索），
 //!     而账号被暂停/封禁要给明确原因与申诉入口。
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use pixora_crypto::password;
 use pixora_crypto::token as crypto_token;
 use pixora_repo::model::{now, role, status, User};
@@ -21,6 +21,7 @@ use pixora_repo::repo::verifications::purpose;
 use crate::antispam;
 use crate::audit::actions;
 use crate::error::{AppError, Result};
+use crate::mail::MailDelivery;
 use crate::AppState;
 
 /// 连续登录失败多少次锁定。
@@ -29,6 +30,32 @@ const LOGIN_FAIL_LIMIT: i32 = 5;
 const LOGIN_LOCK_MINUTES: i64 = 15;
 /// 验证码有效期（分钟）。
 const CODE_TTL_MINUTES: i64 = 10;
+
+/// 发码的有效期（分钟）。管理员代为发重置邮件时要用同一个值——
+/// 两处各写一个数字，迟早会出现「邮件说 10 分钟、校验按 5 分钟算」。
+pub fn code_ttl_minutes() -> i64 {
+    CODE_TTL_MINUTES
+}
+
+/// 重置链接的有效期（分钟）。
+///
+/// 比验证码宽：链接常常要经过转发、等用户回来才点，10 分钟太紧；而链接是
+/// 32 字节随机数，猜不出来，放长一点不削弱安全性。
+pub const RESET_LINK_TTL_MINUTES: i64 = 60;
+
+/// `user@example.com` → `u***@e***.com`。
+///
+/// 重置页上只要让人认出「这是我那个账号」，不必把完整地址摊在屏幕上。
+fn mask_email(email: &str) -> String {
+    let (local, domain) = email.split_once('@').unwrap_or((email, ""));
+    let local_head = local.chars().next().unwrap_or('*');
+    let domain_head = domain.chars().next().unwrap_or('*');
+    let suffix = match domain.rsplit_once('.') {
+        Some((_, tld)) => format!(".{tld}"),
+        None => String::new(),
+    };
+    format!("{local_head}***@{domain_head}***{suffix}")
+}
 /// 验证码最多试几次。
 const CODE_MAX_ATTEMPTS: i32 = 5;
 /// 同一邮箱每小时最多发几次验证码。
@@ -107,6 +134,23 @@ pub struct IssuedSession {
     pub csrf_token: String,
 }
 
+/// 登录第二步用哪种二次验证码。
+///
+/// 动态码、邮箱验证码、恢复码……都是同一串 6 位（或 8 位）字符，服务端分不清，
+/// 所以由客户端说明这次填的是哪种；不说就按默认的动态码验。
+pub mod code_method {
+    pub const TOTP: &str = "totp";
+    pub const EMAIL: &str = "email";
+}
+
+/// 重置链接换来的信息（重置页用）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResetLinkInfo {
+    /// 打了码的邮箱：`u***@e***.com`
+    pub email: String,
+    pub expires_at: String,
+}
+
 /// 发码结果。
 #[derive(Debug, Clone)]
 pub struct CodeSent {
@@ -153,10 +197,15 @@ impl AppState {
         self.ensure_registration_open().await?;
 
         let email = normalize_email_input(email)?;
+        // 白名单排在最前面：它对用户来说是「本站收不收这个邮箱」的直接答案，
+        // 比后面那些「域名解析不出来」的口径清楚得多
+        self.ensure_register_domain_allowed(&email).await?;
         antispam::check_email_allowed(self, &email).await?;
+        // 发信这一关先过：这里不涉及「邮箱注册过没有」，如实报错不泄露什么
+        self.ensure_mail_ready()?;
 
         if self.repo.email_exists(&email).await? {
-            return Err(AppError::Conflict("该邮箱已经注册过".into()));
+            return Err(AppError::Conflict("该邮箱已被注册".into()));
         }
         if self.repo.email_banned(&email).await? {
             return Err(AppError::AccountBanned {
@@ -180,12 +229,14 @@ impl AppState {
             )
             .await?;
 
-        self.dispatch_mail(
-            &email,
-            pixora_mail::template::names::VERIFY_CODE,
-            serde_json::json!({ "email": email, "code": code }),
-        )
-        .await?;
+        let delivery = self
+            .dispatch_mail(
+                &email,
+                pixora_mail::template::names::VERIFY_CODE,
+                serde_json::json!({ "email": email, "code": code }),
+            )
+            .await?;
+        Self::ensure_delivered(delivery)?;
 
         Ok(CodeSent {
             expires_in: CODE_TTL_MINUTES * 60,
@@ -208,9 +259,12 @@ impl AppState {
 
         let email = normalize_email_input(email)?;
         password::check_strength(password_plain)?;
+        // 发码时已经查过一次，这里再查一次：中间这一小段时间里白名单可能被改过，
+        // 而这一关决定「谁能进来」
+        self.ensure_register_domain_allowed(&email).await?;
 
         if self.repo.email_exists(&email).await? {
-            return Err(AppError::Conflict("该邮箱已经注册过".into()));
+            return Err(AppError::Conflict("该邮箱已被注册".into()));
         }
         if self.repo.email_banned(&email).await? {
             return Err(AppError::AccountBanned {
@@ -264,6 +318,8 @@ impl AppState {
         self.ensure_ip_allowed(device.ip.as_deref(), crate::ipguard::scope::LOGIN)
             .await?;
         let email = normalize_email_input(email)?;
+        // 发信能力在查账号之前判：这一句对所有人一样，不构成「注册过没有」的探针
+        self.ensure_mail_ready()?;
 
         if !self.repo.email_exists(&email).await? {
             // 静默成功：前端提示「如果该邮箱已注册，验证码已发出」
@@ -290,18 +346,31 @@ impl AppState {
             )
             .await?;
 
-        self.dispatch_mail(
-            &email,
-            pixora_mail::template::names::RESET_PASSWORD,
-            serde_json::json!({ "email": email, "code": code }),
-        )
-        .await?;
+        // 到这里账号一定存在，所以投递失败可以照实说：注册接口的
+        // CONFLICT 本来就能问出「这个邮箱注册过没有」，这里再藏没有意义，
+        // 而「一直显示已发送、信永远不来」的代价大得多
+        let delivery = self.send_reset_mail(&email, &code).await?;
+        Self::ensure_delivered(delivery)?;
 
         Ok(CodeSent {
             expires_in: CODE_TTL_MINUTES * 60,
             resend_after: RESEND_COOLDOWN_SECONDS,
             debug_code: self.debug_code(&code).await,
         })
+    }
+
+    /// 发一封带验证码与重置链接的邮件。返回真实投递结果。
+    ///
+    /// 自助找回密码与管理员代发共用这一处：两条路发出去的邮件要一模一样，
+    /// 否则「我点的没收到 / 他自己点的收到了」这种事查起来毫无头绪。
+    pub async fn send_reset_mail(&self, email: &str, code: &str) -> Result<MailDelivery> {
+        let link = self.issue_reset_link(email).await?;
+        self.dispatch_mail(
+            email,
+            pixora_mail::template::names::RESET_PASSWORD,
+            serde_json::json!({ "email": email, "code": code, "link": link }),
+        )
+        .await
     }
 
     /// 重置密码。成功后吊销该用户全部会话——密码都泄露了，旧会话不能留着。
@@ -324,18 +393,8 @@ impl AppState {
             return Err(AppError::bad_request("验证码无效或已过期"));
         };
 
-        let hash = password::hash_password(password_plain)?;
-        self.repo.update_user_password(user.id, &hash).await?;
-        let revoked = self.repo.revoke_all_sessions(user.id, Utc::now()).await?;
-
-        self.audit_detail(
-            actions::PASSWORD_RESET,
-            Some(user.id),
-            &user.uid,
-            serde_json::json!({ "revoked_sessions": revoked }),
-            device.ip.as_deref(),
-        )
-        .await;
+        self.apply_new_password(&user, password_plain, device, "code")
+            .await?;
         Ok(())
     }
 
@@ -352,6 +411,32 @@ impl AppState {
         device: &DeviceInfo,
         remember: bool,
     ) -> Result<IssuedSession> {
+        self.login_with_method(
+            email,
+            password_plain,
+            code_method::TOTP,
+            totp_code,
+            recovery_code,
+            device,
+            remember,
+        )
+        .await
+    }
+
+    /// 带「用哪种二次验证」的登录。
+    ///
+    /// 两种码都是 6 位数字，服务端分不清，所以由客户端说明：`email` 表示这次
+    /// 填的是邮箱验证码，其余一律按动态码验（`recovery_code` 仍然单独走）。
+    pub async fn login_with_method(
+        &self,
+        email: &str,
+        password_plain: &str,
+        method: &str,
+        totp_code: Option<&str>,
+        recovery_code: Option<&str>,
+        device: &DeviceInfo,
+        remember: bool,
+    ) -> Result<IssuedSession> {
         self.ensure_ip_allowed(device.ip.as_deref(), crate::ipguard::scope::LOGIN)
             .await?;
         let email = normalize_email_input(email)?;
@@ -362,6 +447,11 @@ impl AppState {
                 .await;
             return Err(AppError::InvalidCredentials);
         };
+
+        // 访客账号不接受登录。它是游客上传的归属地（见 guest.rs），不是给人用的
+        // 账号：放行一次，进去的人看到的就全是别人的游客上传。这道判断放在密码校验
+        // 之前，是因为那个账号根本没有可用口令，让校验器去碰它只会得到一句内部错误
+        crate::guest::ensure_not_guest(&user)?;
 
         if user.is_locked(Utc::now()) {
             return Err(AppError::AccountLocked {
@@ -398,27 +488,38 @@ impl AppState {
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
 
-            match (code, recovery) {
-                (None, None) => return Err(AppError::TotpRequired),
-                (Some(code), _) => {
-                    let secret = user
-                        .totp_secret
-                        .clone()
-                        .ok_or_else(|| AppError::internal("账号开启了二次验证但密钥缺失"))?;
-                    if !pixora_crypto::totp::verify(&secret, code, 1)? {
-                        self.audit_detail(
-                            actions::LOGIN_FAIL,
-                            Some(user.id),
-                            &user.uid,
-                            serde_json::json!({ "reason": "totp_mismatch" }),
-                            device.ip.as_deref(),
-                        )
-                        .await;
-                        return Err(AppError::TotpInvalid("验证码不匹配或已过期".into()));
+            if method == code_method::EMAIL {
+                // 用邮箱验证码替代动态码：验证器不在手边时的退路。邮箱是注册时
+                // 就验过的，信任级别与「找回密码」一致；两种码都是 6 位数字，
+                // 服务端分不清，所以由客户端说明用的是哪种
+                let Some(code) = code else {
+                    return Err(AppError::TotpRequired);
+                };
+                self.consume_code(&user.email, purpose::LOGIN_CODE, code)
+                    .await?;
+            } else {
+                match (code, recovery) {
+                    (None, None) => return Err(AppError::TotpRequired),
+                        (Some(code), _) => {
+                        let secret = user
+                            .totp_secret
+                            .clone()
+                            .ok_or_else(|| AppError::internal("账号开启了二次验证但密钥缺失"))?;
+                        if !pixora_crypto::totp::verify(&secret, code, 1)? {
+                            self.audit_detail(
+                                actions::LOGIN_FAIL,
+                                Some(user.id),
+                                &user.uid,
+                                serde_json::json!({ "reason": "totp_mismatch" }),
+                                device.ip.as_deref(),
+                            )
+                            .await;
+                            return Err(AppError::TotpInvalid("验证码不匹配或已过期".into()));
+                        }
                     }
-                }
-                (None, Some(code)) => {
-                    self.consume_recovery_code(&user, code).await?;
+                    (None, Some(code)) => {
+                        self.consume_recovery_code(&user, code).await?;
+                    }
                 }
             }
         }
@@ -718,7 +819,7 @@ impl AppState {
         let hash = crypto_token::token_hash(admin_session_token);
         let Some(session) = self.repo.find_session_by_hash(&hash).await? else {
             return Err(AppError::bad_request(
-                "当前会话已失效，请重新登录后再切换用户",
+                "当前会话已失效，请重新登录后再切换账号",
             ));
         };
         if session.user_id != admin.id {
@@ -729,8 +830,14 @@ impl AppState {
             return Err(AppError::not_found("用户"));
         };
         if target.id == admin.id {
-            return Err(AppError::bad_request("目标就是你自己，不用切换"));
+            return Err(AppError::bad_request("目标是当前登录的账号，无需切换"));
         }
+        // 安装账号不给别人切进去用：它是这套部署的主钥匙
+        self.ensure_not_install_admin(admin, &target).await?;
+        // 访客账号也不给切：免登录切换发出来的就是一张登录凭据，而那个账号
+        // 不接受任何形式的登录（见 guest.rs）。它名下是全站游客的上传，
+        // 想看内容走「用户视图」，不必借它的身份
+        crate::guest::ensure_not_guest(&target)?;
         if target.is_banned() {
             // 封禁账号连管理员也不该切进去：切进去什么也做不了，
             // 只会把「封禁」这件事看起来像没生效
@@ -791,6 +898,8 @@ impl AppState {
         password::check_strength(next)?;
         let hash = password::hash_password(next)?;
         self.repo.update_user_password(user.id, &hash).await?;
+        // 用户自己选的密码，从此不必再被拦在改密码页
+        self.repo.set_must_change_password(user.id, false).await?;
 
         // 改完密码把其它设备踢下线，当前会话留着（否则用户当场被自己踢出去就懵了）
         let revoked = match keep_session_id {
@@ -845,8 +954,25 @@ impl AppState {
             .totp_secret
             .clone()
             .ok_or_else(|| AppError::bad_request("账号尚未开启二次验证"))?;
-        if !pixora_crypto::totp::verify(&secret, code, 1)? {
-            return Err(AppError::TotpInvalid("动态验证码不正确".into()));
+        let code = code.trim();
+        if code.is_empty() || !pixora_crypto::totp::verify(&secret, code, 1)? {
+            // 验证器丢了的人走这条路：换手机、应用没导出，TOTP 就再也算不出来。
+            // 邮箱是注册时就验过的，用它证明「是本人」——两种码都认，任一对上就放行。
+            // 没发过邮箱验证码时给一句能照着做的提示，用户才知道还有这条路
+            let pending = self
+                .repo
+                .find_latest_verification(&user.email, purpose::TOTP_DISABLE)
+                .await?
+                .map(|record| record.is_usable(Utc::now()))
+                .unwrap_or(false);
+            if !pending {
+                // TotpInvalid 的消息前缀已经是「动态验证码不正确：」，这里只补后半个句子
+                return Err(AppError::TotpInvalid(
+                    "验证器不可用时，可改用邮箱验证码关闭".into(),
+                ));
+            }
+            self.consume_code(&user.email, purpose::TOTP_DISABLE, code)
+                .await?;
         }
         self.repo.set_totp(user.id, None, false).await?;
         // 关掉二次验证时清掉恢复码，避免留下「已经作废但看起来还有效」的凭据
@@ -854,6 +980,96 @@ impl AppState {
         self.audit_action(actions::SETTINGS_CHANGE, Some(user.id), device.ip.as_deref())
             .await;
         Ok(())
+    }
+
+    /// 登录第二步的邮箱验证码。
+    ///
+    /// 账号不存在、或没开二次验证时一律静默返回成功，且限流检查排在查账号
+    /// 之前：这条路径最容易被拿来试探「这个邮箱注册过没有、开没开二次验证」，
+    /// 回答必须和大家一样。码只真的发给该收到的那个人。
+    pub async fn send_login_code(&self, email: &str, device: &DeviceInfo) -> Result<()> {
+        self.ensure_ip_allowed(device.ip.as_deref(), crate::ipguard::scope::LOGIN)
+            .await?;
+        let email = normalize_email_input(email)?;
+        // 发信能力同样先判：它跟具体账号无关，对所有人一样
+        self.ensure_mail_ready()?;
+        self.ensure_verification_quota(&email, device.ip.as_deref(), purpose::LOGIN_CODE)
+            .await?;
+
+        let Some(user) = self.repo.find_user_by_email(&email).await? else {
+            return Ok(());
+        };
+        if !user.totp_enabled {
+            return Ok(());
+        }
+
+        let code = crypto_token::new_numeric_code(6)?;
+        self.repo
+            .create_email_verification(
+                &email,
+                &crypto_token::token_hash(&code),
+                purpose::LOGIN_CODE,
+                Utc::now() + Duration::minutes(code_ttl_minutes()),
+                device.ip.as_deref(),
+            )
+            .await?;
+        // 投递失败在这里不报错（报错就分得出账号存不存在）：留给发件箱重试，
+        // 日志里也留了痕
+        self.dispatch_mail(
+            &email,
+            pixora_mail::template::names::VERIFY_CODE,
+            serde_json::json!({ "email": email, "code": code }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 关闭二次验证前先发一个邮箱验证码。
+    ///
+    /// 只给已经登录的本人用：拿到会话才谈得上「验证器丢了要自救」，
+    /// 而邮箱验证码能证明他是账号主人（邮箱是注册时就验过的）。
+    pub async fn send_totp_disable_code(
+        &self,
+        user: &User,
+        device: &DeviceInfo,
+    ) -> Result<MailDelivery> {
+        // 发信这关先过：发不出去就别留一个用户永远收不到的验证码
+        self.ensure_mail_ready()?;
+        let code = self
+            .issue_totp_disable_code(user, device.ip.as_deref())
+            .await?;
+        let delivery = self
+            .dispatch_mail(
+                &user.email,
+                pixora_mail::template::names::VERIFY_CODE,
+                serde_json::json!({ "email": user.email, "code": code }),
+            )
+            .await?;
+        Self::ensure_delivered(delivery)
+    }
+
+    /// 落一条「关闭二次验证」的验证码，返回明文（只在这一刻存在）。
+    ///
+    /// 与发信分开：投递是否成功不影响这条码的有效性判断，测试也能直接
+    /// 拿明文走一遍「用它关掉」的路径，不必搭一台 SMTP。
+    pub async fn issue_totp_disable_code(
+        &self,
+        user: &User,
+        ip: Option<&str>,
+    ) -> Result<String> {
+        self.ensure_verification_quota(&user.email, ip, purpose::TOTP_DISABLE)
+            .await?;
+        let code = crypto_token::new_numeric_code(6)?;
+        self.repo
+            .create_email_verification(
+                &user.email,
+                &crypto_token::token_hash(&code),
+                purpose::TOTP_DISABLE,
+                Utc::now() + Duration::minutes(code_ttl_minutes()),
+                ip,
+            )
+            .await?;
+        Ok(code)
     }
 
     /// 生成恢复码。明文只返回一次，库里存哈希。
@@ -909,6 +1125,21 @@ impl AppState {
         Err(AppError::forbidden(
             reason.unwrap_or_else(|| "当前未开放注册".into()),
         ))
+    }
+
+    /// 注册域名白名单。没配就放行，配了只收清单里的域名。
+    ///
+    /// 只挂在注册的两个入口（发验证码、提交注册）。找回密码不看它：
+    /// 域名后来被移出白名单的老账号还得能改密码。
+    async fn ensure_register_domain_allowed(&self, email: &str) -> Result<()> {
+        let site = self.settings.site(self.config.base_url.as_deref()).await?;
+        if site.email_domains.allows(email) {
+            return Ok(());
+        }
+        Err(AppError::forbidden(format!(
+            "本站只接受 {} 的邮箱注册",
+            site.email_domains.domains().join("、")
+        )))
     }
 
     /// 创建用户并保证 UID 唯一。
@@ -1023,19 +1254,26 @@ impl AppState {
 
     /// 把邮件写进发件箱并尝试立即投递。投递失败由发件箱的重试机制兜底。
     ///
-    /// 公开（`pub`）是因为内容审核的上报与自动暂停通知也要走同一条路径——
-    /// 三处各写一遍渲染与重试，迟早会漂移。
+    /// 公开（`pub`）是因为内容审核的上报、自动暂停通知与管理员发重置邮件
+    /// 也要走同一条路径——几处各写一遍渲染与重试，迟早会漂移。
+    ///
+    /// 返回投递结果而不是「成功/失败」：注册、找回密码那几处对用户只能
+    /// 说「已发送」（否则就是「这个邮箱存不存在」的探针），但管理员点的
+    /// 那几下必须知道邮件到底出去没有。
     pub async fn dispatch_mail(
         &self,
         to: &str,
         template: &str,
         vars: serde_json::Value,
-    ) -> Result<()> {
+    ) -> Result<MailDelivery> {
         let outbox_id = self.repo.enqueue_mail(to, template, &vars).await?;
 
         let Some(mailer) = self.mailer() else {
-            tracing::warn!(to, template, "SMTP 未配置，验证码只留在发件箱里");
-            return Ok(());
+            tracing::warn!(to, template, "SMTP 未配置，邮件只留在发件箱里");
+            return Ok(MailDelivery {
+                delivered: false,
+                detail: Some("SMTP 未配置，邮件已留在发件箱，配好之后会自动投递".into()),
+            });
         };
 
         let stored = self
@@ -1057,6 +1295,10 @@ impl AppState {
         match mailer.send(to, &subject, &body).await {
             Ok(()) => {
                 self.repo.mark_mail_sent(outbox_id, Utc::now()).await?;
+                Ok(MailDelivery {
+                    delivered: true,
+                    detail: None,
+                })
             }
             Err(err) => {
                 // 失败留在发件箱里排队重试，不让注册流程因为 SMTP 抖动而失败
@@ -1065,8 +1307,194 @@ impl AppState {
                 self.repo
                     .mark_mail_failed(outbox_id, &err.to_string(), Some(next), false)
                     .await?;
+                Ok(MailDelivery {
+                    delivered: false,
+                    detail: Some(format!("投递失败：{err}。已进入重试队列，配置准确的话几分钟后会自动重发")),
+                })
             }
         }
+    }
+
+    /// 站点对外的地址，用来拼邮件里的链接。
+    ///
+    /// 设置里优先，其次是环境变量；两边都没配就返回 `None`——内网试装时
+    /// 常见，那种情况下邮件里只给验证码，不硬塞一个点不开的链接。
+    pub async fn public_base_url(&self) -> Result<Option<String>> {
+        let site = self.settings.site(self.config.base_url.as_deref()).await?;
+        let base = site.base_url.trim().trim_end_matches('/').to_string();
+        Ok(if base.is_empty() { None } else { Some(base) })
+    }
+
+    /// 邮件服务能不能用。发验证码之前先问一句。
+    ///
+    /// SMTP 没配时对外说「验证码已发出」是句假话：用户会一直等一封永远不会
+    /// 来的信，管理员却看不到任何异常。这一道对所有人一视同仁——不按邮箱
+    /// 是否存在分岔，就不构成「这个邮箱注册过没有」的探针。
+    fn ensure_mail_ready(&self) -> Result<()> {
+        if self.mailer().is_some() {
+            return Ok(());
+        }
+        Err(AppError::Config(
+            "发信服务（SMTP）尚未配置，验证码邮件无法发送，请联系管理员".into(),
+        ))
+    }
+
+    /// 投递失败就如实报错：用户等的是一封信，不是一句「已发送」。
+    fn ensure_delivered(delivery: MailDelivery) -> Result<MailDelivery> {
+        if delivery.delivered {
+            return Ok(delivery);
+        }
+        Err(AppError::Config(
+            delivery
+                .detail
+                .unwrap_or_else(|| "验证码邮件没能发出去，请稍后重试".into()),
+        ))
+    }
+
+    /// 生成一条重置链接：一次性令牌，过期时间比验证码宽一些。
+    ///
+    /// 链接里放的是随机令牌（库里只存哈希），不是邮箱与验证码——那两个是明文
+    /// 参数，转发一次链接就等于把「谁的账号 + 当前有效的验证码」一起递了出去。
+    /// 站点地址没配时返回空串，邮件里就只剩验证码。
+    async fn issue_reset_link(&self, email: &str) -> Result<String> {
+        let Some(base) = self.public_base_url().await? else {
+            return Ok(String::new());
+        };
+        let token = crypto_token::new_reset_token()?;
+        self.repo
+            .create_email_verification(
+                email,
+                &crypto_token::token_hash(&token),
+                purpose::RESET_LINK,
+                Utc::now() + Duration::minutes(RESET_LINK_TTL_MINUTES),
+                None,
+            )
+            .await?;
+        Ok(format!(
+            "点开这个链接直接设置新密码（{RESET_LINK_TTL_MINUTES} 分钟内有效）：\n{base}/#/reset-password?token={token}"
+        ))
+    }
+
+    /// 凭令牌找出这条重置链接。无效、用过、过期都归到同一句话里。
+    async fn find_reset_link(
+        &self,
+        token: &str,
+    ) -> Result<pixora_repo::model::EmailVerification> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(AppError::bad_request("链接不完整，请从邮件里重新打开"));
+        }
+        let hash = crypto_token::token_hash(token);
+        let Some(record) = self
+            .repo
+            .find_verification_by_hash(purpose::RESET_LINK, &hash)
+            .await?
+        else {
+            return Err(AppError::bad_request(
+                "这个链接已经用过或已失效，请重新发一封重置邮件",
+            ));
+        };
+        if !record.is_usable(Utc::now()) {
+            return Err(AppError::bad_request(
+                "这个链接已经过期，请重新发一封重置邮件",
+            ));
+        }
+        Ok(record)
+    }
+
+    /// 头像地址归一：站内直链折成相对路径，外链原样存。
+    ///
+    /// 站点基础地址是会变的（换域名、加反代前缀），存绝对地址的话改一次配置
+    /// 满库头像全裂。外链没法折，只能原样存——那种裂了也不归我们管。
+    pub async fn normalize_avatar(&self, input: &str) -> Result<Option<String>> {
+        let value = input.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        if value.len() > 500 {
+            return Err(AppError::bad_request("头像地址太长了"));
+        }
+        if let Some(base) = self.public_base_url().await? {
+            if let Some(rest) = value.strip_prefix(&base) {
+                // 只有真正落在本域名下的路径才折：`base` 恰好是别人域名前缀
+                // （https://img.example.com 与 https://img.example.com.evil.net）
+                // 时 rest 不以 / 开头，会落到下面的外链分支
+                let path = rest.trim();
+                if path.starts_with('/') {
+                    return Ok(Some(path.to_string()));
+                }
+            }
+        }
+        if value.starts_with('/') || value.starts_with("http://") || value.starts_with("https://") {
+            return Ok(Some(value.to_string()));
+        }
+        Err(AppError::bad_request(
+            "头像地址需以 http(s):// 或 / 开头；上传的图片直接使用上传结果中的直链即可",
+        ))
+    }
+
+    /// 重置页要显示的信息：给哪个账号设密码、链接什么时候到期。
+    ///
+    /// 邮箱做了打码——这一页可能被旁人瞄到，链接本身就是凭据，
+    /// 不必再把完整地址摊在屏幕上。
+    pub async fn reset_link_info(&self, token: &str) -> Result<ResetLinkInfo> {
+        let record = self.find_reset_link(token).await?;
+        Ok(ResetLinkInfo {
+            email: mask_email(&record.email),
+            expires_at: record.expires_at.to_rfc3339(),
+        })
+    }
+
+    /// 用重置链接设新密码。令牌用一次就废。
+    pub async fn reset_password_by_token(
+        &self,
+        token: &str,
+        password_plain: &str,
+        device: &DeviceInfo,
+    ) -> Result<String> {
+        self.ensure_ip_allowed(device.ip.as_deref(), crate::ipguard::scope::LOGIN)
+            .await?;
+        password::check_strength(password_plain)?;
+        let record = self.find_reset_link(token).await?;
+        let Some(user) = self.repo.find_user_by_email(&record.email).await? else {
+            // 链接还在、账号没了：只可能是发链接之后管理员删了账号
+            return Err(AppError::bad_request(
+                "这个账号已经不存在，请重新发一封重置邮件",
+            ));
+        };
+        self.repo.consume_verification(record.id, Utc::now()).await?;
+        self.apply_new_password(&user, password_plain, device, "link")
+            .await?;
+        Ok(record.email)
+    }
+
+    /// 换密码的收尾：写哈希、清「必须改密码」、踢掉其它会话、留审计。
+    ///
+    /// 自助重置（验证码 / 邮件链接）与管理员设密码走两条入口，收尾必须是
+    /// 同一套——两处各写一遍，迟早会出现「某种方式改完没踢会话」。
+    async fn apply_new_password(
+        &self,
+        user: &User,
+        password_plain: &str,
+        device: &DeviceInfo,
+        via: &str,
+    ) -> Result<()> {
+        // 重置邮件、重置链接、验证码三条路都收尾在这里：访客账号一个也不放行，
+        // 否则「拿到一封信就能设个密码登进去」
+        crate::guest::ensure_not_guest(user)?;
+        let hash = password::hash_password(password_plain)?;
+        self.repo.update_user_password(user.id, &hash).await?;
+        // 密码是用户自己设的：管理员之前打的「必须改密码」到此为止
+        self.repo.set_must_change_password(user.id, false).await?;
+        let revoked = self.repo.revoke_all_sessions(user.id, Utc::now()).await?;
+        self.audit_detail(
+            actions::PASSWORD_RESET,
+            Some(user.id),
+            &user.uid,
+            serde_json::json!({ "revoked_sessions": revoked, "via": via }),
+            device.ip.as_deref(),
+        )
+        .await;
         Ok(())
     }
 
@@ -1195,6 +1623,127 @@ pub fn normalize_recovery_code(code: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 验证器丢了的人：邮箱验证码也能关掉二次验证（不然换机就等于锁死）。
+    #[tokio::test]
+    async fn email_code_can_disable_totp() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let state = crate::tests_support::test_state(&dir).await;
+        let user = crate::tests_support::make_user(&state, "totp@example.com", "3101").await;
+        let device = DeviceInfo::default();
+
+        state
+            .repo
+            .set_totp(user.id, Some("JBSWY3DPEHPK3PXP"), true)
+            .await
+            .unwrap();
+        let fresh = state.repo.find_user_by_id(user.id).await.unwrap().unwrap();
+
+        // 没发过邮箱码时，乱填的码只会得到「验证器丢了可以改用邮箱验证码」这句提示
+        let wrong = state.totp_disable(&fresh, "000000", &device).await.unwrap_err();
+        assert!(wrong.message().contains("验证器不可用"), "{}", wrong.message());
+
+        // 发一个邮箱码（这里只落库，不发信），用它就能关掉
+        let code = state
+            .issue_totp_disable_code(&fresh, None)
+            .await
+            .unwrap();
+        state.totp_disable(&fresh, &code, &device).await.unwrap();
+        let after = state.repo.find_user_by_id(user.id).await.unwrap().unwrap();
+        assert!(!after.totp_enabled, "邮箱验证码应当关掉二次验证");
+        assert!(after.totp_secret.is_none(), "密钥也一并清掉");
+    }
+
+    /// 头像地址：站内直链折成相对路径（换域名不裂），外链原样留，空 = 清掉。
+    #[tokio::test]
+    async fn avatar_urls_are_normalized() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let state = crate::tests_support::test_state(&dir).await;
+        state
+            .settings
+            .set(crate::settings::keys::SITE_BASE_URL, "https://img.example.com")
+            .await
+            .unwrap();
+
+        // 本站直链折成相对路径
+        assert_eq!(
+            state
+                .normalize_avatar("https://img.example.com/images/abc.png")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("/images/abc.png")
+        );
+        // 相对路径原样留
+        assert_eq!(
+            state.normalize_avatar("/images/abc.png").await.unwrap().as_deref(),
+            Some("/images/abc.png")
+        );
+        // 外链原样留
+        assert_eq!(
+            state.normalize_avatar("https://cdn.example.org/me.png").await.unwrap().as_deref(),
+            Some("https://cdn.example.org/me.png")
+        );
+        // 域名长得像本站但不是：不能被折成一段奇怪的路径
+        assert_eq!(
+            state
+                .normalize_avatar("https://img.example.com.evil.net/x.png")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("https://img.example.com.evil.net/x.png")
+        );
+        // 清掉
+        assert!(state.normalize_avatar("   ").await.unwrap().is_none());
+        // 乱七八糟的不收
+        assert!(state.normalize_avatar("不是地址").await.is_err());
+        assert!(state.normalize_avatar(&"a".repeat(600)).await.is_err());
+    }
+
+    /// 重置页上显示的是打码邮箱：能认出是哪个账号，又不至于摊开完整地址。
+    #[test]
+    fn reset_link_masks_the_email() {
+        assert_eq!(mask_email("user@example.com"), "u***@e***.com");
+        assert_eq!(mask_email("a@b.co"), "a***@b***.co");
+        // 形状不标准的输入也不能崩，凑合给个结果就行
+        assert_eq!(mask_email("没有at符号"), "没***@****");
+    }
+
+    #[tokio::test]
+    async fn reset_link_is_single_use_and_expires() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let state = crate::tests_support::test_state(&dir).await;
+        let user = crate::tests_support::make_user(&state, "link@example.com", "3001").await;
+
+        // 站点地址没配时发不出链接：邮件里就只剩验证码
+        assert!(state.issue_reset_link(&user.email).await.unwrap().is_empty());
+
+        state
+            .settings
+            .set(crate::settings::keys::SITE_BASE_URL, "https://img.example.com")
+            .await
+            .unwrap();
+        let sentence = state.issue_reset_link(&user.email).await.unwrap();
+        assert!(sentence.contains("https://img.example.com/#/reset-password?token=pxr_"));
+        let token = sentence.split("token=").last().unwrap().trim().to_string();
+
+        // 令牌换出来的信息：打码邮箱 + 到期时间
+        let info = state.reset_link_info(&token).await.unwrap();
+        assert_eq!(info.email, "l***@e***.com");
+
+        // 设一次密码，令牌就废了
+        let device = crate::auth::DeviceInfo::default();
+        state
+            .reset_password_by_token(&token, "LinkReset-2026x", &device)
+            .await
+            .unwrap();
+        assert!(
+            state.reset_password_by_token(&token, "Again-2026x", &device).await.is_err(),
+            "同一个令牌不能用第二次"
+        );
+        let fresh = state.repo.find_user_by_id(user.id).await.unwrap().unwrap();
+        assert!(pixora_crypto::password::verify_password("LinkReset-2026x", &fresh.password_hash).unwrap());
+    }
 
     #[test]
     fn email_validation_catches_obvious_mistakes() {

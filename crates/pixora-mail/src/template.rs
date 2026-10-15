@@ -15,11 +15,100 @@ pub type MailVars = HashMap<String, String>;
 pub mod names {
     pub const VERIFY_CODE: &str = "verify_code";
     pub const RESET_PASSWORD: &str = "reset_password";
+    /// 管理员直接给用户设了新密码：把密码与「下次登录必须改」一起告知
+    pub const PASSWORD_SET_BY_ADMIN: &str = "password_set_by_admin";
+    /// 登录邮箱被管理员改了：新旧两个地址各收到一封
+    pub const EMAIL_CHANGED: &str = "email_changed";
     pub const SUSPEND_NOTICE: &str = "suspend_notice";
     pub const BAN_NOTICE: &str = "ban_notice";
     pub const SUSPEND_LIFTED: &str = "suspend_lifted";
     /// 内容审核拦下图后的管理员上报
     pub const MODERATION_ALERT: &str = "moderation_alert";
+}
+
+/// 一个可编辑模板的说明。后台的「邮件模板」页按它列清单、给变量提示。
+pub struct TemplateSpec {
+    pub name: &'static str,
+    /// 中文名，列表里给人看的
+    pub label: &'static str,
+    /// 什么时候发这封
+    pub when: &'static str,
+    /// 正文里能用的占位符（不含花括号）
+    pub vars: &'static [&'static str],
+}
+
+/// 全部可编辑模板。顺序就是后台列表里的顺序：按「用户会收到它的频率」排。
+pub const CATALOG: &[TemplateSpec] = &[
+    TemplateSpec {
+        name: names::VERIFY_CODE,
+        label: "邮箱验证码",
+        when: "注册、以及关闭二次验证时的邮箱验证码",
+        vars: &["email", "code"],
+    },
+    TemplateSpec {
+        name: names::RESET_PASSWORD,
+        label: "重置密码",
+        when: "用户自助找回密码，或管理员代发重置邮件",
+        vars: &["email", "code", "link"],
+    },
+    TemplateSpec {
+        name: names::PASSWORD_SET_BY_ADMIN,
+        label: "管理员重置了密码",
+        when: "管理员直接给用户设了新密码",
+        vars: &["email", "uid", "password", "appeal_email"],
+    },
+    TemplateSpec {
+        name: names::EMAIL_CHANGED,
+        label: "邮箱变更通知",
+        when: "管理员改了某个账号的登录邮箱（新旧地址各一封）",
+        vars: &["uid", "old_email", "new_email", "time", "appeal_email"],
+    },
+    TemplateSpec {
+        name: names::SUSPEND_NOTICE,
+        label: "账号被暂停",
+        when: "管理员暂停账号时",
+        vars: &["email", "uid", "time", "reason", "requirements", "appeal_email"],
+    },
+    TemplateSpec {
+        name: names::BAN_NOTICE,
+        label: "账号被封禁",
+        when: "管理员封禁账号时",
+        vars: &["email", "uid", "time", "reason", "appeal_email"],
+    },
+    TemplateSpec {
+        name: names::SUSPEND_LIFTED,
+        label: "账号恢复正常",
+        when: "管理员解封或临时暂停到期时",
+        vars: &["email", "uid", "time"],
+    },
+    TemplateSpec {
+        name: names::MODERATION_ALERT,
+        label: "内容审核上报",
+        when: "内容审核拦下一张图，通知管理员",
+        vars: &["email", "uid", "label", "score", "threshold", "provider", "name", "time", "count", "ban_after"],
+    },
+];
+
+/// 按名字找模板说明。
+pub fn spec(name: &str) -> Option<&'static TemplateSpec> {
+    CATALOG.iter().find(|item| item.name == name)
+}
+
+/// 正文里出现的占位符。用来挡住 `{{emial}}` 这类拼错的变量——
+/// 拼错的占位符会被当成「用户没提供」而静默清掉，信里就少一段话。
+pub fn placeholders(template: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else { break };
+        let key = after[..end].trim().to_string();
+        if !key.is_empty() && !found.contains(&key) {
+            found.push(key);
+        }
+        rest = &after[end + 2..];
+    }
+    found
 }
 
 /// 渲染正文。未提供的占位符替换成空串而不是保留 `{{x}}`，
@@ -44,6 +133,23 @@ pub fn render_subject(template: &str, vars: &MailVars) -> String {
     render(template, vars).replace('\n', " ").trim().to_string()
 }
 
+/// 拼链接用的最小百分号编码：只留 URL 里绝对安全的那几个字符。
+///
+/// 邮件里的链接会被各种客户端二次处理，`+`（在查询串里等于空格）和 `@`
+/// 这类字符不编码就会把邮箱地址改坏。不引入依赖，够用就行。
+pub fn url_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 /// 内置模板（主题, 正文）。库里没有同名行时使用。
 pub fn builtin(name: &str) -> Option<(&'static str, &'static str)> {
     match name {
@@ -61,9 +167,34 @@ pub fn builtin(name: &str) -> Option<(&'static str, &'static str)> {
             "【Pixora】重置密码",
             "你好，\n\n\
              我们收到了重置 {{email}} 账号密码的请求。\n\n\
-             验证码：{{code}}\n\n\
-             验证码 10 分钟内有效。如果这不是你本人的操作，请立即修改密码并检查活跃会话。\n\n\
+             {{link}}\n\n\
+             也可以在本站的「忘记密码」页输入这串验证码：{{code}}（10 分钟内有效）\n\n\
+             链接是一次性的，用过即废。如果这不是你本人的操作，忽略本邮件即可，密码不会变。\n\n\
              本邮件由系统自动发出，请勿直接回复。\n\
+             Pixora 管理团队",
+        )),
+        names::PASSWORD_SET_BY_ADMIN => Some((
+            "【Pixora】管理员已为你重置密码",
+            "你好，\n\n\
+             管理员已为 {{email}}（UID {{uid}}）设置了一个新密码：\n\n\
+             {{password}}\n\n\
+             这个密码是经邮件送达的，之后请自己改一个只有你知道的：下次登录时系统会要求你改，\
+             没改之前账号只能访问「修改密码」页。\n\n\
+             如果这不是你要的，请联系 {{appeal_email}}。\n\n\
+             本邮件由系统自动发出，请勿直接回复。\n\
+             Pixora 管理团队",
+        )),
+        names::EMAIL_CHANGED => Some((
+            "【Pixora】账号邮箱变更通知",
+            "你好，
+
+             账号（UID {{uid}}）的登录邮箱已由 {{old_email}} 改为 {{new_email}}。
+
+             操作时间：{{time}}
+
+             如果这是你要的，忽略本邮件即可。如果不是你安排的，请立刻联系 {{appeal_email}}——             邮箱是找回密码的唯一凭据，换了它就等于换了账号的钥匙。
+
+             本邮件由系统自动发出，请勿直接回复。
              Pixora 管理团队",
         )),
         names::SUSPEND_NOTICE => Some((
@@ -205,5 +336,69 @@ mod tests {
         vars.insert("code".into(), "482913".into());
         let subject = render_subject("验证码：{{code}}\n换行会被去掉", &vars);
         assert_eq!(subject, "验证码：482913 换行会被去掉");
+    }
+
+    /// 重置邮件里的链接：能直接点开，且邮箱与验证码都带在查询串上。
+    #[test]
+    fn reset_mail_carries_a_clickable_link() {
+        let vars: MailVars = [
+            ("email".to_string(), "user@example.com".to_string()),
+            ("code".to_string(), "123456".to_string()),
+            (
+                "link".to_string(),
+                "点开这个链接直接设置新密码：\nhttps://img.example.com/#/reset-password?email=user%40example.com&code=123456"
+                    .to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let (_, body) = builtin(names::RESET_PASSWORD).expect("内置模板");
+        let rendered = render(body, &vars);
+
+        assert!(rendered.contains("https://img.example.com/#/reset-password?email=user%40example.com&code=123456"));
+        assert!(rendered.contains("123456"), "验证码也留着，链接点不开时还能手输");
+        assert!(!rendered.contains("{{"), "占位符要全部换掉：{rendered}");
+    }
+
+    /// 站点地址没配时不硬塞链接：那种情况下 `{{link}}` 是空串。
+    #[test]
+    fn reset_mail_without_link_still_reads_well() {
+        let vars: MailVars = [
+            ("email".to_string(), "user@example.com".to_string()),
+            ("code".to_string(), "654321".to_string()),
+            ("link".to_string(), String::new()),
+        ]
+        .into_iter()
+        .collect();
+        let (_, body) = builtin(names::RESET_PASSWORD).expect("内置模板");
+        let rendered = render(body, &vars);
+
+        assert!(rendered.contains("654321"));
+        assert!(!rendered.contains("{{"));
+        assert!(!rendered.contains("点开这个链接"));
+    }
+
+    #[test]
+    fn url_encode_keeps_the_query_intact() {
+        assert_eq!(url_encode("user@example.com"), "user%40example.com");
+        assert_eq!(url_encode("a+b-c_d.e~f"), "a%2Bb-c_d.e~f");
+    }
+
+    /// 管理员设密码那封：密码要写在正文里，并说清下次登录得自己改。
+    #[test]
+    fn password_set_mail_states_the_password_and_the_forced_change() {
+        let vars: MailVars = [
+            ("email".to_string(), "user@example.com".to_string()),
+            ("uid".to_string(), "1002".to_string()),
+            ("password".to_string(), "AdminSet-2026x".to_string()),
+            ("appeal_email".to_string(), "admin@example.com".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let (_, body) = builtin(names::PASSWORD_SET_BY_ADMIN).expect("内置模板");
+        let rendered = render(body, &vars);
+
+        assert!(rendered.contains("AdminSet-2026x"));
+        assert!(rendered.contains("下次登录"));
     }
 }

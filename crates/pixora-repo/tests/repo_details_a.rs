@@ -256,6 +256,10 @@ async fn album_update_cover_and_delete() {
                 original_name: "sunset.jpg".into(),
                 title: None,
                 visibility: visibility::PRIVATE.to_string(),
+
+                upload_ip: None,
+
+                upload_agent: None,
             },
             image_blob.size,
             &[],
@@ -305,6 +309,10 @@ async fn album_recount_repairs_drift() {
                 original_name: name.into(),
                 title: None,
                 visibility: visibility::PRIVATE.to_string(),
+
+                upload_ip: None,
+
+                upload_agent: None,
             },
             blob.size,
             &[],

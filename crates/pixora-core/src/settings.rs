@@ -22,10 +22,14 @@ pub mod keys {
     /// 背景图的公开地址（服务器自己提供，与站点同源）
     pub const BACKGROUND_PUBLIC_PATH: &str = "/api/v1/site/background";
     pub const INSTALLED: &str = "install.completed";
+    /// 安装时创建的那个管理员账号的 UID。它是安装账号，别的管理员动不了它
+    pub const INSTALL_ADMIN_UID: &str = "install.admin_uid";
     pub const SITE_NAME: &str = "site.name";
     pub const SITE_BASE_URL: &str = "site.base_url";
     pub const UPLOAD_PREFIX: &str = "site.upload_prefix";
     pub const REGISTER_ENABLED: &str = "register.enabled";
+    /// 允许注册的邮箱域名白名单，逗号分隔；空 = 不限域名。子域自动算命中
+    pub const REGISTER_EMAIL_DOMAINS: &str = "register.email_domains";
     pub const REGISTER_AUTO_CLOSE_ON: &str = "register.auto_close_on";
     pub const REGISTER_AUTO_CLOSE_OFF: &str = "register.auto_close_off";
     pub const PLAZA_PUBLIC: &str = "plaza.public";
@@ -183,6 +187,71 @@ pub struct SiteSettings {
     pub register_enabled: bool,
     /// 广场每行放几张图。已经钳到 `GRID_COLUMNS_MIN..=GRID_COLUMNS_MAX`
     pub plaza_grid_columns: i64,
+    /// 允许注册的邮箱域名（白名单，空 = 不限）
+    pub email_domains: RegisterDomains,
+}
+
+/// 允许注册的邮箱域名白名单。
+///
+/// 空清单就是「不限域名」，保持原样；填了之后只收清单里的域名，
+/// 别的邮箱在发验证码那一步就被挡回去。子域算命中：清单里写
+/// `example.com`，`mail.example.com` 也能注册——填的人想的是「这个域」，
+/// 不是某一个主机名。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegisterDomains {
+    domains: Vec<String>,
+}
+
+impl RegisterDomains {
+    /// 从逗号（或空白）分隔的文本解析。允许写成 `@example.com` 的样子，
+    /// 顺手小写、去重、丢掉明显不是域名的项（没有点的、带空格的）。
+    pub fn parse(raw: Option<&str>) -> Self {
+        let mut domains: Vec<String> = Vec::new();
+        for piece in raw.unwrap_or("").split([',', ';', '\n', ' ']) {
+            let cleaned = piece
+                .trim()
+                .trim_start_matches('@')
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            if cleaned.is_empty() || !cleaned.contains('.') {
+                continue;
+            }
+            if !domains.contains(&cleaned) {
+                domains.push(cleaned);
+            }
+        }
+        Self { domains }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.domains.is_empty()
+    }
+
+    pub fn domains(&self) -> &[String] {
+        &self.domains
+    }
+
+    /// 这个邮箱的域名在清单里吗？清单为空时一律放行。
+    pub fn allows(&self, email: &str) -> bool {
+        if self.domains.is_empty() {
+            return true;
+        }
+        let Some(domain) = email.rsplit('@').next() else {
+            return false;
+        };
+        let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        if domain.is_empty() {
+            return false;
+        }
+        self.domains
+            .iter()
+            .any(|allowed| domain == *allowed || domain.ends_with(&format!(".{allowed}")))
+    }
+
+    /// 回写成设置值（逗号分隔）。
+    pub fn to_value(&self) -> String {
+        self.domains.join(",")
+    }
 }
 
 /// 一组上传设置。
@@ -413,6 +482,9 @@ impl Settings {
                 .integer(keys::PLAZA_GRID_COLUMNS, defaults::GRID_COLUMNS)
                 .await?
                 .clamp(defaults::GRID_COLUMNS_MIN, defaults::GRID_COLUMNS_MAX),
+            email_domains: RegisterDomains::parse(
+                self.raw(keys::REGISTER_EMAIL_DOMAINS).await?.as_deref(),
+            ),
         })
     }
 
@@ -688,6 +760,28 @@ pub fn normalize_prefix(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 注册域名白名单：空 = 不限，填了按域与子域命中。
+    #[test]
+    fn register_domains_parse_and_match() {
+        let empty = RegisterDomains::parse(None);
+        assert!(empty.is_empty());
+        assert!(empty.allows("anyone@anywhere.net"), "没配清单就不限域名");
+        assert!(RegisterDomains::parse(Some("   ")).is_empty());
+
+        // 写法上宽容一点：@ 前缀、大小写、多余空白、分号分隔
+        let list = RegisterDomains::parse(Some(" @Example.com; corp.example.com ,, "));
+        assert_eq!(list.domains(), ["example.com", "corp.example.com"]);
+        assert_eq!(list.to_value(), "example.com,corp.example.com");
+
+        assert!(list.allows("a@example.com"));
+        assert!(list.allows("A@EXAMPLE.COM"));
+        assert!(list.allows("b@mail.example.com"), "子域算命中");
+        assert!(list.allows("c@corp.example.com"));
+        assert!(!list.allows("d@example.com.evil.net"), "后缀像但不是子域");
+        assert!(!list.allows("e@example.org"));
+        assert!(!list.allows("没有at符号"));
+    }
 
     #[test]
     fn prefix_is_sanitized() {

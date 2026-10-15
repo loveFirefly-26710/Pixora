@@ -49,6 +49,11 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   const emailInput = textInput({ placeholder: "chenyu@example.com", type: "email" });
+  const domains = site?.register_email_domains ?? [];
+  if (domains.length > 0) {
+    // 白名单开着就先把话说在前面：填完邮箱、点了发码才被拒是最难受的
+    emailInput.placeholder = `you@${domains[0]}`;
+  }
   const codeInput = textInput({ placeholder: "6 位数字", name: "code" });
   const passwordInput = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
   const confirmInput = textInput({ type: "password", placeholder: "再输入一次" });
@@ -62,7 +67,9 @@ export async function render(ctx: PageContext): Promise<void> {
   const submit = h("button.btn.pri.blk", { type: "submit", text: "创建账号" });
 
   const quotaHint = h("div.tip", {
-    text: "注册后会自动获得管理员配置的默认配额，可在「账号信息」里查看。",
+    text: domains.length > 0
+      ? `本站只接受 ${domains.join("、")} 的邮箱注册。`
+      : "注册后会自动获得管理员配置的默认配额，可在「账号信息」里查看。",
   });
 
   let cooldown = 0;

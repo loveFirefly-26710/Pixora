@@ -210,13 +210,43 @@ impl Repo {
         Ok(())
     }
 
-    /// 删相册。相册里的图片不会被删，`images.album_id` 由外键置空——
-    /// 「删目录不删内容」是设计稿定下的语义。
     /// 彻底删除相册行。回收站的「彻底删除」与管理员清理走这里。
+    ///
+    /// 里面的图片先改挂到主人的默认相册：图片永远该有个归属，「未分类」这个
+    /// 状态已经不对外了（见 `Repo::move_images`）。找不到默认相册就保持原样——
+    /// 外键会把归属置空，启动时的 `attach_orphan_images` 再把它收进去。
     pub async fn delete_album(&self, id: i64) -> Result<()> {
-        self.db
-            .execute("DELETE FROM albums WHERE id = ?", Args::new().int(id))
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query(&self.db.sql(
+            "UPDATE images SET album_id = ( \
+                 SELECT a.id FROM albums a \
+                  WHERE a.owner_id = (SELECT owner_id FROM albums WHERE id = ?) \
+                    AND a.slug = ? AND a.deleted_at IS NULL LIMIT 1 \
+             ) WHERE album_id = ?",
+        ))
+        .bind(id)
+        .bind(DEFAULT_ALBUM_SLUG)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        // 归属变了，默认相册的计数得跟着涨：这一步外键不会替我们做
+        sqlx::query(&self.db.sql(
+            "UPDATE albums SET image_count = ( \
+                 SELECT COUNT(*) FROM images i WHERE i.album_id = albums.id \
+             ), updated_at = ? \
+             WHERE slug = ? \
+               AND owner_id = (SELECT owner_id FROM albums WHERE id = ?)",
+        ))
+        .bind(now_ts())
+        .bind(DEFAULT_ALBUM_SLUG)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(&self.db.sql("DELETE FROM albums WHERE id = ?"))
+            .bind(id)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 

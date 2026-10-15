@@ -12,11 +12,11 @@
 
 import { ApiError, request, requestPage, type ApiMeta } from "../core/api";
 import { debounce, h } from "../core/dom";
-import { formatBytes, formatDate, formatNumber } from "../core/format";
+import { describeMinutes, formatBytes, formatDate, formatNumber } from "../core/format";
 import { confirmDialog, openModal } from "../core/modal";
 import { navigate } from "../core/router";
 import type { PageContext } from "../core/router";
-import { getState } from "../core/state";
+import { canOperateAccount, getState } from "../core/state";
 import { toast, toastError, toastOk } from "../core/toast";
 import type { AdminStats, AdminUserRow } from "../core/types";
 import {
@@ -164,10 +164,9 @@ export async function render(ctx: PageContext): Promise<void> {
 
   const bottomNote = h("div.note", {
     text:
-      "「暂停」和「封禁」不是一回事，见用户详情页。两者都会让网页登录和 API 同时失效，" +
-      "点确认后由管理员邮箱自动发出通知邮件。管理员账号不能被暂停或封禁，避免把自己锁在外面。" +
-      "「新建用户」建的账号邮箱直接是已验证状态，密码由你告诉对方。" +
-      "「设为管理员」只有另一位管理员能撤销——管理员不能改自己的角色。",
+      "「暂停」与「封禁」都会让网页登录和 API 同时失效，确认后自动发通知邮件给用户。" +
+      "管理员账号不能被处置，免得把自己锁在外面；管理员也不能改自己的角色，换角色要另一位管理员动手。" +
+      "「新建用户」建的账号邮箱直接是已验证状态，密码由你告诉对方。",
   });
 
   pad.append(statsSlot, toolbar, selectionBar, listSlot, bottomNote);
@@ -413,14 +412,38 @@ export async function render(ctx: PageContext): Promise<void> {
         text: "查看相册",
         on: { click: () => navigate(`/albums?uid=${encodeURIComponent(row.uid)}`) },
       }),
-      // 免登录切换：不用知道对方密码，直接以他的身份进站，随时能切回来
-      h("button.btn.sm", {
-        type: "button",
-        text: "切换登录",
-        title: `以 u_${row.uid} 的身份登录（不需要对方密码，可随时切回）`,
-        on: { click: (event) => void impersonate(row, event.currentTarget as HTMLButtonElement) },
-      }),
+      // 免登录切换：不用知道对方密码，直接以他的身份进站，随时能切回来。
+      // 访客账号也切不得——那是给一个不接受登录的账号发登录凭据（见 core/guest.rs）
+      (() => {
+        const allowed = canOperateAccount(row.uid) && !row.guest;
+        const button = h("button.btn.sm", {
+          type: "button",
+          text: "切换登录",
+          disabled: !allowed,
+          title: row.guest
+            ? "访客账号是系统账号，不能切换登录"
+            : allowed
+              ? `以 u_${row.uid} 的身份登录（不需要对方密码，可随时切回）`
+              : "安装时创建的管理员，不能切进去用",
+          on: {
+            click: (event) => {
+              if (allowed) void impersonate(row, event.currentTarget as HTMLButtonElement);
+            },
+          },
+        });
+        return button;
+      })(),
     );
+
+    if (!canOperateAccount(row.uid)) {
+      box.append(
+        h("span", {
+          style: { fontSize: "11.5px", color: "var(--faint)" },
+          text: "安装账号不可操作",
+        }),
+      );
+      return box;
+    }
 
     if (row.role === "admin") {
       // 管理员不显示处置按钮：把自己关在门外是最难恢复的运维事故。
@@ -444,6 +467,18 @@ export async function render(ctx: PageContext): Promise<void> {
       button.addEventListener("click", () => openDispositionDialog([row], "suspend"));
       box.append(button);
     }
+    // 访客账号是系统账号：不能登录，也就没有提权这回事。处置按钮留着——
+    // 暂停或封禁它正是按住游客上传的手段（见 core/guest.rs）
+    if (row.guest) {
+      box.append(
+        h("span", {
+          style: { fontSize: "11.5px", color: "var(--faint)" },
+          text: "访客账号不可登录",
+        }),
+      );
+      return box;
+    }
+
     // 提权放在最后：它比暂停少见，也不该挨着暂停误点
     const promote = h("button.btn.sm", { type: "button", text: "设为管理员" });
     promote.addEventListener("click", () => void promoteUser(row, promote));
@@ -486,7 +521,7 @@ export async function render(ctx: PageContext): Promise<void> {
         json: {
           action: "restore",
           reason: "管理员在用户列表手动恢复",
-          duration_days: null,
+          duration_minutes: null,
           requirements: null,
           appeal_email: getState().site?.appeal_email ?? null,
           notify: true,
@@ -682,11 +717,26 @@ export async function render(ctx: PageContext): Promise<void> {
       makeKindChip("ban", "封禁账号"),
     );
 
-    const duration = select([
-      { value: "", label: "永久（手动解封）" },
-      { value: "7", label: "7 天" },
-      { value: "30", label: "30 天" },
-    ]);
+    // 生效时长自己填，留空就是永久。单位给小时与天两档
+    const durationValue = textInput({
+      type: "number",
+      mono: true,
+      placeholder: "留空 = 永久",
+      min: "1",
+    });
+    const durationUnit = select(
+      [
+        { value: "days", label: "天" },
+        { value: "hours", label: "小时" },
+      ],
+      "days",
+    );
+    /** 手填时长换算成分钟；空、0、非数字一律按「永久」处理。 */
+    const durationMinutes = (): number | null => {
+      const value = Number(durationValue.value.trim());
+      if (!Number.isFinite(value) || value <= 0) return null;
+      return Math.max(1, Math.round(value * (durationUnit.value === "hours" ? 60 : 1440)));
+    };
     const appeal = textInput({ value: getState().site?.appeal_email ?? "", mono: true });
     const reason = textarea({
       rows: 3,
@@ -727,7 +777,18 @@ export async function render(ctx: PageContext): Promise<void> {
       h(
         "div.row",
         null,
-        h("div.fld", null, h("label.f", { text: "生效时长" }), duration),
+        h(
+          "div.fld",
+          null,
+          h("label.f", { text: "生效时长" }),
+          h(
+            "div.row",
+            { style: { margin: "0", alignItems: "center" } },
+            durationValue,
+            h("div", { style: { flex: "0 0 90px" } }, durationUnit),
+          ),
+          h("div.tip", { text: "留空表示永久，只能手动解封；填了就到期自动恢复。" }),
+        ),
         h(
           "div.fld",
           null,
@@ -745,7 +806,7 @@ export async function render(ctx: PageContext): Promise<void> {
         qtip(
           "warn",
           null,
-          "确认后立即生效：该用户当前所有会话被踢下线，API Token 全部进入暂停状态。解封时自动恢复，不用重新签发。",
+          "确认后立刻生效：所有会话踢下线，API Token 进入暂停；解封时自动恢复，不用重新签发。",
         ),
       ),
     ];
@@ -780,6 +841,8 @@ export async function render(ctx: PageContext): Promise<void> {
       confirm.disabled = true;
       cancel.disabled = true;
 
+      // 先算一次：批量里每个人用的都是同一个时长，请求与结果文案共用
+      const minutes = durationMinutes();
       let sessions = 0;
       let mails = 0;
       const failures = await runBatch(
@@ -790,7 +853,7 @@ export async function render(ctx: PageContext): Promise<void> {
             json: {
               action: kind,
               reason: reason.value.trim(),
-              duration_days: duration.value ? Number(duration.value) : null,
+              duration_minutes: minutes,
               requirements: requirements.value.trim() || null,
               appeal_email: appeal.value.trim() || null,
               notify,
@@ -816,7 +879,9 @@ export async function render(ctx: PageContext): Promise<void> {
         okCount: disposables.length - failures.length,
         failures,
         skipped,
-        extra: `共踢下线 ${sessions} 个会话${duration.value ? ` · 生效 ${duration.value} 天` : " · 永久生效"}`,
+        extra: `共踢下线 ${sessions} 个会话${
+          minutes ? ` · 生效 ${describeMinutes(minutes)}` : " · 永久生效"
+        }`,
       });
     });
 

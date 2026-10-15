@@ -190,6 +190,10 @@ async fn reconcile_fixes_drifted_counters() {
                 original_name: "a.png".to_string(),
                 title: None,
                 visibility: "private".to_string(),
+
+                upload_ip: None,
+
+                upload_agent: None,
             },
             21,
             &[],
@@ -251,6 +255,10 @@ async fn deleting_a_user_does_not_strand_physical_files() {
                 original_name: "a.png".to_string(),
                 title: None,
                 visibility: "private".to_string(),
+
+                upload_ip: None,
+
+                upload_agent: None,
             },
             21,
             &[],
@@ -262,21 +270,20 @@ async fn deleting_a_user_does_not_strand_physical_files() {
         1
     );
 
-    // 删除账号：images 随外键级联消失，但没人递减 ref_count——这是真实存在的路径
-    state.repo.delete_user(user.id).await.unwrap();
-    assert_eq!(
-        state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
-        1,
-        "级联删除不会动计数，这正是不对账就会漏盘的原因"
-    );
-
-    // 对账把计数拉回事实
-    let fixed = gc::reconcile(&state).await.unwrap();
-    assert!(fixed >= 1);
+    // 删除账号：images 随外键级联消失，引用计数也得跟着还回去。
+    // 漏了这一步计数就停在 1，GC 永远等不到 ref_count = 0，
+    // 文件谁也收不走——删账号本来就是为了把盘腾出来
+    let blobs = state.repo.delete_user(user.id).await.unwrap();
+    assert_eq!(blobs.len(), 1, "要返回这个账号用过的实体，调用方据此回收文件");
     assert_eq!(
         state.repo.find_blob_by_id(blob_id).await.unwrap().unwrap().ref_count,
         0,
-        "对账之后计数归零"
+        "引用计数随账号一起还回去"
+    );
+    assert_eq!(
+        gc::reconcile(&state).await.unwrap(),
+        0,
+        "删账号这条路径不该留下需要对账的偏差"
     );
 
     // 归零 + 过期 → 回收，物理文件不再滞留
@@ -338,6 +345,10 @@ async fn seed_album_image(
                 original_name: "in-album.png".to_string(),
                 title: None,
                 visibility: "private".to_string(),
+
+                upload_ip: None,
+
+                upload_agent: None,
             },
             21,
             &[],
@@ -492,6 +503,10 @@ async fn soft_deleted_rows_do_not_pin_physical_files() {
                 original_name: "gone.png".to_string(),
                 title: None,
                 visibility: "private".to_string(),
+
+                upload_ip: None,
+
+                upload_agent: None,
             },
             21,
             &[],
@@ -558,6 +573,10 @@ async fn binned_image_keeps_its_file_until_retention_expires() {
                 original_name: "binned.png".to_string(),
                 title: None,
                 visibility: "private".to_string(),
+
+                upload_ip: None,
+
+                upload_agent: None,
             },
             21,
             &[],
@@ -804,6 +823,10 @@ async fn purging_one_reference_keeps_the_shared_file() {
                 original_name: "shared.png".to_string(),
                 title: None,
                 visibility: "private".to_string(),
+
+                upload_ip: None,
+
+                upload_agent: None,
             },
             21,
             &[],

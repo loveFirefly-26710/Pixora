@@ -70,7 +70,18 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/auth/login", post(r::auth::login))
         .route("/auth/logout", post(r::auth::logout))
         .route("/auth/password/code", post(r::auth::password_code))
+        // 登录第二步可以改用邮箱验证码（验证器不在手边时）
+        .route(
+            "/auth/login/email-code",
+            post(r::auth::login_email_code),
+        )
         .route("/auth/password/reset", post(r::auth::password_reset))
+        // 邮件里的重置链接：GET 换「给谁设密码」，POST 交新密码（令牌一次性）
+        .route("/auth/password/link", get(r::auth::password_link_info))
+        .route(
+            "/auth/password/link/reset",
+            post(r::auth::password_link_reset),
+        )
         // ---------- 当前用户 ----------
         .route("/me", get(r::account::me_get).patch(r::account::me_patch))
         .route("/me/password", post(r::account::password_change))
@@ -143,6 +154,11 @@ fn api_routes() -> Router<Arc<AppState>> {
         )
         .route("/admin/users/{id}/quota", post(r::admin::user_quota))
         .route("/admin/users/{id}/status", post(r::admin::user_status))
+        // 管理员代发重置邮件：与「直接设新密码」是两条路，这条让用户自己设
+        .route(
+            "/admin/users/{id}/password-reset-mail",
+            post(r::admin::user_password_reset_mail),
+        )
         .route(
             "/admin/ratelimit/users/{uid}",
             put(r::admin::ratelimit_user_put).delete(r::admin::ratelimit_user_delete),
@@ -208,6 +224,12 @@ fn api_routes() -> Router<Arc<AppState>> {
             post(r::admin::background_upload),
         )
         .route("/admin/settings/mail/test", post(r::admin::mail_test))
+        // 邮件模板：管理员能在后台改文案、恢复内置
+        .route("/admin/mail/templates", get(r::admin::mail_templates_get))
+        .route(
+            "/admin/mail/templates/{name}",
+            put(r::admin::mail_template_put).delete(r::admin::mail_template_delete),
+        )
         .route("/admin/settings/formats", post(r::admin::formats_put))
         .route(
             "/admin/thumbnails/rebuild",

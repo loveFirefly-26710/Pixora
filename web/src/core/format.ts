@@ -223,3 +223,15 @@ export function middleEllipsis(input: string, head = 8, tail = 4): string {
   if (input.length <= head + tail + 1) return input;
   return `${input.slice(0, head)}…${input.slice(-tail)}`;
 }
+
+/**
+ * 「1440 分钟」说成人话。
+ *
+ * 处置时长由管理员手填，界面上要显示成「1 天」「12 小时」这种读得懂的样子。
+ * 与后端 `describe_minutes` 同一套口径，两边说法一致。
+ */
+export function describeMinutes(minutes: number): string {
+  if (minutes > 0 && minutes % 1440 === 0) return `${minutes / 1440} 天`;
+  if (minutes > 0 && minutes % 60 === 0) return `${minutes / 60} 小时`;
+  return `${minutes} 分钟`;
+}

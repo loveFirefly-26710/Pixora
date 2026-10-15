@@ -17,6 +17,12 @@ pub mod purpose {
     pub const REGISTER: &str = "register";
     pub const RESET: &str = "reset";
     pub const CHANGE_EMAIL: &str = "change_email";
+    /// 邮件里的重置链接（存的是令牌哈希，不是验证码）
+    pub const RESET_LINK: &str = "reset_link";
+    /// 关闭二次验证用的邮箱验证码：验证器丢了的人靠它进来
+    pub const TOTP_DISABLE: &str = "totp_disable";
+    /// 登录第二步用邮箱验证码替代动态码
+    pub const LOGIN_CODE: &str = "login_code";
 }
 
 impl Repo {
@@ -75,6 +81,28 @@ impl Repo {
             EmailVerification::COLUMNS
         );
         let row = self.db.fetch_optional(&sql, Args::new().int(id)).await?;
+        row.as_ref().map(EmailVerification::from_row).transpose()
+    }
+
+    /// 按「用途 + 值哈希」找一条还没用过的记录。
+    ///
+    /// 重置链接只能凭令牌反查——链接里没有邮箱，也就不该按邮箱去捞。
+    /// `code_hash` 是 32 字节随机令牌的哈希，撞不上，点查一次就够；
+    /// 这张表由队列定期清理过期行，不值得再为它加一个索引。
+    pub async fn find_verification_by_hash(
+        &self,
+        purpose: &str,
+        code_hash: &str,
+    ) -> Result<Option<EmailVerification>> {
+        let sql = format!(
+            "SELECT {} FROM email_verifications WHERE purpose = ? AND code_hash = ? \
+             AND consumed_at IS NULL ORDER BY id DESC LIMIT 1",
+            EmailVerification::COLUMNS
+        );
+        let row = self
+            .db
+            .fetch_optional(&sql, Args::new().text(purpose).text(code_hash))
+            .await?;
         row.as_ref().map(EmailVerification::from_row).transpose()
     }
 

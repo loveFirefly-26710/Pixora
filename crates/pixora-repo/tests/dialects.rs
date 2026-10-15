@@ -212,6 +212,10 @@ async fn same_repository_code_runs_on_every_configured_dialect() {
                     original_name: "IMG_0001.png".to_string(),
                     title: Some("测试图".to_string()),
                     visibility: visibility::PUBLIC.to_string(),
+
+                    upload_ip: None,
+
+                    upload_agent: None,
                 },
                 2048,
                 &["风景".to_string()],

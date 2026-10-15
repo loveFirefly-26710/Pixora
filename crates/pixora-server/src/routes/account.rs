@@ -30,7 +30,8 @@ use crate::http::{
 
 use super::{
     bad_request, field_opt_bool, field_opt_i64, field_opt_str, field_str, not_found,
-    pref_key_login_alert, pref_key_new_device_guard, require_user, user_view, PeerAddr,
+    pref_key_login_alert, pref_key_new_device_guard, require_user, require_user_allow_pending,
+    user_view, PeerAddr,
 };
 
 /// 令牌权限范围的白名单。写死在这里而不是从库里读：它是契约的一部分，
@@ -49,7 +50,7 @@ pub async fn me_get(
     peer: PeerAddr,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+    let auth = match require_user_allow_pending(&state, &headers, rectx.ip.as_deref(), &method).await {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
@@ -111,8 +112,22 @@ pub async fn me_patch(
         }
         changed = true;
     }
+    // 头像单独判：`null` 与空串都是「清掉」，所以不能用 field_opt_str
+    // （它把空当「这次没给」）
+    if let Some(value) = body.get("avatar") {
+        let raw = value.as_str().unwrap_or("");
+        let avatar = match state.normalize_avatar(raw).await {
+            Ok(value) => value,
+            Err(err) => return crate::http::error_response(err),
+        };
+        if let Err(err) = state.repo.set_user_avatar(auth.user.id, avatar.as_deref()).await {
+            return crate::http::error_response(err.into());
+        }
+        changed = true;
+    }
+
     if !changed {
-        return bad_request("没有可修改的字段（login_alert / new_device_guard）");
+        return bad_request("没有可修改的字段（login_alert / new_device_guard / avatar）");
     }
 
     // 重新读一遍用户行：偏好在 `settings` 表里，而 `user_view` 要的是最新状态
@@ -136,7 +151,7 @@ pub async fn password_change(
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+    let auth = match require_user_allow_pending(&state, &headers, rectx.ip.as_deref(), &method).await {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
@@ -355,7 +370,7 @@ pub async fn recovery_codes_create(
     }
 }
 
-/// `POST /api/v1/me/totp`：按 `action` 分派 setup / enable / disable。
+/// `POST /api/v1/me/totp`：按 `action` 分派 setup / enable / disable / send_disable_code。
 pub async fn totp(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -382,6 +397,16 @@ pub async fn totp(
             Ok(setup) => finish::<serde_json::Value>(Ok(serde_json::json!({
                 "secret": setup.secret,
                 "otpauth_url": setup.otpauth_url,
+                "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+            }))),
+            Err(err) => crate::http::error_response(err),
+        },
+        // 验证器丢了的人：关之前先往邮箱发一个验证码，用它也能关
+        "send_disable_code" => match state.send_totp_disable_code(&auth.user, &rectx.device()).await {
+            Ok(delivery) => finish::<serde_json::Value>(Ok(serde_json::json!({
+                "ok": true,
+                "delivered": delivery.delivered,
+                "message": delivery.describe(),
                 "csrf_token": cookie_value(&headers, CSRF_COOKIE),
             }))),
             Err(err) => crate::http::error_response(err),

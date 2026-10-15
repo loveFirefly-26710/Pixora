@@ -43,6 +43,21 @@ pub async fn site(
         Err(err) => return crate::http::error_response(err),
     };
 
+    // 游客上传要带 CSRF 双提交头，而访客没有会话（也就没有令牌）：这里补发一个
+    // ——它本身不授权任何东西，只是「同一个浏览器」的凭据
+    let guest_limits = match (auth.is_none(), state.guest_uploader().await) {
+        (true, Ok(Some(user))) => state.effective_upload_limits(&user).await.ok(),
+        _ => None,
+    };
+    let csrf_cookie = match (&auth, &guest_limits) {
+        (None, Some(_)) if crate::http::cookie_value(&headers, crate::http::CSRF_COOKIE).is_none() => {
+            pixora_crypto::token::new_csrf_token()
+                .ok()
+                .map(|token| crate::http::csrf_cookie(&token, state.config.secure_cookies))
+        }
+        _ => None,
+    };
+
     let site = match state
         .settings
         .site(state.config.base_url.as_deref())
@@ -74,7 +89,7 @@ pub async fn site(
         Err(err) => return crate::http::error_response(err),
     };
 
-    finish::<serde_json::Value>(Ok(serde_json::json!({
+    let response = finish::<serde_json::Value>(Ok(serde_json::json!({
         "name": site.name,
         "base_url": state.base_url().await,
         "upload_prefix": site.upload_prefix,
@@ -86,6 +101,9 @@ pub async fn site(
             .unwrap_or(0),
         "registration_open": registration_open,
         "registration_closed_reason": registration_closed_reason,
+        // 注册邮箱白名单：注册页据此提前说明「只收这些域名」，
+        // 免得用户填完邮箱、点了发码才知道不行
+        "register_email_domains": site.email_domains.domains(),
         "plaza_public": site.plaza_public,
         "formats": upload.formats,
         "max_file_bytes": upload.max_file_bytes,
@@ -106,7 +124,28 @@ pub async fn site(
         },
         "installed": installed,
         "terms": terms,
-    })))
+        // 未登录也能上传时，前端照着访客账号那套额度限流：队列深度、单批张数、
+        // 并发都按它来，不然本地排了一堆、服务端一件件拒
+        "guest_upload": guest_limits.as_ref().map(|limits| {
+            serde_json::json!({
+                "enabled": true,
+                "max_file_bytes": limits.max_file_bytes,
+                "max_batch_size": limits.max_batch,
+                "max_concurrent_uploads": limits.max_concurrent_uploads,
+                "queue_depth": upload.queue_depth,
+                "formats": limits.formats,
+            })
+        }),
+    })));
+
+    // 上面那份 body 是 finish() 拼好的，这里只需要再挂一个 Set-Cookie
+    match csrf_cookie {
+        Some(cookie) => crate::http::with_cookies(
+            response,
+            crate::http::cookie_headers(cookie),
+        ),
+        None => response,
+    }
 }
 
 /// 条款摘要：`required` 只对「带着有效会话」的请求有意义。

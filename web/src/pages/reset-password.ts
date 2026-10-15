@@ -1,8 +1,13 @@
 /**
  * 找回密码。
  *
- * 与注册同样的两步：发码 → 换密码。区别是这里**不给「邮箱是否注册过」的线索**：
- * 服务端对不存在的邮箱也返回成功，页面上只说「如果该邮箱已注册，验证码已发出」。
+ * 两种进来方式，对应两条路：
+ *
+ *   * 邮件里的链接带着一次性令牌（`?token=pxr_…`）进来 —— 只问新密码，
+ *     账号与到期时间由服务端凭令牌换出来，链接里不再放邮箱与验证码；
+ *   * 手动进来 —— 发码 → 填邮箱 + 验证码 + 新密码。这条路**不给
+ *     「邮箱是否注册过」的线索**：服务端对不存在的邮箱也返回成功，
+ *     页面上只说「如果该邮箱已注册，验证码已发出」。
  */
 
 import { request, ApiError } from "../core/api";
@@ -12,6 +17,12 @@ import { toastError } from "../core/toast";
 import { field, qtip, textInput } from "../ui/widgets";
 
 export async function render(ctx: PageContext): Promise<void> {
+  const token = (ctx.query.get("token") ?? "").trim();
+  if (token) {
+    await renderFromLink(ctx, token);
+    return;
+  }
+
   const emailInput = textInput({ placeholder: "chenyu@example.com", type: "email" });
   const codeInput = textInput({ placeholder: "6 位数字", name: "code" });
   const passwordInput = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
@@ -160,4 +171,96 @@ export async function render(ctx: PageContext): Promise<void> {
 
   ctx.outlet.append(form);
   emailInput.focus();
+}
+
+/**
+ * 从邮件链接进来的那一页：只问新密码。
+ *
+ * 账号从令牌换出来（打码显示），用户不必也不该在 URL 里看到自己的邮箱与
+ * 有效验证码——那两样转发一次链接就跟着走了。令牌用一次即废。
+ */
+async function renderFromLink(ctx: PageContext, token: string): Promise<void> {
+  const root = h("div", { style: { maxWidth: "440px", margin: "0 auto", padding: "34px 18px" } });
+  ctx.outlet.append(root);
+
+  const header = h(
+    "div",
+    { style: { textAlign: "center", marginBottom: "20px" } },
+    h("div.logo", { style: { fontSize: "19px" }, html: "Pi<em>x</em>ora" }),
+    h("div.tip", { text: "设置新密码" }),
+  );
+
+  let account = "…";
+  try {
+    const info = await request<{ email: string; expires_at: string }>(
+      `/auth/password/link?token=${encodeURIComponent(token)}`,
+    );
+    account = info.email;
+  } catch (err) {
+    const message = err instanceof ApiError ? err.message : String(err);
+    root.append(
+      header,
+      // 标题已经把「不能用」说掉了，正文只留原因与下一步
+      qtip("err", "这个链接不能用", message.replace(/^这个链接/, "").replace(/^链接/, "")),
+      h(
+        "div.flexline",
+        { style: { justifyContent: "center", gap: "10px", marginTop: "18px" } },
+        h("a.btn.pri", { href: "#/reset-password", text: "重新发一封重置邮件" }),
+        h("a.btn", { href: "#/login", text: "去登录" }),
+      ),
+    );
+    return;
+  }
+
+  const passwordInput = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
+  const confirmInput = textInput({ type: "password", placeholder: "再输入一次" });
+  const errorBox = h("div", { style: { display: "none", marginBottom: "12px" } });
+  const submit = h("button.btn.pri.blk", { type: "submit", text: "保存新密码" });
+
+  const form = h(
+    "form",
+    null,
+    errorBox,
+    qtip("info", "链接已验证", `正在为 ${account} 设置新密码。设完会用新密码登录。`),
+    h("div", { style: { marginTop: "12px" } }),
+    field("新密码", passwordInput, "至少 10 位，需同时包含大写字母、小写字母和数字。"),
+    field("确认新密码", confirmInput),
+    submit,
+    qtip(
+      "warn",
+      "保存后所有设备会被踢下线",
+      "密码都泄露了，旧会话不能继续留着。请用新密码重新登录。",
+    ),
+  );
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    errorBox.style.display = "none";
+
+    if (passwordInput.value !== confirmInput.value) {
+      errorBox.replaceChildren(qtip("err", null, "两次输入的密码不一致"));
+      errorBox.style.display = "";
+      return;
+    }
+
+    submit.disabled = true;
+    submit.textContent = "提交中…";
+    try {
+      await request("/auth/password/link/reset", {
+        method: "POST",
+        json: { token, password: passwordInput.value },
+      });
+      errorBox.replaceChildren(qtip("ok", null, "密码已重置，所有设备已下线。正在跳转登录…"));
+      errorBox.style.display = "";
+      window.setTimeout(() => navigate("/login", { replace: true }), 1200);
+    } catch (err) {
+      errorBox.replaceChildren(qtip("err", null, err instanceof ApiError ? err.message : "保存失败，请稍后重试。"));
+      errorBox.style.display = "";
+      submit.disabled = false;
+      submit.textContent = "保存新密码";
+    }
+  });
+
+  root.append(header, form);
+  passwordInput.focus();
 }

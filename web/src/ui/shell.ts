@@ -11,7 +11,7 @@
 
 import { h, mount } from "../core/dom";
 import { currentPath, navigate } from "../core/router";
-import { getState, impersonator, isAdmin, setUser, subscribe } from "../core/state";
+import { getState, impersonator, isAdmin, loadSite, setUser, subscribe } from "../core/state";
 import { request } from "../core/api";
 import { toast, toastError } from "../core/toast";
 
@@ -97,6 +97,7 @@ function navLink(item: NavItem): HTMLElement {
 /** 顶栏。图标 + 搜索框 + 账号 + API 文档，别的一律不放。 */
 export function renderNavbar(): HTMLElement {
   const user = getState().user;
+  // 顶栏照常留着：它是回广场的入口（登录页上的品牌不是链接），也带着账号菜单
   const navbar = h("div.navbar");
 
   // 品牌文字跟着站点名走：`data-brand` 是给 state.applySiteIdentity 改文字用的。
@@ -128,14 +129,9 @@ export function renderNavbar(): HTMLElement {
   navbar.append(h("span.spacer"));
 
   if (user) {
-    navbar.append(
-      h("a.avatar", {
-        href: "#/account",
-        class: user.role === "admin" ? "admin" : "",
-        text: (user.email[0] ?? "U").toUpperCase(),
-        "aria-label": "账号",
-      }),
-    );
+    // 管理后台的入口只在头像下拉里：顶栏再多一个按钮，和「账号」挤在一起
+    // 反而让人分不清点哪个
+    navbar.append(userMenu(user));
   } else {
     // 未登录只留一个入口，注册挪进登录页（右下角）。
     // 游客看到两个按钮会先纠结「我该点哪个」，而这两步的落点本来就是同一个表单。
@@ -146,8 +142,68 @@ export function renderNavbar(): HTMLElement {
   return navbar;
 }
 
+/**
+ * 顶栏的账号区：头像 + 悬停下拉。
+ *
+ * 点头像直接进「账号信息」；鼠标停在头像上（或键盘 Tab 进来）展开一串去处：
+ * 账号信息、我的相册、管理后台（管理员）、退出登录。退出登录从侧边栏挪到
+ * 这里——它是账号级动作，和侧边栏那些「去哪一页」不是一类。
+ */
+function userMenu(user: NonNullable<ReturnType<typeof getState>["user"]>): HTMLElement {
+  const menu = h(
+    "div.menu",
+    null,
+    h("div.who", null, avatarNode("sm"), h("span", { text: user.email })),
+    h("a", { href: "#/account", text: "账号信息" }),
+    h("a", { href: "#/albums", text: "我的相册" }),
+    isAdmin() ? h("a", { href: "#/admin/users", text: "管理后台" }) : null,
+    h("button", { type: "button", "data-act": "logout", text: "退出登录" }),
+  );
+  return h(
+    "div.usermenu",
+    null,
+    h(
+      "a.avatar",
+      {
+        href: "#/account",
+        class: user.role === "admin" ? "admin" : "",
+        "aria-label": "账号",
+      },
+      avatarNode("md"),
+    ),
+    menu,
+  );
+}
+
+/**
+ * 头像内容：设过就用图，没设就回落到邮箱首字母。
+ *
+ * 上传的图是站内相对路径，外链是完整地址，两种情况 `src` 都能直接用。
+ */
+export function avatarNode(size: "md" | "sm"): HTMLElement {
+  const user = getState().user;
+  const url = user?.avatar ?? "";
+  if (user && url) {
+    return h("img.avatar-img", {
+      class: size === "sm" ? "sm" : "",
+      src: url,
+      alt: "",
+      // 图挂了（外链失效、路径过期）时别留一个破图标：退回首字母。
+      // 用 `on: {}` 挂监听——写成普通属性会被 setAttribute 成一段字符串
+      on: {
+        error: (event: Event) => {
+          const img = event.target as HTMLImageElement;
+          img.replaceWith(h("span", { text: (user.email[0] ?? "U").toUpperCase() }));
+        },
+      },
+    });
+  }
+  return h("span", { text: (user?.email[0] ?? "U").toUpperCase() });
+}
+
 export function renderTabbar(): HTMLElement {
   const tabbar = h("nav.tabbar", { "aria-label": "主导航" });
+  if (isStandalone(currentPath())) return tabbar;
   const user = getState().user;
   const items = user ? [PLAZA, ALBUMS, UPLOAD, MINE] : [PLAZA, { ...ALBUMS }, MINE];
   for (const item of items) {
@@ -170,11 +226,25 @@ export function renderTabbar(): HTMLElement {
  * 广场页也不显示：那一页是「浏览」的入口，一进来就压一条导航栏反而挡图。
  * 顶栏的品牌图标与底部 tab 都能回广场，不缺这一个入口。
  */
+/**
+ * 整页式页面：登录、注册、找回密码这些。
+ *
+ * 它们自带品牌与表单，占满整屏；此时把侧栏与底部 tab 摆出来，等于在别人的
+ * 表单旁边挂着导航——尤其是已登录的人点开邮件里的重置链接，左边一列后台
+ * 入口看着就很怪。
+ */
+const STANDALONE_PATHS = ["/login", "/register", "/reset-password", "/suspended", "/install"];
+
+function isStandalone(path: string): boolean {
+  return STANDALONE_PATHS.includes(path);
+}
+
 function renderSidebar(): HTMLElement | null {
   const user = getState().user;
   if (!user) return null;
   const path = currentPath();
   if (path === "/" || path === "/plaza") return null;
+  if (isStandalone(path)) return null;
 
   const sidebar = h("nav.sidebar", { "aria-label": "侧边导航" });
   const groups: Array<[string, NavItem[]]> = [
@@ -187,16 +257,7 @@ function renderSidebar(): HTMLElement | null {
     sidebar.append(h("div.grp", { text: title }));
     for (const item of items) sidebar.append(navLink(item));
   }
-  // 退出登录放在侧边栏最后：它是账号级动作，和上面那些「去哪一页」不同类
-  sidebar.append(
-    h("div.grp", { text: "账号" }),
-    h(
-      "button.logout",
-      { type: "button", "data-act": "logout" },
-      h("span", { text: "⏻" }),
-      h("span", { text: "退出登录" }),
-    ),
-  );
+  // 退出登录不在这儿：它是账号级动作，归顶栏那个头像下拉
   return sidebar;
 }
 
@@ -213,11 +274,15 @@ export async function logoutNow(): Promise<void> {
     toastError(err);
   }
   setUser(null);
+  // 站点信息按身份下发：访客那套上传额度与 CSRF Cookie 只在未登录时有。
+  // 不重拉的话，退出登录后的人手里还是「登录用户看到的那份 /site」,
+  // 广场上的游客上传面板和上传许可都不会亮起来
+  void loadSite();
   navigate("/login", { replace: true });
   toast("已退出登录");
 }
 
-/** 侧边栏的退出按钮走事件委托，避免每页各绑一次。 */
+/** 顶栏与头像下拉里的退出按钮走事件委托，避免每处各绑一次。 */
 document.addEventListener("click", (event) => {
   const target = event.target as HTMLElement | null;
   if (target?.closest('[data-act="logout"]')) void logoutNow();

@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use crate::args::{Args, WhereBuilder};
 use crate::error::Result;
 use crate::model::*;
+use crate::repo::images::PurgedBlobs;
 use crate::repo::{like_pattern, Page, PageRequest, Repo};
 
 /// 新建用户所需的字段。UID 由服务层生成并保证唯一。
@@ -79,6 +80,18 @@ impl Repo {
         row.as_ref().map(User::from_row).transpose()
     }
 
+    /// 最早创建的那个账号的 UID。
+    ///
+    /// 安装账号的兜底识别：`install.admin_uid` 这个设置项是后加的，早先装好的
+    /// 实例里没有它。账号按 id 递增创建，第一个就是当年安装时建的管理员。
+    pub async fn first_user_uid(&self) -> Result<Option<String>> {
+        let row = self
+            .db
+            .fetch_optional("SELECT uid FROM users ORDER BY id ASC LIMIT 1", Args::new())
+            .await?;
+        row.map(|row| get_str(&row, "uid")).transpose()
+    }
+
     /// 管理端详情：用户 + 图片数 + 是否有自定义限流。
     pub async fn find_user_summary(&self, id: i64) -> Result<Option<UserSummary>> {
         let row = self
@@ -119,6 +132,28 @@ impl Repo {
             .execute(
                 "UPDATE users SET password_hash = ? WHERE id = ?",
                 Args::new().text(password_hash).int(id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 设头像（`None` = 清掉）。地址的形态由服务层归一，仓储只负责写。
+    pub async fn set_user_avatar(&self, id: i64, avatar: Option<&str>) -> Result<()> {
+        self.db
+            .execute(
+                "UPDATE users SET avatar = ? WHERE id = ?",
+                Args::new().opt_text(avatar.map(str::to_string)).int(id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 设「下次登录必须改密码」。管理员直接设密码时置上，用户自己改完清掉。
+    pub async fn set_must_change_password(&self, id: i64, required: bool) -> Result<()> {
+        self.db
+            .execute(
+                "UPDATE users SET must_change_password = ? WHERE id = ?",
+                Args::new().bool(required).int(id),
             )
             .await?;
         Ok(())
@@ -293,12 +328,54 @@ impl Repo {
         Ok(())
     }
 
-    /// 删除账号。相册与图片随外键级联删除，物理文件由 GC 按引用计数回收。
-    pub async fn delete_user(&self, id: i64) -> Result<()> {
-        self.db
-            .execute("DELETE FROM users WHERE id = ?", Args::new().int(id))
+    /// 删除账号，返回它用过的实体（原图 + 缩略图）。
+    ///
+    /// 图片、相册、令牌、会话、频率策略这些从属表都在外键上挂了级联，删掉这一行
+    /// 就一起走。但 `blobs.ref_count` 不会自己变小——级联删行绕开了我们那套记账，
+    /// 计数停在原地的话 GC 永远等不到 `ref_count = 0`，文件就再也收不走了。
+    /// 所以删之前先把计数重算成「除它之外还有多少条活引用」：只还自己那一份，
+    /// 别人也在用的共享实体不受影响。
+    ///
+    /// 顺序不能反：删完 `users` 就没有 image 行可依了。返回的实体交给调用方
+    /// 回收物理文件。
+    pub async fn delete_user(&self, id: i64) -> Result<Vec<PurgedBlobs>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT DISTINCT blob_id, thumb_blob_id FROM images WHERE owner_id = ?",
+                Args::new().int(id),
+            )
             .await?;
-        Ok(())
+        let mut blobs = Vec::with_capacity(rows.len());
+        for row in rows.iter() {
+            blobs.push(PurgedBlobs {
+                blob_id: get_i64(row, "blob_id")?,
+                thumb_blob_id: get_opt_i64(row, "thumb_blob_id")?,
+            });
+        }
+
+        let mut tx = self.db.pool().begin().await?;
+        // 活引用才占着计数；进过回收站的在软删时已经还过了
+        for column in ["blob_id", "thumb_blob_id"] {
+            let sql = format!(
+                "UPDATE blobs SET ref_count = ( \
+                     SELECT COUNT(*) FROM images i WHERE i.{column} = blobs.id \
+                       AND i.deleted_at IS NULL AND i.owner_id <> ? \
+                 ) WHERE id IN (SELECT {column} FROM images WHERE owner_id = ? AND {column} IS NOT NULL)"
+            );
+            sqlx::query(&self.db.sql(&sql))
+                .bind(id)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        sqlx::query(&self.db.sql("DELETE FROM users WHERE id = ?"))
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(blobs)
     }
 
     // ---------- 列表与统计 ----------
@@ -511,13 +588,13 @@ impl Repo {
 }
 
 /// 管理端列表共用的列清单与派生列。
-const USER_SUMMARY_SQL: &str = "SELECT u.id, u.uid, u.email, u.role, u.status, u.quota_bytes, \
+const USER_SUMMARY_SQL: &str = "SELECT u.id, u.uid, u.email, u.email_verified, u.role, u.status, u.quota_bytes, \
         u.used_bytes, u.created_at, u.last_login_at, \
         (SELECT COUNT(*) FROM images i WHERE i.owner_id = u.id AND i.deleted_at IS NULL) AS image_count, \
         (SELECT COUNT(*) FROM rate_limit_policies r WHERE r.user_id = u.id) AS rate_custom \
    FROM users u";
 
-const USER_SUMMARY_SQL_WHERE: &str = "SELECT u.id, u.uid, u.email, u.role, u.status, u.quota_bytes, \
+const USER_SUMMARY_SQL_WHERE: &str = "SELECT u.id, u.uid, u.email, u.email_verified, u.role, u.status, u.quota_bytes, \
         u.used_bytes, u.created_at, u.last_login_at, \
         (SELECT COUNT(*) FROM images i WHERE i.owner_id = u.id AND i.deleted_at IS NULL) AS image_count, \
         (SELECT COUNT(*) FROM rate_limit_policies r WHERE r.user_id = u.id) AS rate_custom \

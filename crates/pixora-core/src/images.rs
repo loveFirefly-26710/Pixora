@@ -489,15 +489,16 @@ impl AppState {
             });
         }
 
-        // 未归档的图片也算一个节点，否则「全部图片」的数量对不上
+        // 没有归属的图片理论上不该再出现（移动一律落进默认相册，启动时还有
+        // 一次收编），留这一格只是兜底：真有历史遗留也让它在视图里看得见
         let (loose_files, loose_bytes) = aggregates.get(&None).copied().unwrap_or((0, 0));
-        if filter_slug.is_none() || filter_slug.as_deref() == Some("") {
+        if loose_files > 0 && (filter_slug.is_none() || filter_slug.as_deref() == Some("")) {
             nodes.insert(
                 0,
                 FsNodePayload {
                     node_type: "root".into(),
                     id: None,
-                    name: "未分类".into(),
+                    name: "未归档".into(),
                     slug: String::new(),
                     files: loose_files,
                     size: loose_bytes,
