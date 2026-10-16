@@ -810,7 +810,8 @@ API 客户端：
   上传完立刻生效：没设过头像的账号（含新注册的）都显示它。
 - `POST /api/v1/admin/settings/mail/test` → `{ "to": "admin@example.com" }` → `{ "data": { "ok": true, "message": "…" } }`
 - `POST /api/v1/admin/settings/formats` → `{ "formats": ["jpg","png","avif"] }`
-- `POST /api/v1/admin/thumbnails/rebuild` → `{ "data": { "queued": 128, "enabled": false } }`
+（「重算缩略图」走 `POST /api/v1/admin/storage/thumbs/rebuild`；缺缩略图的图由后台任务
+按轮次补，受 `thumb.server_fallback` 控制。）
   （服务端兜底关闭时 `enabled = false`、`queued = 0`，并说明原因）
 
 ### 8.7 服务条款管理

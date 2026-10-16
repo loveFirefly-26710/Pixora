@@ -20,7 +20,7 @@ import { openMailTemplates } from "./mail-templates";
 import type { PageContext } from "../core/router";
 import { toastError, toastOk } from "../core/toast";
 import { currentUser, loadMe, loadSite } from "../core/state";
-import { refreshNav } from "../ui/shell";
+import { BUILTIN_AVATAR, refreshNav } from "../ui/shell";
 import type { AdminSettings, RateLimitAdmin } from "../core/types";
 import {
   apiRateCard,
@@ -246,7 +246,7 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     mxCheck: data.mail.mx_check,
     thirdPartyCheck: data.mail.third_party_check,
     background: textInput({ value: data.appearance.background ?? "", mono: true }),
-    defaultAvatar: textInput({ value: data.appearance.default_avatar ?? "", mono: true }),
+    defaultAvatar: textInput({ value: data.appearance.default_avatar ?? "", mono: true, name: "default-avatar" }),
     formats: [...(data.upload.formats ?? [])],
     maxWidth: textInput({ value: String(data.upload.max_width ?? 0), type: "number", mono: true }),
     maxHeight: textInput({ value: String(data.upload.max_height ?? 0), type: "number", mono: true }),
@@ -345,6 +345,7 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       breachCard(rateDraft),
       usersCard(reload, rate, data.upload.format_options?.length ? data.upload.format_options : FALLBACK_FORMATS),
       thumbCard(draft),
+      defaultAvatarCard(reload, draft, data),
       securityCard(draft),
       moderationCard(draft),
       mailCard(draft),
@@ -354,11 +355,6 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       "div.flexline",
       { style: { justifyContent: "flex-end", marginTop: "16px" } },
       rateLogsButton(),
-      h("button.btn", {
-        type: "button",
-        text: "重新生成缩略图",
-        on: { click: (event) => void rebuildThumbs(event.target as HTMLButtonElement) },
-      }),
       h("button.btn.pri", {
         type: "button",
         text: "保存设置",
@@ -730,6 +726,7 @@ function moderationCard(draft: SettingsDraft): HTMLElement {
 
 /** 缩略图策略：客户端生成 + 服务端兜底。 */
 function thumbCard(draft: SettingsDraft): HTMLElement {
+  // 「把老缩略图按新尺寸重算一遍」在「存储管理」那一页（带进度），这里只管开关
   const state = h("div", { style: { marginTop: "10px" } });
   const refresh = (): void => {
     mount(
@@ -833,6 +830,105 @@ function mailCard(draft: SettingsDraft): HTMLElement {
   );
 }
 
+/**
+ * 默认头像：没设过头像的账号（含新注册的）都用它。
+ *
+ * 与背景图同一条路：可以填地址，也可以直接上传（存进库、带版本号）。
+ * 留空就是内置那张轮廓头像——所以这一栏空着也是「有效设置」，不是没配置。
+ * 这一栏自带保存按钮：换了头像要立刻看到效果，不必回页面底部点「保存设置」。
+ */
+function defaultAvatarCard(reload: () => void, draft: SettingsDraft, data: AdminSettings): HTMLElement {
+  const isUploaded = (data.appearance.default_avatar ?? "").startsWith("/api/v1/site/avatar");
+  const preview = h("div.avatar-preview");
+  const sync = (): void => {
+    const url = draft.defaultAvatar.value.trim() || BUILTIN_AVATAR;
+    mount(preview, h("img", { src: url, alt: "当前默认头像" }));
+  };
+  sync();
+  draft.defaultAvatar.addEventListener("input", sync);
+
+  const fileInput = h("input", {
+    type: "file",
+    accept: "image/*",
+    style: { display: "none" },
+    "aria-hidden": "true",
+  });
+  const uploadBtn = h("button.btn.sm.pri", { type: "button", text: "上传默认头像" });
+  uploadBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (file) void uploadDefaultAvatar(file, uploadBtn, reload);
+  });
+
+  const saveBtn = h("button.btn.sm", { type: "button", text: "保存地址" });
+  saveBtn.addEventListener("click", async () => {
+    const value = draft.defaultAvatar.value.trim();
+    saveBtn.disabled = true;
+    saveBtn.textContent = "保存中…";
+    try {
+      await request("/admin/settings", {
+        method: "PUT",
+        json: { appearance: { default_avatar: value || null } },
+      });
+      toastOk(value ? "默认头像地址已生效" : "已清空，改用内置那张轮廓头像");
+      await reloadSiteIdentity();
+      reload();
+    } catch (err) {
+      toastError(err);
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "保存地址";
+    }
+  });
+
+  const removeBtn = h("button.btn.sm.dgr", { type: "button", text: "移除默认头像" });
+  removeBtn.disabled = !(data.appearance.default_avatar ?? "").trim();
+  removeBtn.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "移除默认头像",
+      message: "清掉之后，没设过头像的账号显示内置那张轮廓头像；账号自己设过的头像不受影响。",
+      confirmText: "移除",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await request("/admin/settings", { method: "PUT", json: { appearance: { default_avatar: null } } });
+      toastOk("默认头像已移除");
+      await reloadSiteIdentity();
+      reload();
+    } catch (err) {
+      toastError(err);
+    }
+  });
+
+  return cardNode(
+    cardHead("默认头像"),
+    h(
+      "div.row",
+      { style: { alignItems: "flex-end" } },
+      field(
+        "默认头像地址",
+        draft.defaultAvatar,
+        "没设过头像的账号（含新注册的）都用它；留空就是内置那张轮廓头像。也可以直接上传一张。",
+      ),
+      h("div", { style: { flex: "0 0 76px", paddingBottom: "13px" } }, preview),
+      h(
+        "div",
+        { style: { flex: "0 0 auto", paddingBottom: "13px", display: "flex", gap: "8px" } },
+        saveBtn,
+        uploadBtn,
+        removeBtn,
+      ),
+    ),
+    fileInput,
+    h("div.tip", {
+      text:
+        (isUploaded ? "当前用的是上传进数据库的那张，也可以在这里换成外链地址。" : "") +
+        "上传的图先在本机缩到 512px 再存进数据库，圆角与裁切由前端完成。",
+    }),
+  );
+}
+
 /** 外观：背景图（可以填地址，也可以直接上传一张）。 */
 function appearanceCard(
   reload: () => void,
@@ -873,77 +969,6 @@ function appearanceCard(
 
   const isUploaded = data.appearance.background?.startsWith("/api/v1/site/background") ?? false;
 
-  // ---- 站点默认头像 ----
-  // 没设过头像的账号（含新注册的）都用它。不写进用户行、放在这里下发：
-  // 管理员换一张，所有人立刻跟着换
-  const avatarPreview = h("div.avatar-preview");
-  const syncAvatar = (): void => {
-    const url = draft.defaultAvatar.value.trim();
-    if (!url) {
-      mount(avatarPreview, h("span", { text: "默认" }));
-      return;
-    }
-    mount(avatarPreview, h("img", { src: url, alt: "当前默认头像" }));
-  };
-  syncAvatar();
-  draft.defaultAvatar.addEventListener("input", syncAvatar);
-
-  const avatarFile = h("input", {
-    type: "file",
-    accept: "image/*",
-    style: { display: "none" },
-    "aria-hidden": "true",
-  });
-  const avatarUploadBtn = h("button.btn.sm.pri", { type: "button", text: "上传默认头像" });
-  avatarUploadBtn.addEventListener("click", () => avatarFile.click());
-  avatarFile.addEventListener("change", () => {
-    const file = avatarFile.files?.[0];
-    if (file) void uploadDefaultAvatar(file, avatarUploadBtn, reload);
-  });
-
-  const avatarRemoveBtn = h("button.btn.sm.dgr", { type: "button", text: "移除默认头像" });
-  avatarRemoveBtn.addEventListener("click", async () => {
-    const ok = await confirmDialog({
-      title: "移除默认头像",
-      message: "没设过头像的账号会回到「邮箱首字母方块」。同一份头像若被账号设成自己的，不受影响。",
-      confirmText: "移除",
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await request("/admin/settings", { method: "PUT", json: { appearance: { default_avatar: null } } });
-      toastOk("默认头像已移除");
-      reload();
-    } catch (err) {
-      toastError(err);
-    }
-  });
-
-  const avatarBlock = (): HTMLElement =>
-    h(
-      "div",
-      null,
-      h(
-        "div.row",
-        { style: { alignItems: "flex-end" } },
-        field(
-          "默认头像地址",
-          draft.defaultAvatar,
-          "没设过头像的账号（含新注册的）都用它；留空就是各账号邮箱首字母的方块。也可以直接上传一张。",
-        ),
-        h("div", { style: { flex: "0 0 76px", paddingBottom: "13px" } }, avatarPreview),
-        h(
-          "div",
-          { style: { flex: "0 0 auto", paddingBottom: "13px", display: "flex", gap: "8px" } },
-          avatarUploadBtn,
-          avatarRemoveBtn,
-        ),
-      ),
-      avatarFile,
-      h("div.tip", {
-        text: "上传的图先在本机缩到 512px 再存进数据库，圆角与裁切由前端完成。换了地址记得点「保存设置」。",
-      }),
-    );
 
   const removeBtn = h("button.btn.sm.dgr", { type: "button", text: "移除背景图" });
   removeBtn.addEventListener("click", async () => {
@@ -987,8 +1012,6 @@ function appearanceCard(
     h("div.tip", {
       text: "上传的图先在本机压到 1920px 再存进数据库，不落文件系统，上传完立刻生效。换了地址记得点「保存设置」。",
     }),
-    h("div", { style: { borderTop: "1px solid var(--line)", margin: "16px 0 14px" } }),
-    avatarBlock(),
   );
 }
 
@@ -1119,35 +1142,6 @@ async function refreshIdentity(): Promise<void> {
   }
 }
 
-/** 重新生成缩略图：服务端兜底没开就如实说 0 张进队。 */
-async function rebuildThumbs(button: HTMLButtonElement): Promise<void> {
-  const ok = await confirmDialog({
-    title: "重新生成缩略图",
-    message: "会给缺少缩略图的图片排一次后台任务。服务端没开兜底生成时不会有任何任务入队。",
-    confirmText: "开始",
-  });
-  if (!ok) return;
-  button.disabled = true;
-  button.textContent = "提交中…";
-  try {
-    const payload = await request<{ queued: number; enabled: boolean }>("/admin/thumbnails/rebuild", {
-      method: "POST",
-    });
-    if (!payload.enabled) {
-      // 如实显示：兜底关着就是 0 张，别让人以为在跑
-      toastError(`服务端兜底生成未启用：${payload.queued} 张进队。要补缩略图请先打开「服务端兜底生成」。`);
-    } else if (payload.queued === 0) {
-      toastOk("没有缺缩略图的图片，0 张进队");
-    } else {
-      toastOk(`已排入 ${payload.queued} 张`);
-    }
-  } catch (err) {
-    toastError(err);
-  } finally {
-    button.disabled = false;
-    button.textContent = "重新生成缩略图";
-  }
-}
 
 /// 邮件那一栏动过没有。邮箱/密码这类字段为空是常态（还没配邮件），
 /// 不能拿「填没填」当「改没改」——只有和加载时的值不一致才算动过。

@@ -367,29 +367,6 @@ fn encode_thumb(source: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// 管理后台「重新生成缩略图」按钮的实现。
-pub async fn rebuild_all(state: &Arc<AppState>) -> pixora_core::Result<RebuildOutcome> {
-    let enabled = state.settings.upload().await?.thumb_server_fallback;
-    if !enabled {
-        return Ok(RebuildOutcome {
-            enabled: false,
-            pending: 0,
-        });
-    }
-    // 不在这里同步跑完：缺的图可能成千上万，交给后台任务按轮次处理
-    let pending = state.repo.list_images_missing_thumb(500, true).await?.len() as i64;
-    Ok(RebuildOutcome {
-        enabled: true,
-        pending,
-    })
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RebuildOutcome {
-    pub enabled: bool,
-    pub pending: i64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

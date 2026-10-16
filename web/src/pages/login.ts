@@ -24,7 +24,9 @@ export async function render(ctx: PageContext): Promise<void> {
 
   const emailInput = textInput({ placeholder: "chenyu@example.com", type: "email" });
   const passwordInput = textInput({ type: "password", placeholder: "至少 10 位" });
-  const remember = h("input", { type: "checkbox", checked: true });
+  // 默认不勾：默认「记住」等于替用户延长会话寿命，而多数人用的是公共设备或
+  // 只是想进来传张图——想让浏览器记住的人自己会去勾
+  const remember = h("input", { type: "checkbox" });
 
   // 第二步：6 位动态码，或一枚恢复码
   const totpInput = textInput({ placeholder: "6 位动态码或恢复码", name: "totp" });
