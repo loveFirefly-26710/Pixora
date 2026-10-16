@@ -20,7 +20,7 @@ import {
 import { confirmDialog } from "../core/modal";
 import type { PageContext } from "../core/router";
 import { loadMe, updateUser } from "../core/state";
-import { avatarUrl } from "../ui/shell";
+import { avatarUrl, navGroups, navHref, refreshNav } from "../ui/shell";
 import { toastError, toastOk } from "../core/toast";
 import type { UserLimits, UserProfile } from "../core/types";
 import {
@@ -64,6 +64,8 @@ export async function render(ctx: PageContext): Promise<void> {
           usageCard(payload.user),
           limitsCard(payload.user.limits),
         ),
+        // 窄屏没有侧边栏，后台与学生那些页面得从这里进
+        mobileNavCard(),
       );
     } catch (err) {
       body.replaceChildren(errorBlock(err, () => void load()));
@@ -131,6 +133,7 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
       return;
     }
     await saveAvatar(saveUrl, value, reload);
+    brokenNotice.style.display = "none";
   });
 
   const remove = h("button.btn.sm.dgr", { type: "button", text: "移除头像" });
@@ -144,6 +147,7 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
     });
     if (!ok) return;
     await saveAvatar(remove, "", reload);
+    brokenNotice.style.display = "none";
   });
 
   return card(
@@ -177,6 +181,33 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
   );
 }
 
+/**
+ * 窄屏用的入口目录。
+ *
+ * 侧边栏在 1024px 以下隐藏，而底部标签栏只有广场 / 相册 / 上传 / 我的四个——
+ * 没有这张表的话，安全、API Token、回收站与整个管理后台在手机上根本进不去。
+ * 宽屏不摆：那里侧边栏一直在旁边。
+ */
+function mobileNavCard(): HTMLElement | null {
+  if (!window.matchMedia("(max-width: 1023px)").matches) return null;
+  const groups = navGroups().filter(([, items]) => items.length > 0);
+  const list = h("div.navlist");
+  for (const [title, items] of groups) {
+    list.append(h("div.grp", { text: title }));
+    for (const item of items) {
+      list.append(
+        h(
+          "a.navitem",
+          { href: navHref(item.path) },
+          h("span.ic", { text: item.icon }),
+          h("span", { text: item.label }),
+        ),
+      );
+    }
+  }
+  return card("全部入口", list);
+}
+
 /** 保存头像地址。空串表示移除。 */
 async function saveAvatar(button: HTMLButtonElement, value: string, reload: () => void): Promise<void> {
   button.disabled = true;
@@ -188,8 +219,8 @@ async function saveAvatar(button: HTMLButtonElement, value: string, reload: () =
       json: { avatar: value },
     });
     updateUser({ avatar: payload.avatar });
-    // 换了地址就把上一条「加载失败」的提示收掉：它是针对上一个地址说的
-    brokenNotice.style.display = "none";
+    // 顶栏的头像跟着换：`updateUser` 会通知订阅者，但页面自己那块预览要重画才动
+    refreshNav();
     toastOk(payload.avatar ? "头像已更新" : "头像已移除");
     reload();
   } catch (err) {

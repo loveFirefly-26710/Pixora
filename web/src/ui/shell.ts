@@ -15,7 +15,7 @@ import { getState, impersonator, isAdmin, loadSite, setUser, subscribe } from ".
 import { request } from "../core/api";
 import { toast, toastError } from "../core/toast";
 
-interface NavItem {
+export interface NavItem {
   path: string;
   label: string;
   icon: string;
@@ -91,7 +91,7 @@ function active(items: NavItem[]): boolean {
  * 广场（首页）写站点根 `/`：`#/` 与 `/` 是同一个页面，但地址栏里多一段
  * `#/` 既不好看也不好转述；其余页面仍是 hash 路由（单二进制部署不用配 rewrite）。
  */
-function navHref(path: string): string {
+export function navHref(path: string): string {
   return path === "/" ? "/" : `#${path}`;
 }
 
@@ -524,6 +524,20 @@ export function userViewBanner(
 }
 
 export { PLAZA, ALBUMS, UPLOAD, MINE, ADMIN_NAV, USER_NAV, ABOUT_NAV };
+
+/**
+ * 侧边栏那几组入口的完整清单（窄屏没有侧边栏时，账号页拿它当目录）。
+ *
+ * 分组与顺序跟侧边栏一致：手机上的「我的」页要把同样的去处摆出来，
+ * 否则后台那些页面（用户管理、存储、配额、日志、设置）在手机上根本进不去。
+ */
+export function navGroups(): Array<[string, NavItem[]]> {
+  return [
+    ["用户中心", USER_NAV],
+    ["管理后台", isAdmin() ? ADMIN_NAV : []],
+    ["关于", ABOUT_NAV],
+  ];
+}
 
 /**
  * 免登录切换用户的提示条。
