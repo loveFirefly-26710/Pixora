@@ -526,6 +526,16 @@ impl AppState {
         )))
     }
 
+    /// 当前占用率（与自动关闭判定同一口径）。算不出时返回 `None`。
+    ///
+    /// 管理端要用它把「已超阈值」这句话说准；对外页面上不出现。
+    pub async fn occupancy_percent_now(&self) -> Option<f64> {
+        let capacity = self.storage.capacity().await.ok()?;
+        let total = capacity.total.filter(|value| *value > 0)?;
+        let (basis, _) = occupancy_basis(&capacity);
+        Some(occupancy_percent(basis, total))
+    }
+
     /// 自动关闭注册的配置。
     pub async fn auto_close_policy(&self) -> Result<AutoClosePolicy> {
         Ok(AutoClosePolicy {
@@ -570,7 +580,7 @@ fn backend_view(backend: &pixora_repo::model::StorageBackend) -> BackendView {
 /// 自动模式且探测可信时总额就是磁盘容量，已用取宿主机整盘口径——磁盘满没满
 /// 跟是谁占的无关，宿主机上别的数据同样能把盘写满。手填总额（可能只是给本项目
 /// 定的预算）与网络挂载降级时拿不到整盘数字，只能按本项目占用算。
-fn occupancy_basis(capacity: &crate::storage_svc::CapacityInfo) -> (i64, &'static str) {
+pub(crate) fn occupancy_basis(capacity: &crate::storage_svc::CapacityInfo) -> (i64, &'static str) {
     match capacity.host_used {
         Some(host_used) => (host_used, "宿主机磁盘"),
         None => (capacity.used, "本项目"),
@@ -579,7 +589,7 @@ fn occupancy_basis(capacity: &crate::storage_svc::CapacityInfo) -> (i64, &'stati
 
 /// 占用率（百分比）。总额为 0 时分母不存在，按 0 算而不是报错——
 /// 空盘上除以零不该让注册页打不开。
-fn occupancy_percent(used: i64, total: i64) -> f64 {
+pub(crate) fn occupancy_percent(used: i64, total: i64) -> f64 {
     if total <= 0 {
         return 0.0;
     }

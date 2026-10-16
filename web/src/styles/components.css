@@ -2370,12 +2370,25 @@ tr.pick {
 }
 
 /* 登录方式一览：每行一块，窄屏自动折行 */
+/* 登录方式的一格一格：等高网格。同一行的盒子拉到一样高（最长的那格说了算），
+   宽度自适应；窄屏自动折成两列、一列 */
+.idgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
 .idrow {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px 12px;
-  margin-bottom: 8px;
   background: #fff;
+  /* 内容少的那格也要跟同行一样高：让内容从顶部排，多出来的留白在底部 */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
 }
 
 .idrow .idmain {
@@ -2386,6 +2399,12 @@ tr.pick {
 
 .idrow .tip {
   margin: 4px 0 0;
+}
+
+/* 操作按钮沉到格子底部：同行的盒子高度一致时，按钮对齐在同一条线上更整齐 */
+.idrow > .flexline:last-child,
+.idrow > .btn:last-child {
+  margin-top: auto !important;
 }
 
 /* ---------- 登录页的方式切换 ---------- */

@@ -1776,6 +1776,14 @@ pub async fn settings_get(
                 .await
                 .unwrap_or(false),
             "register_closed_reason": state.auto_close_reason().await.unwrap_or(None),
+            // 阈值与当前占用率：手开之后那一格要说清「已超阈值」，
+            // 光靠 register_closed_reason 拿不到（覆盖生效时它是 None）
+            "register_auto_close": {
+                "on": state.auto_close_policy().await.map(|p| p.on).unwrap_or(0),
+                "off": state.auto_close_policy().await.map(|p| p.off).unwrap_or(0),
+                "enabled": state.auto_close_policy().await.map(|p| p.enabled).unwrap_or(false),
+                "percent": state.occupancy_percent_now().await,
+            },
             "register_auto_close_override": state
                 .settings
                 .bool(pixora_core::stats::KEY_AUTO_CLOSE_OVERRIDE, false)

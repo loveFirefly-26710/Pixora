@@ -83,9 +83,20 @@ export async function render(ctx: PageContext): Promise<void> {
  */
 function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
   const preview = h("div.avatar-preview");
+  // 地址挂了（失效、对方不允许外链、路径过期）时说清是哪一种情况：
+  // 「头像没变」和「地址坏了」在界面上长得一样，不点明用户只能反复试
+  const brokenNotice = h("div.tip", { style: { display: "none", color: "var(--danger)" } });
   const paint = (url: string): void => {
     if (url) {
-      mount(preview, h("img", { src: url, alt: "当前头像" }));
+      const img = h("img", { src: url, alt: "当前头像" });
+      img.addEventListener("error", () => {
+        // 换成默认头像，并把原因写在地址输入框下面
+        img.replaceWith(h("img", { src: avatarUrl(null), alt: "默认头像" }));
+        brokenNotice.textContent =
+          "这个头像地址加载不出图片（可能已失效，或对方不允许外链），当前显示的是默认头像。换一个地址或上传一张图片即可。";
+        brokenNotice.style.display = "";
+      });
+      mount(preview, img);
     } else {
       mount(preview, h("span", { text: (user.email[0] ?? "U").toUpperCase() }));
     }
@@ -110,6 +121,8 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
   });
 
   const saveUrl = h("button.btn.sm", { type: "button", text: "应用地址" });
+  const urlField = field("图片地址", urlInput);
+  urlField.append(brokenNotice);
   saveUrl.addEventListener("click", async () => {
     const value = urlInput.value.trim();
     if (!value) {
@@ -158,7 +171,7 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
     h(
       "div.row",
       { style: { marginTop: "10px", alignItems: "flex-end" } },
-      h("div", { style: { flex: "1 1 260px" } }, field("图片地址", urlInput)),
+      h("div", { style: { flex: "1 1 260px" } }, urlField),
       h("div", { style: { flex: "0 0 auto", paddingBottom: "13px" } }, saveUrl),
     ),
   );
@@ -175,6 +188,8 @@ async function saveAvatar(button: HTMLButtonElement, value: string, reload: () =
       json: { avatar: value },
     });
     updateUser({ avatar: payload.avatar });
+    // 换了地址就把上一条「加载失败」的提示收掉：它是针对上一个地址说的
+    brokenNotice.style.display = "none";
     toastOk(payload.avatar ? "头像已更新" : "头像已移除");
     reload();
   } catch (err) {

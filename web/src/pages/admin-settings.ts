@@ -423,9 +423,22 @@ function siteCard(draft: SettingsDraft, data: AdminSettings): HTMLElement {
         )
       : data.site.register_auto_close_override
         ? qtip(
-            "info",
-            "容量自动关闭暂时不生效",
-            "你手动打开过注册，占用率回到恢复阈值以下之前，这项策略不会再自动关它。",
+            "warn",
+            "容量自动关闭暂时不生效（你手动开启的）",
+            (() => {
+              const policy = data.site.register_auto_close;
+              const head =
+                policy && policy.percent != null
+                  ? `占用已达 ${policy.percent.toFixed(1)}%（触发阈值 ${policy.on}%）：`
+                  : "占用率已经在触发阈值之上：";
+              return (
+                head +
+                "注册是你手动打开的，这一层不会把它按回去。" +
+                (policy
+                  ? `占用降到 ${policy.off}% 以下、之后再涨过 ${policy.on}% 时，才会重新触发自动关闭。`
+                  : "")
+              );
+            })(),
           )
         : null,
     field(

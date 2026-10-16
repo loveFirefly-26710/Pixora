@@ -423,6 +423,10 @@ export interface QuotaAdmin {
     off: number;
     register_open: boolean;
     closed_reason: string | null;
+    /** 管理员手动开过注册：已超阈值但不自动关闭 */
+    manual_override: boolean;
+    /** 占用率（百分比），算不出时是 null */
+    percent: number | null;
   };
   top_users: AdminUserRow[];
 }
@@ -524,6 +528,13 @@ export interface AdminSettings {
     register_closed_reason?: string | null;
     /** 管理员是否手动开过注册（容量恢复前不会再自动关） */
     register_auto_close_override?: boolean;
+    /** 自动关闭的阈值与当前占用率：手开之后也要说清「已超阈值」 */
+    register_auto_close?: {
+      enabled: boolean;
+      on: number;
+      off: number;
+      percent: number | null;
+    };
     /** 允许注册的邮箱域名白名单，逗号分隔；空 = 不限域名 */
     email_domains: string;
     plaza_grid_columns: number;
