@@ -816,9 +816,15 @@ function mailCard(draft: SettingsDraft): HTMLElement {
     switchRow("反临时邮箱 · 内置域名清单", "随镜像打包，可在线更新", draft.disposableCheck, (next) => {
       draft.disposableCheck = next;
     }),
-    switchRow("反临时邮箱 · MX 记录校验", "域名解析不出邮件服务器则拒绝", draft.mxCheck, (next) => {
-      draft.mxCheck = next;
-    }),
+    switchRow(
+      "反临时邮箱 · 收件域名校验",
+      "查 MX 记录（没有 MX 回落到 A/AAAA）：注册、改邮箱、找回密码发信前都过一遍，" +
+        "收不到的域名直接拒——退信最后都堆在发信邮箱里。内网邮件服务解析不出外网记录时关掉它",
+      draft.mxCheck,
+      (next) => {
+        draft.mxCheck = next;
+      },
+    ),
     switchRow("反临时邮箱 · 第三方校验 API", "需在服务端配置密钥，命中即拒", draft.thirdPartyCheck, (next) => {
       draft.thirdPartyCheck = next;
     }),

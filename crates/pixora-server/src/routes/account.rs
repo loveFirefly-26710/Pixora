@@ -527,16 +527,19 @@ pub async fn totp(
                 state
                     .totp_enable(&fresh, &code, &rectx.device())
                     .await
-                    .map(|_| true)
+                    .map(Some)
             } else {
                 state
                     .totp_disable(&fresh, &code, &rectx.device())
                     .await
-                    .map(|_| false)
+                    .map(|_| None)
             };
             match outcome {
-                Ok(enabled) => finish::<serde_json::Value>(Ok(serde_json::json!({
-                    "enabled": enabled,
+                // 开启时把恢复码一并带回去：明文只在这一次响应里存在，
+                // 界面必须当场让用户存下来（验证器丢了就靠它）
+                Ok(codes) => finish::<serde_json::Value>(Ok(serde_json::json!({
+                    "enabled": action == "enable",
+                    "codes": codes,
                     "csrf_token": cookie_value(&headers, CSRF_COOKIE),
                 }))),
                 Err(err) => crate::http::error_response(err),

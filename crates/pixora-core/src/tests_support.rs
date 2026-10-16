@@ -35,7 +35,15 @@ pub async fn test_state(dir: &TempDir) -> Arc<AppState> {
         dev_return_codes: false,
         log_level: "warn".into(),
     };
-    AppState::bootstrap(config).await.expect("装配 AppState")
+    let state = AppState::bootstrap(config).await.expect("装配 AppState");
+    // 测试不联网：发信前的收件域名校验（MX 查询）默认关掉。哪条测试要验它，
+    // 自己在用例里打开——查询真实 DNS 的用例在这里是少数
+    state
+        .settings
+        .set_bool(crate::settings::keys::ANTISPAM_MX, false)
+        .await
+        .expect("关掉 MX 校验");
+    state
 }
 
 /// 造一个已激活的普通用户。多数测试只关心它的 id。

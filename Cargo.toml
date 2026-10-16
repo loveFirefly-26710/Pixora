@@ -116,6 +116,13 @@ reqwest = { version = "0.12", default-features = false, features = [
     "multipart",
 ] }
 
+# DNS：发信前查收件域名有没有邮件服务器记录（MX）。只读系统解析器配置，
+# 系统怎么解析这里就怎么解析，不另指一个 DNS 服务器
+hickory-resolver = { version = "0.26", default-features = false, features = [
+    "tokio",
+    "system-config",
+] }
+
 # 其他
 async-trait = "0.1"
 governor = "0.8"

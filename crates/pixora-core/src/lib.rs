@@ -67,6 +67,9 @@ pub struct AppState {
     gc_notify: tokio::sync::Notify,
     /// 远端驱动与第三方校验共用的 HTTP 客户端（连接池共享）
     pub http: Arc<reqwest::Client>,
+    /// 系统 DNS 解析器，惰性建一份全局共用（自带 TTL 缓存）。发信前查收件
+    /// 域名的 MX 记录用它，见 `antispam`。
+    resolver: tokio::sync::RwLock<Option<hickory_resolver::TokioResolver>>,
     pub started_at: DateTime<Utc>,
     pub db_driver: DbDriver,
 }
@@ -116,6 +119,7 @@ impl AppState {
             mailer_problem: RwLock::new(None),
             gc_notify: tokio::sync::Notify::new(),
             http,
+            resolver: tokio::sync::RwLock::new(None),
             started_at: Utc::now(),
             db_driver,
         });
@@ -132,6 +136,27 @@ impl AppState {
             tracing::warn!(error = %err, "内置一次性邮箱清单写入失败，反垃圾第一层暂不可用");
         }
         Ok(state)
+    }
+
+    /// 进程内共用一份系统 DNS 解析器（自带 TTL 缓存）。第一次用到时构建。
+    ///
+    /// 用系统配置而不是另指一台 DNS 服务器：容器、内网、运营商 DNS 各是各的，
+    /// 系统怎么解析，这里就怎么解析。解析器本身出问题时（超时、连不上配置里
+    /// 的那台 DNS），`antispam` 会把它丢掉重建，免得一直用一份过期的配置。
+    pub(crate) async fn dns_resolver(&self) -> Result<hickory_resolver::TokioResolver> {
+        if let Some(resolver) = self.resolver.read().await.clone() {
+            return Ok(resolver);
+        }
+        let built = hickory_resolver::Resolver::builder_tokio()
+            .and_then(|builder| builder.build())
+            .map_err(|err| AppError::Config(format!("DNS 解析器构建失败：{err}")))?;
+        let mut slot = self.resolver.write().await;
+        Ok(slot.get_or_insert(built).clone())
+    }
+
+    /// 丢掉缓存的那份解析器，下次调用重新读系统配置。
+    pub(crate) async fn drop_dns_resolver(&self) {
+        *self.resolver.write().await = None;
     }
 
     /// 按当前设置重建邮件发送器。设置保存后调一次。

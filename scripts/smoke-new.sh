@@ -98,6 +98,18 @@ expect "下发长宽上限" '"max_width"' "$out"
 expect "下发队列深度" '"queue_depth"' "$out"
 expect "下发会话有效期" '"idle_minutes"' "$out"
 
+say "收件域名校验：MX 查到就拒（null MX 的域名收不到信）"
+# 这一关默认开着。冒烟里的地址都是假域名，先单独验一次它的判定，
+# 后面统一关掉——跑冒烟不该依赖外网 DNS 通不通
+out=$(req POST /auth/register/code '{"email":"someone@example.com"}')
+if printf '%s' "$out" | grep -q '不收邮件\|判断不了\|解析'; then
+  ok "null MX / 查不出来的域名被拦在发信之前"
+else
+  bad "收不到信的域名该被拦下" "$(printf '%s' "$out" | head -c 200)"
+fi
+out=$(req PUT /admin/settings '{"mail":{"mx_check":false}}')
+expect "关掉收件域名校验" '"ok":true' "$out"
+
 say "系统设置：新分组"
 out=$(req GET /admin/settings)
 expect "有会话分组" '"session"' "$out"
@@ -610,6 +622,12 @@ SECRET=$(printf '%s' "$out" | jq_get "['secret']")
 [ -n "$SECRET" ] && ok "生成二次验证密钥" || bad "该拿得到密钥" "$out"
 out=$(req POST /me/totp "{\"action\":\"enable\",\"code\":\"$(totp_code "$SECRET")\"}")
 expect "用动态码开启" '"enabled":true' "$out"
+# 开启的同时就把恢复码交出来：验证器丢了的时候那是唯一的进门凭据
+expect "开启时发一组恢复码" '"codes"' "$out"
+CODES=$(printf '%s' "$out" | jq_get "['codes'][0]")
+[ -n "$CODES" ] && ok "恢复码非空" || bad "该有一组恢复码" "$out"
+out=$(req GET /me/recovery-codes)
+expect "剩余数量与刚发的一组对得上" '"remaining":8' "$out"
 
 out=$(req POST /me/totp '{"action":"send_disable_code"}')
 expect "要邮箱验证码时邮件发不出去，如实报错" '发信服务（SMTP）尚未配置' "$out"
@@ -836,10 +854,16 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" \
 out=$(req GET "/admin/users?query=0000")
 expect "用户列表标出访客账号" '"guest":true' "$out"
 GUEST_ID=$(printf '%s' "$out" | jq_get "[0]['id']")
-for attempt in '{"password":"Visitor-Login-2026x"}' '{"role":"admin"}' '{"email":"someone-else@example.com"}'; do
+for attempt in '{"password":"Visitor-Login-2026x"}' '{"role":"admin"}'; do
   out=$(req PATCH "/admin/users/$GUEST_ID" "$attempt")
-  expect "管理员改访客账号被拒（$attempt）" '访客账号是系统账号' "$out"
+  expect "管理员改访客账号的密码/角色被拒（$attempt）" '访客账号是系统账号' "$out"
 done
+# 邮箱可以改：它只是个记号（访客登录不进来、也收发不了信），不验证、不发通知
+out=$(req PATCH "/admin/users/$GUEST_ID" '{"email":"visitor-bucket@pixora.test"}')
+expect "管理员可以改访客账号的邮箱" '"email":"visitor-bucket@pixora.test"' "$out"
+expect "改访客邮箱不发变更通知" '"mail":null' "$out"
+out=$(req POST "/admin/users/$GUEST_ID/password-reset-mail" '{}')
+expect "访客账号仍然收不到重置邮件" '访客账号是系统账号' "$out"
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" -X POST \
   "$BASE/admin/users/$GUEST_ID/impersonate" -H 'Content-Type: application/json' \
   -H "X-CSRF-Token: $(csrf)" -d '{}')

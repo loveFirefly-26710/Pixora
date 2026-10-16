@@ -24,6 +24,12 @@ pub enum MailError {
     #[error("SMTP 连接或投递失败：{0}")]
     Transport(String),
 
+    /// 服务器明确拒收（SMTP 5xx）：地址不存在、被对方拉黑这类。重发多少次
+    /// 结果都一样，所以不能跟连接抖动混在一起——重试只是把退信一封封堆进
+    /// 发信账号。
+    #[error("收件服务器拒收：{0}")]
+    Rejected(String),
+
     /// 服务器拒了这组凭据。单独成一类：这种错九成是配置问题，
     /// 管理员照着清单能自己改好，不该让他去猜「连接失败」是什么意思。
     #[error("邮箱认证失败（{0}）：发信账号或密码不对。挨个核对：1) 发信账号要填完整邮箱地址；\
@@ -36,6 +42,14 @@ pub enum MailError {
 }
 
 impl MailError {
+    /// 这封信还值不值得重试。
+    ///
+    /// 拒收与认证失败都是一次性的结论：地址不对，发一百次还是不对；
+    /// 密码错了也不会自己变对。只有网络、超时、TLS 这类才算「待会儿再试」。
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::Rejected(_) | Self::Auth(_))
+    }
+
     /// 把 lettre 的错误归类。认证失败在 SMTP 里是 5xx 永久错误，
     /// 常见码：535（标准）、526（阿里云的叫法）、530/534/538。
     pub fn from_transport(err: &lettre::transport::smtp::Error) -> Self {
@@ -46,6 +60,11 @@ impl MailError {
             .any(|code| text.contains(code));
         if auth_code || lower.contains("authentication") {
             return Self::Auth(text);
+        }
+        // 其余 5xx：对方服务器把 MAIL FROM / RCPT TO / DATA 这几步直接拒了。
+        // 4xx 是「待会儿再来」，才值得重试
+        if err.is_permanent() {
+            return Self::Rejected(text);
         }
         Self::Transport(text)
     }

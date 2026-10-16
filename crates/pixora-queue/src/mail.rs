@@ -36,7 +36,9 @@ pub async fn pump(state: &Arc<AppState>, limit: i64) -> pixora_core::Result<u64>
             }
             Err(err) => {
                 let next_attempt = item.attempts + 1;
-                let permanent = next_attempt >= MAX_ATTEMPTS;
+                // 收件服务器明确拒收、发信凭据不对：这两种错重发多少次都是同一个
+                // 结果，不能跟网络抖动一起排队——那只会往发信账号里堆退信
+                let permanent = err.is_permanent() || next_attempt >= MAX_ATTEMPTS;
                 let next_at = if permanent {
                     None
                 } else {
@@ -51,13 +53,14 @@ pub async fn pump(state: &Arc<AppState>, limit: i64) -> pixora_core::Result<u64>
                     .await?;
 
                 if permanent {
-                    // 永久失败要显眼：多半是 SMTP 配置或账号问题
+                    // 永久失败要显眼：多半是 SMTP 配置或收件地址的问题
                     tracing::error!(
                         mail_id = item.id,
                         to = %item.to_email,
                         template = %item.template_name,
                         error = %err,
-                        "邮件投递连续失败，已标记为永久失败"
+                        attempts = next_attempt,
+                        "邮件不再重试，已标记为永久失败"
                     );
                 } else {
                     tracing::warn!(

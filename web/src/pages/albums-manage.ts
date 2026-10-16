@@ -12,7 +12,7 @@
 import { ApiError, request, requestPage } from "../core/api";
 import { h, mount } from "../core/dom";
 import { formatBytes, formatDateTime, formatNumber } from "../core/format";
-import { confirmDanger, promptDialog } from "../core/modal";
+import { confirmDanger, confirmDialog, promptDialog } from "../core/modal";
 import { navigate, type PageContext } from "../core/router";
 import { getState } from "../core/state";
 import { toastError, toastOk } from "../core/toast";
@@ -254,15 +254,62 @@ async function renameAlbum(album: Album, reload: Reload): Promise<void> {
   }
 }
 
+/**
+ * 改相册可见性。
+ *
+ * 两处可见性各管各的：相册这一列管「别人能不能浏览这个相册」，图片那一列管
+ * 「广场露不露面、直链能不能匿名取」。用户很容易以为「相册改私有 = 里面的图
+ * 也一起私有」，所以往私有改的时候顺手问一句要不要连图片一起改；
+ * 往回改公开时不问——那会把用户自己标成私有的图又亮出去。
+ */
 async function toggleVisibility(album: Album, reload: Reload): Promise<void> {
-  const next = album.visibility === "public" ? "private" : "public";
+  const toPrivate = album.visibility === "public";
   try {
-    await request(`/albums/${album.id}`, { method: "PATCH", json: { visibility: next } });
-    toastOk(next === "public" ? `「${album.name}」已改为公开` : `「${album.name}」已改为私有`);
-    await reload();
+    await request(`/albums/${album.id}`, {
+      method: "PATCH",
+      json: { visibility: toPrivate ? "private" : "public" },
+    });
   } catch (err) {
     toastError(err);
+    return;
   }
+
+  if (!toPrivate) {
+    toastOk(`「${album.name}」已改为公开（相册里图片的可见性不变）`);
+    await reload();
+    return;
+  }
+  if (album.image_count === 0) {
+    toastOk(`「${album.name}」已改为私有`);
+    await reload();
+    return;
+  }
+
+  // 相册本身已经改好了，这里只问图片这一件事；关掉窗口就是「保持原样」
+  const cascade = await confirmDialog({
+    title: "相册里的图片要一起改为私有吗",
+    message:
+      `「${album.name}」已改为私有，别人浏览不到这个相册了。<br>` +
+      `里面 ${formatNumber(album.image_count)} 张图片的可见性没跟着变：` +
+      "公开的那些仍然会出现在广场上，直链也仍然谁都能打开。<br>要不要把它们一起改成私有？",
+    confirmText: "图片一起改为私有",
+    cancelText: "不用，保持原样",
+  });
+  if (cascade) {
+    try {
+      const result = await request<{ affected: number }>("/images/batch", {
+        json: { action: "visibility", visibility: "private", filter: { album_id: album.id } },
+      });
+      toastOk(
+        `「${album.name}」已改为私有，${formatNumber(result.affected ?? album.image_count)} 张图片一起改了`,
+      );
+    } catch (err) {
+      toastError(err);
+    }
+  } else {
+    toastOk(`「${album.name}」已改为私有`);
+  }
+  await reload();
 }
 
 /**

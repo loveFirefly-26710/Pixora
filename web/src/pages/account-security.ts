@@ -379,7 +379,9 @@ function verifyCard(profile: UserProfile, remaining: number, hooks: VerifyHooks)
       // 剩余 0 个意味着验证器丢了就进不来了，标黄提醒
       badge(`剩余 ${remaining} 个`, remaining > 0 ? "mute" : "warn"),
     ),
-    h("div.tip", { text: "恢复码用于验证器丢失时登录，每个只能用一次，请离线保存。" }),
+    h("div.tip", {
+      text: "恢复码用于验证器丢失时登录，每个只能用一次，请复制或下载后离线保存；开启二次验证时会自动发一组。",
+    }),
   );
 }
 
@@ -472,7 +474,9 @@ async function openEnableTotp(hooks: VerifyHooks): Promise<void> {
 
     const blocks: Node[] = [
       h("div.tip", {
-        text: "用验证器 App（Google Authenticator / 1Password / 微软验证器等）添加账号，再输入它显示的动态码。",
+        text:
+          "用验证器 App（Google Authenticator / 1Password / 微软验证器等）添加账号，再输入它显示的动态码。" +
+          "验证通过后会给你一组恢复码，记得存到离线的地方。",
       }),
     ];
     if (qrBlock) blocks.push(qrBlock);
@@ -498,9 +502,15 @@ async function openEnableTotp(hooks: VerifyHooks): Promise<void> {
       confirm.disabled = true;
       confirm.textContent = "校验中…";
       try {
-        await request("/me/totp", { method: "POST", json: { action: "enable", code } });
-        toastOk("二次验证已开启");
+        const result = await request<{ codes: string[] | null }>("/me/totp", {
+          method: "POST",
+          json: { action: "enable", code },
+        });
         handle.close();
+        toastOk("二次验证已开启");
+        // 开启的这一刻就把恢复码交到用户手上：跳过这一步，验证器一丢
+        // 就只能靠邮箱验证码自救，而那样等于二次验证形同虚设
+        showRecoveryCodes(result.codes ?? [], hooks, "存下这组恢复码");
         hooks.onReload();
       } catch (err) {
         toastError(err);
@@ -617,36 +627,79 @@ async function regenerateRecoveryCodes(hooks: VerifyHooks): Promise<void> {
       method: "POST",
     });
     hooks.onRecoveryChanged(payload.remaining);
-
-    const list = h("div.code-list", null, ...payload.codes.map((item) => h("code", { text: item })));
-    const handle = openModal({
-      title: "新的恢复码",
-      body: [
-        qtip("warn", "只显示这一次", "关闭本窗口后就查不到了，请立刻复制保存。每个恢复码只能使用一次。"),
-        h("div", { style: { marginTop: "12px" } }, list),
-      ],
-      footer: [
-        h("button.btn", {
-          type: "button",
-          text: "复制全部",
-          on: {
-            click: async () => {
-              const text = payload.codes.join("\n");
-              if (await copyText(text)) toast("✓ 恢复码已复制到剪贴板");
-              else toastError(new Error("复制失败，请手动选中后复制"));
-            },
-          },
-        }),
-        h("button.btn.pri", {
-          type: "button",
-          text: "我已保存",
-          on: { click: () => handle.close() },
-        }),
-      ],
-    });
+    showRecoveryCodes(payload.codes, hooks, "新的恢复码");
   } catch (err) {
     toastError(err);
   }
+}
+
+/**
+ * 恢复码面板。
+ *
+ * 明文只在这一刻存在（库里只有哈希），所以三个动作一个都不能少：复制、
+ * 下载成文件、以及一句「我已保存」——验证器丢了的时候，这张纸上/这个文件里
+ * 的码是唯一的进门方式。
+ */
+function showRecoveryCodes(codes: string[], hooks: VerifyHooks, title: string): void {
+  if (codes.length === 0) return;
+  hooks.onRecoveryChanged(codes.length);
+
+  const list = h("div.code-list", null, ...codes.map((item) => h("code", { text: item })));
+  const handle = openModal({
+    title,
+    body: [
+      qtip(
+        "warn",
+        "只显示这一次",
+        "关闭本窗口后就查不到了，请立刻复制或下载保存。每个恢复码只能用一次；" +
+          "换手机、验证器被删、密码也忘了的时候，用它登录。",
+      ),
+      h("div", { style: { marginTop: "12px" } }, list),
+    ],
+    footer: [
+      h("button.btn", {
+        type: "button",
+        text: "复制全部",
+        on: {
+          click: async () => {
+            const text = codes.join("\n");
+            if (await copyText(text)) toast("✓ 恢复码已复制到剪贴板");
+            else toastError(new Error("复制失败，请手动选中后复制"));
+          },
+        },
+      }),
+      h("button.btn", {
+        type: "button",
+        text: "下载为文件",
+        on: { click: () => downloadRecoveryCodes(codes) },
+      }),
+      h("button.btn.pri", {
+        type: "button",
+        text: "我已保存",
+        on: { click: () => handle.close() },
+      }),
+    ],
+  });
+}
+
+/** 把恢复码存成一个 txt：放在离线的地方，比留在浏览器里靠谱。 */
+function downloadRecoveryCodes(codes: string[]): void {
+  const site = getState().site?.name ?? "Pixora";
+  const body = [
+    `${site} 的账号恢复码`,
+    `生成时间：${formatDateTime(new Date().toISOString())}`,
+    "",
+    "每个恢复码只能使用一次，用掉一个就划掉一个。",
+    "放在离线的地方保管：别只存在这台设备上，也别跟密码放在一起。",
+    "",
+    ...codes,
+    "",
+  ].join("\n");
+  const url = URL.createObjectURL(new Blob([body], { type: "text/plain;charset=utf-8" }));
+  const link = h("a", { href: url, download: "pixora-recovery-codes.txt" });
+  link.click();
+  // 立刻撤销会让部分浏览器来不及取数据，稍等一会儿再放
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 /* ------------------------------------------------------------------ */

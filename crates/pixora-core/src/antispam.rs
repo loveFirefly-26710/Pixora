@@ -6,9 +6,11 @@
 //!      所以任何入口都能先过一遍，也只有它能被安装向导复用（离线环境没有 DNS）。
 //!   2. **内置一次性域名清单**：查 `disposable_domains` 表。清单随镜像打包，
 //!      通过 [`AppState::seed_disposable_domains`] 幂等写入，不硬编码在判断逻辑里。
-//!   3. **MX/A 记录校验**：域名解析不出任何地址就拒绝。用系统解析器而不是专门的
-//!      MX 查询——绝大多数部署里能收到信的域名都有 A/AAAA 记录，而系统解析器
-//!      在每个平台上都可用，不引入 DNS 客户端依赖。
+//!   3. **MX 记录校验**：查这个域名有没有邮件服务器。没有 MX 才按 RFC 5321
+//!      回落到域名本身的 A/AAAA 记录；发布 null MX（`MX 0 .`）的域名是明确
+//!      宣告不收信。这一层不只守注册：改邮箱、找回密码、登录码这些**发信前**
+//!      都过一遍，别把信发给一个注定退回来的地址——退信会堆在发信用的企业
+//!      邮箱里，发信信誉也跟着掉。
 //!
 //! 第四件事是**别名归一化**：Gmail 的 `+` 后缀与点号变体、其它域名的 `+` 后缀在判重前
 //! 先归一化，否则同一只信箱换个写法就能重复注册。归一化只提供纯函数，不在这里查库：
@@ -72,9 +74,24 @@ pub const BUILTIN_DOMAINS: &[&str] = &[
     "yopmail.net",
 ];
 
-/// DNS 解析的超时。系统解析器在断网环境下可能挂到几十秒，
-/// 注册接口不能陪着一起等；超时按「解析不出来」处理（拒绝）。
+/// DNS 解析的超时。内网 DNS 挂掉时可能拖到几十秒，注册接口不能陪着一起等；
+/// 超时按「判断不了」处理，保守拒绝（见 `ensure_domain_can_receive`）。
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 逐个探 MX 主机的上限。按优先级排下来，前几台都解析不出来基本就是域名有问题，
+/// 不必把一整串都查一遍。
+const MAX_MX_PROBES: usize = 3;
+
+/// 收件域名的收信能力。
+enum MailRoute {
+    /// 收得到：有 MX，或者没有 MX 但域名本身有地址记录（RFC 5321 的回落）
+    Deliverable,
+    /// 收不到信。附一句能直接给用户看的理由。
+    NoMailServer(String),
+    /// 判断不了：解析器故障或超时。不等于收不到，但对外一律按拒处理——
+    /// 宁可让域名临时抖动的人稍后重试，也不把信发去一个查不出来的地址。
+    Unknown(String),
+}
 
 impl AppState {
     /// 注册、找回密码这类发信入口都用这一关。
@@ -85,28 +102,117 @@ impl AppState {
         check_email_allowed(self, email).await
     }
 
-    /// 域名能不能解析出地址。失败与超时都按「收不到信」处理：
-    /// 宁可让极少数域名解析临时抖动的人稍后重试，也不放行一个收不到验证码的邮箱。
-    async fn ensure_domain_deliverable(&self, domain: &str) -> Result<()> {
-        let resolved =
-            tokio::time::timeout(DNS_TIMEOUT, tokio::net::lookup_host((domain, 0))).await;
-        let deliverable = match resolved {
-            Ok(Ok(mut addresses)) => addresses.next().is_some(),
-            Ok(Err(err)) => {
-                tracing::debug!(domain, error = %err, "域名解析失败，拒绝该邮箱");
-                false
-            }
-            Err(_) => {
-                tracing::debug!(domain, "域名解析超时，拒绝该邮箱");
-                false
-            }
-        };
-        if !deliverable {
-            return Err(AppError::forbidden(
-                "域名解析不出邮件服务器，请使用可正常收信的邮箱",
-            ));
+    /// 这个地址收得到信吗：形状 + 域名能不能收信。不看一次性清单。
+    ///
+    /// 与 [`AppState::check_email_allowed`] 的区别就在这一条：一次性清单是挡
+    /// 注册的规则（**谁能注册**），而这里是「这封信发得出去吗」（**信往哪发**）。
+    /// 管理员替人改邮箱、管理员测试发信这些入口要的是后者。
+    pub async fn ensure_deliverable(&self, email: &str) -> Result<()> {
+        let domain = validate_email_format(email)?;
+        self.ensure_domain_can_receive(&domain).await
+    }
+
+    /// 域名收不收得到信。
+    ///
+    /// 判定顺序：MX 记录 → 没有 MX 时回落到域名本身的 A/AAAA（RFC 5321 §5.1）。
+    /// 发布 null MX 的域名是明确宣告「这个域名不收信」，直接拒。
+    ///
+    /// 开关（`antispam.mx_check`）关掉就整层跳过：域名只在内网有记录时，这一层
+    /// 会把所有人拦在外面，管理员得能关掉它——注册与发信两条路一起放行。
+    async fn ensure_domain_can_receive(&self, domain: &str) -> Result<()> {
+        if !self.settings.bool(keys::ANTISPAM_MX, true).await? {
+            return Ok(());
         }
-        Ok(())
+        let route = match tokio::time::timeout(DNS_TIMEOUT, self.probe_mail_route(domain)).await {
+            Ok(route) => route,
+            Err(_) => MailRoute::Unknown(format!(
+                "解析 {domain} 超时，暂时判断不了这个邮箱能不能收信，请稍后重试"
+            )),
+        };
+        match route {
+            MailRoute::Deliverable => Ok(()),
+            MailRoute::NoMailServer(reason) => Err(AppError::forbidden(reason)),
+            MailRoute::Unknown(reason) => Err(AppError::Config(format!(
+                "{reason}；若本站的邮件走内网解析不出去，可在后台关掉「收件域名校验」"
+            ))),
+        }
+    }
+
+    /// 查一遍 MX/A。不判超时与开关，那些在调用方。
+    async fn probe_mail_route(&self, domain: &str) -> MailRoute {
+        let resolver = match self.dns_resolver().await {
+            Ok(resolver) => resolver,
+            Err(err) => return MailRoute::Unknown(err.message().to_string()),
+        };
+
+        match resolver.mx_lookup(domain).await {
+            Ok(lookup) => {
+                let mut exchanges: Vec<(u16, hickory_resolver::proto::rr::Name)> = lookup
+                    .answers()
+                    .iter()
+                    .filter_map(|record| match &record.data {
+                        hickory_resolver::proto::rr::RData::MX(mx) => {
+                            Some((mx.preference, mx.exchange.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if exchanges.iter().any(|(_, name)| name.is_root()) {
+                    return MailRoute::NoMailServer(format!(
+                        "域名 {domain} 声明了不收邮件（null MX），请换一个邮箱"
+                    ));
+                }
+                // 记录是按优先级给收信方的，探测顺序照它来
+                exchanges.sort_by_key(|(preference, _)| *preference);
+                if exchanges.is_empty() {
+                    return self.probe_address_fallback(domain).await;
+                }
+                for (_, host) in exchanges.iter().take(MAX_MX_PROBES) {
+                    if resolver
+                        .lookup_ip(host.clone())
+                        .await
+                        .map(|ips| ips.iter().next().is_some())
+                        .unwrap_or(false)
+                    {
+                        return MailRoute::Deliverable;
+                    }
+                }
+                MailRoute::NoMailServer(format!(
+                    "域名 {domain} 的邮件服务器解析不出来，这个地址收不到信"
+                ))
+            }
+            // 没有 MX 记录：按 RFC 5321 回落到域名自身的地址记录
+            Err(err) if err.is_no_records_found() => self.probe_address_fallback(domain).await,
+            Err(err) if err.is_nx_domain() => {
+                MailRoute::NoMailServer(format!("域名 {domain} 不存在，请检查地址是否写错"))
+            }
+            Err(err) => {
+                // 解析器自己出了问题（连不上配置里的 DNS、超时、系统换了 DNS 之后
+                // 的旧配置），丢掉它，下次调用重新读系统配置
+                self.drop_dns_resolver().await;
+                MailRoute::Unknown(format!("查询 {domain} 的邮件服务器失败：{err}"))
+            }
+        }
+    }
+
+    /// 没有 MX 时的回落：域名本身有没有 A/AAAA。有就按「信发给它自己」处理。
+    async fn probe_address_fallback(&self, domain: &str) -> MailRoute {
+        let Ok(resolver) = self.dns_resolver().await else {
+            return MailRoute::Unknown(format!("判断不了 {domain} 能不能收信"));
+        };
+        match resolver.lookup_ip(domain).await {
+            Ok(ips) if ips.iter().next().is_some() => MailRoute::Deliverable,
+            Ok(_) => MailRoute::NoMailServer(format!(
+                "域名 {domain} 没有邮件服务器记录（MX），也没有地址记录，这个地址收不到信"
+            )),
+            Err(err) if err.is_nx_domain() => {
+                MailRoute::NoMailServer(format!("域名 {domain} 不存在，请检查地址是否写错"))
+            }
+            Err(err) => {
+                self.drop_dns_resolver().await;
+                MailRoute::Unknown(format!("解析 {domain} 失败：{err}"))
+            }
+        }
     }
 
     /// 批量写入一次性域名清单。幂等：重复导入同一份清单不会报错也不重复计数。
@@ -143,10 +249,8 @@ pub async fn check_email_allowed(state: &AppState, email: &str) -> Result<()> {
         )));
     }
 
-    // 3. MX/A 记录
-    if state.settings.bool(keys::ANTISPAM_MX, true).await? {
-        state.ensure_domain_deliverable(&domain).await?;
-    }
+    // 3. MX 记录（这一层的开关在 ensure_domain_can_receive 里）
+    state.ensure_domain_can_receive(&domain).await?;
 
     Ok(())
 }
@@ -447,11 +551,71 @@ mod tests {
             .unwrap();
 
         // `.invalid` 是 RFC 6761 保留的不可解析顶级域名：断网时解析失败、
-        // 联网时返回 NXDOMAIN，两种情况下都应该被拒绝。
+        // 联网时返回 NXDOMAIN。两种情况都算「收不到信」这一类：断网时按
+        // 「查不出来」保守拒绝（码是 INTERNAL），联网时域名不存在（FORBIDDEN）
         let error = state
             .check_email_allowed("someone@pixora-nonexistent-host.invalid")
             .await
             .expect_err("解析不出的域名应该被拒绝");
-        assert_eq!(error.code(), "FORBIDDEN");
+        assert!(
+            matches!(error.code(), "FORBIDDEN" | "INTERNAL"),
+            "{} / {}",
+            error.code(),
+            error.message()
+        );
+    }
+
+    /// 收信判定：先看 MX。
+    ///
+    /// `example.com` 发布的是 null MX（`MX 0 .`，RFC 7505），也就是明确宣告
+    /// 「这个域名不收邮件」——正是「地址看着像真的、其实收不到信」的那一类，
+    /// 也是以前只看 A 记录时最容易被放过去的。有 MX 的域名照旧放行。
+    #[tokio::test]
+    async fn null_mx_is_treated_as_undeliverable() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let state = test_state(&dir).await;
+        state
+            .settings
+            .set_bool(keys::ANTISPAM_DISPOSABLE, false)
+            .await
+            .unwrap();
+
+        let error = state
+            .ensure_deliverable("someone@example.com")
+            .await
+            .expect_err("null MX 的域名应当被拒绝");
+        // 断网时走的是「查不出来」那一类，一样拒，只是错误码不同
+        assert!(
+            matches!(error.code(), "FORBIDDEN" | "INTERNAL"),
+            "{} / {}",
+            error.code(),
+            error.message()
+        );
+        if error.code() == "FORBIDDEN" {
+            assert!(error.message().contains("不收邮件"), "{}", error.message());
+        }
+
+        // 有 MX 的域名放行；断网时这里会是「查不出来」，绝不能是「收不到信」
+        match state.ensure_deliverable("someone@qq.com").await {
+            Ok(()) => {}
+            Err(err) => assert_eq!(
+                err.code(),
+                "INTERNAL",
+                "有 MX 的域名不该被判成收不到信：{}",
+                err.message()
+            ),
+        }
+
+        // 开关关掉就整层跳过：内网邮件服务要靠它放行
+        state
+            .settings
+            .set_bool(keys::ANTISPAM_MX, false)
+            .await
+            .unwrap();
+        assert!(
+            state.ensure_deliverable("someone@example.com").await.is_ok(),
+            "关掉校验后不该再拦人"
+        );
     }
 }
+

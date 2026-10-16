@@ -2264,6 +2264,14 @@ pub async fn mail_test(
 
     let to = field_opt_str(&body, "to")
         .unwrap_or_else(|| auth.user.email.clone());
+    // 先看这个地址收不收得到信：域名都没了的话，测出来的「失败」跟 SMTP 配置
+    // 没关系，会把管理员引到错的方向去查
+    if let Err(err) = state.ensure_deliverable(&to).await {
+        return crate::http::error_response(AppError::bad_request(format!(
+            "测试收件地址不可用：{}",
+            err.message()
+        )));
+    }
     let Some(mailer) = state.mailer() else {
         // 说清楚是缺哪块，而不是笼统一句「没配置完整」
         let reason = state

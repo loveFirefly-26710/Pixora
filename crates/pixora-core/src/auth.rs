@@ -320,6 +320,8 @@ impl AppState {
         let email = normalize_email_input(email)?;
         // 发信能力在查账号之前判：这一句对所有人一样，不构成「注册过没有」的探针
         self.ensure_mail_ready()?;
+        // 地址收不收得到信，同样与账号无关，放这个位置不泄露任何东西
+        antispam::check_email_allowed(self, &email).await?;
 
         if !self.repo.email_exists(&email).await? {
             // 静默成功：前端提示「如果该邮箱已注册，验证码已发出」
@@ -935,7 +937,17 @@ impl AppState {
         })
     }
 
-    pub async fn totp_enable(&self, user: &User, code: &str, device: &DeviceInfo) -> Result<()> {
+    /// 开启二次验证：动态码对上才算真的开。
+    ///
+    /// 顺带发一组恢复码带回去——验证器丢了的时候这是唯一的自救凭据，
+    /// 而「刚开完」这一刻是用户最愿意把它存下来的时候。明文只出现在这次
+    /// 返回值里，库里只存哈希（见 `regenerate_recovery_codes`）。
+    pub async fn totp_enable(
+        &self,
+        user: &User,
+        code: &str,
+        device: &DeviceInfo,
+    ) -> Result<Vec<String>> {
         let secret = user
             .totp_secret
             .clone()
@@ -944,9 +956,10 @@ impl AppState {
             return Err(AppError::TotpInvalid("动态验证码不正确".into()));
         }
         self.repo.set_totp(user.id, Some(&secret), true).await?;
+        let codes = self.regenerate_recovery_codes(user).await?;
         self.audit_action(actions::SETTINGS_CHANGE, Some(user.id), device.ip.as_deref())
             .await;
-        Ok(())
+        Ok(codes)
     }
 
     pub async fn totp_disable(&self, user: &User, code: &str, device: &DeviceInfo) -> Result<()> {
@@ -993,6 +1006,9 @@ impl AppState {
         let email = normalize_email_input(email)?;
         // 发信能力同样先判：它跟具体账号无关，对所有人一样
         self.ensure_mail_ready()?;
+        // 账号自己的地址也要能收信：地址过期、域名没了的时候，与其发一封注定
+        // 退回来的信，不如在登录这一步就说清楚（这条与账号是否存在无关）
+        self.ensure_deliverable(&email).await?;
         self.ensure_verification_quota(&email, device.ip.as_deref(), purpose::LOGIN_CODE)
             .await?;
 
@@ -1035,6 +1051,8 @@ impl AppState {
     ) -> Result<MailDelivery> {
         // 发信这关先过：发不出去就别留一个用户永远收不到的验证码
         self.ensure_mail_ready()?;
+        // 账号自己的地址也要能收信，理由与发送登录码那处相同
+        self.ensure_deliverable(&user.email).await?;
         let code = self
             .issue_totp_disable_code(user, device.ip.as_deref())
             .await?;
@@ -1101,6 +1119,9 @@ impl AppState {
             return Err(AppError::Conflict("该邮箱已被其他账号使用".into()));
         }
         self.ensure_mail_ready()?;
+        // 待换上的地址先验一遍：用户手打一个不存在的域名，这封信注定退回来，
+        // 退信全都会落进发信用的那个邮箱
+        antispam::check_email_allowed(self, &new_email).await?;
         self.ensure_verification_quota(&new_email, device.ip.as_deref(), purpose::CHANGE_EMAIL)
             .await?;
 
@@ -1408,15 +1429,29 @@ impl AppState {
                 })
             }
             Err(err) => {
-                // 失败留在发件箱里排队重试，不让注册流程因为 SMTP 抖动而失败
-                tracing::warn!(to, template, error = %err, "邮件投递失败，已进入重试队列");
-                let next = Utc::now() + chrono::Duration::minutes(2);
+                // 拒收（地址不存在、被对方拉黑）与认证失败是一次性的结论：
+                // 不进重试队列，直接把服务器那句话带到界面上
+                let permanent = err.is_permanent();
+                let next = if permanent {
+                    None
+                } else {
+                    Some(Utc::now() + chrono::Duration::minutes(2))
+                };
                 self.repo
-                    .mark_mail_failed(outbox_id, &err.to_string(), Some(next), false)
+                    .mark_mail_failed(outbox_id, &err.to_string(), next, permanent)
                     .await?;
+                if permanent {
+                    tracing::warn!(to, template, error = %err, "邮件被拒收，不再重试");
+                } else {
+                    tracing::warn!(to, template, error = %err, "邮件投递失败，已进入重试队列");
+                }
                 Ok(MailDelivery {
                     delivered: false,
-                    detail: Some(format!("投递失败：{err}。已进入重试队列，配置准确的话几分钟后会自动重发")),
+                    detail: Some(if permanent {
+                        format!("投递失败：{err}")
+                    } else {
+                        format!("投递失败：{err}。已进入重试队列，配置准确的话几分钟后会自动重发")
+                    }),
                 })
             }
         }
@@ -1447,7 +1482,7 @@ impl AppState {
     }
 
     /// 投递失败就如实报错：用户等的是一封信，不是一句「已发送」。
-    fn ensure_delivered(delivery: MailDelivery) -> Result<MailDelivery> {
+    pub(crate) fn ensure_delivered(delivery: MailDelivery) -> Result<MailDelivery> {
         if delivery.delivered {
             return Ok(delivery);
         }
@@ -1705,7 +1740,9 @@ impl AppState {
         mailer
             .send(&item.to_email, &subject, &body)
             .await
-            .map_err(|err| AppError::internal(err.to_string()))
+            // 用 Mail 变体而不是 Internal：它带着「还值不值得重试」，
+            // 队列据此决定是退避重发还是就此收手（见 MailError::is_permanent）
+            .map_err(AppError::Mail)
     }
 
     /// 没有配置 SMTP 时，把验证码写进日志并把码带出来（仅本地开发）。

@@ -298,12 +298,12 @@ impl AppState {
             .ok_or_else(|| AppError::not_found("用户"))?;
 
         self.ensure_not_install_admin(admin, &target).await?;
-        // 邮箱、密码、角色这三样决定「这个账号能不能被登进来」，也决定它是不是
-        // 管理员。访客账号三样都不动——配额、状态仍然可以调，那是管理员按住
-        // 游客上传的手段（见 guest.rs）
-        if email.is_some() || password.is_some() || role_value.is_some() {
+        // 密码与角色决定「这个账号能不能被登进来、是不是管理员」，访客账号这两样
+        // 都不动——配额、状态仍然可以调，那是管理员按住游客上传的手段（见 guest.rs）
+        if password.is_some() || role_value.is_some() {
             crate::guest::ensure_not_guest(&target)?;
         }
+        let target_is_guest = crate::guest::is_guest(&target);
         let mut detail_changes = serde_json::Map::new();
         let mut mail: Option<crate::mail::MailDelivery> = None;
 
@@ -312,6 +312,12 @@ impl AppState {
             if !email.eq_ignore_ascii_case(&target.email) {
                 if self.repo.email_exists(&email).await? {
                     return Err(AppError::Conflict("该邮箱已被其他账号使用".into()));
+                }
+                // 访客账号的邮箱是个记号：它登不进来、也不收发信，管理员改它
+                // 不需要验证、不查它收不收得到信，也不发变更通知（发不出去的东西
+                // 不该走发信账号，见 guest.rs 与 antispam）。别的账号照旧
+                if !target_is_guest {
+                    self.ensure_deliverable(&email).await?;
                 }
                 // 管理员填的地址视为可信，直接标成已验证：填错一个字就把账号
                 // 锁死过，那次之后这条规则就固定下来了
@@ -340,13 +346,16 @@ impl AppState {
                         "to": email,
                         "via": "admin",
                         "actor_email": admin.email,
+                        "guest": target_is_guest,
                     }),
                     ip,
                 )
                 .await;
-                // 新旧两个地址各发一封：新地址的收件人确认「这是我」，
-                // 旧地址的收件人才能在「不是我安排的」时第一时间发现
-                mail = Some(self.notify_email_change(&target, &email).await?);
+                if !target_is_guest {
+                    // 新旧两个地址各发一封：新地址的收件人确认「这是我」，
+                    // 旧地址的收件人才能在「不是我安排的」时第一时间发现
+                    mail = Some(self.notify_email_change(&target, &email).await?);
+                }
             }
         }
 
@@ -502,6 +511,9 @@ impl AppState {
         // 这封信的全部意义就是「让收件人设一个新密码」，而访客账号不接受登录，
         // 发出去只会是一封没人能用的信
         crate::guest::ensure_not_guest(&target)?;
+        // 这个地址还收不收得到信：域名没了、MX 撤了的时候，管理员点这一下
+        // 不该换来一封退信。发不出去的结果照旧如实带回界面（下面那几行）
+        self.ensure_deliverable(&target.email).await?;
 
         let code = pixora_crypto::token::new_numeric_code(6)?;
         let code_hash = pixora_crypto::token::token_hash(&code);
