@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 description = "Pixora 单二进制入口：路由、中间件、handler、静态资源"
 
+# 编译产物就叫 pixora。容器里的 /pixora、发行包里的 pixora/、systemd 的 ExecStart、
+# 排障时敲的命令，全按这个名字写；包名保持 pixora-server，是为了和其余 pixora-*
+# 库 crate 排在一起时一眼看出哪个是入口。不写这段，文件名会跟着包名走。
+[[bin]]
+name = "pixora"
+path = "src/main.rs"
+
 [features]
 default = ["embed-web"]
 # 把 web/dist 打进二进制；关掉后从 PIXORA_WEB_DIR 读盘（前端联调更方便）

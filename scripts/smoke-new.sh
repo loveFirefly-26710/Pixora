@@ -6,7 +6,7 @@
 #   PIXORA_DB_DRIVER=sqlite PIXORA_DB_DSN=./target/smoke/pixora.db \
 #   PIXORA_DATA_DIR=./target/smoke PIXORA_BIND=127.0.0.1:8099 \
 #   PIXORA_BASE_URL=http://127.0.0.1:8099 \
-#   PIXORA_WEB_DIR=./web/dist ./target/debug/pixora-server
+#   PIXORA_WEB_DIR=./web/dist ./target/debug/pixora
 #
 # 一个 Windows 上的坑：**带中文的请求体必须走文件**。
 # git-bash 把非 ASCII 参数交给原生 curl.exe 时会被按本地代码页转换，
