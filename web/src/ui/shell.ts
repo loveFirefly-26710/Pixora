@@ -44,6 +44,7 @@ const ADMIN_NAV: NavItem[] = [
   { path: "/admin/storage", label: "存储管理", icon: "💾", match: ["/admin/storage"] },
   { path: "/admin/quota", label: "配额与容量", icon: "📊", match: ["/admin/quota"] },
   { path: "/admin/ip", label: "IP 黑名单", icon: "🛡", match: ["/admin/ip"] },
+  { path: "/admin/logs", label: "系统日志", icon: "📋", match: ["/admin/logs"] },
   { path: "/admin/settings", label: "系统设置", icon: "⚙", match: ["/admin/settings"] },
   { path: "/admin/terms", label: "服务条款", icon: "📄", match: ["/admin/terms"] },
 ];
@@ -176,13 +177,14 @@ function userMenu(user: NonNullable<ReturnType<typeof getState>["user"]>): HTMLE
 }
 
 /**
- * 头像内容：设过就用图，没设就回落到邮箱首字母。
+ * 头像内容：自己设过就用那张，没设过用站点默认头像，都没有才回落到邮箱首字母。
  *
- * 上传的图是站内相对路径，外链是完整地址，两种情况 `src` 都能直接用。
+ * 上传的图是站内相对路径（或本站资产的带版本地址），外链是完整地址，
+ * 两种情况 `src` 都能直接用。
  */
 export function avatarNode(size: "md" | "sm"): HTMLElement {
   const user = getState().user;
-  const url = user?.avatar ?? "";
+  const url = user ? avatarUrl(user) : "";
   if (user && url) {
     return h("img.avatar-img", {
       class: size === "sm" ? "sm" : "",
@@ -199,6 +201,17 @@ export function avatarNode(size: "md" | "sm"): HTMLElement {
     });
   }
   return h("span", { text: (user?.email[0] ?? "U").toUpperCase() });
+}
+
+/**
+ * 一个账号最终显示的头像地址：自己的 → 站点默认 → 空串（由调用方回落到首字母）。
+ *
+ * 站点默认头像放在后端下发（`/site` 的 `default_avatar`）而不是注册时写进用户行：
+ * 管理员换一张，所有没设头像的账号立刻跟着换。
+ */
+export function avatarUrl(user: { avatar?: string | null } | null): string {
+  if (!user) return "";
+  return (user.avatar ?? "").trim() || (getState().site?.default_avatar ?? "").trim();
 }
 
 export function renderTabbar(): HTMLElement {

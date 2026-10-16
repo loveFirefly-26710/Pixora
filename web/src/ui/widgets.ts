@@ -348,6 +348,44 @@ export function tagChips(
   return row;
 }
 
+/** 网格里的图片节点。
+ *
+ * 一次读不出来就碎在那里，是列表页最难看的一种状态：一屏里混着几张灰框，
+ * 用户不知道是自己网不好还是图没了。这里给两段退路——先用同一个地址重试一次
+ * （服务端重启、连接被掐这类抖动多半第二次就成），仍旧不行再退回原图（原图是
+ * 这张图最稳的一份实体，缩略图缺失或者读不出来时它一定在）。
+ */
+export function thumbImage(item: {
+  url: string;
+  thumb_url?: string | null;
+  has_thumb?: boolean;
+  tags?: string[];
+  title?: string | null;
+}): HTMLImageElement {
+  const primary = item.has_thumb && item.thumb_url ? item.thumb_url : item.url;
+  const img = h("img", {
+    src: primary,
+    alt: item.tags?.[0] ?? item.title ?? "图片",
+    loading: "lazy",
+    decoding: "async",
+  });
+  // 退路只走两次：重试一次、退回原图一次。两个都不行就认了，
+  // 不留「失败又改地址再失败」的循环
+  img.addEventListener("error", () => {
+    const stage = img.dataset.fallback ?? "";
+    if (stage === "") {
+      img.dataset.fallback = "retry";
+      img.src = `${primary}${primary.includes("?") ? "&" : "?"}retry=1`;
+      return;
+    }
+    if (stage === "retry" && primary !== item.url) {
+      img.dataset.fallback = "original";
+      img.src = item.url;
+    }
+  });
+  return img;
+}
+
 /** 单个图片方格。左键打开预览，Shift/Ctrl 复选由容器统一处理。
  *
  * 卡片上的文字只有「标签 + 时间」，刻意不摆文件名与 UID：
@@ -377,22 +415,10 @@ export function imageTile(
     thumb.style.setProperty("--ratio", `${item.width} / ${item.height}`);
   }
   if (item.has_thumb && item.thumb_url) {
-    const img = h("img", {
-      src: item.thumb_url,
-      alt: item.tags[0] ?? "图片",
-      loading: "lazy",
-      decoding: "async",
-    });
-    thumb.append(img);
+    thumb.append(thumbImage({ url: item.url, thumb_url: item.thumb_url, has_thumb: true, tags: item.tags }));
   } else {
     // 没有缩略图时直接用原图，靠容器缩放，带宽影响有限
-    const img = h("img", {
-      src: item.url,
-      alt: item.tags[0] ?? "图片",
-      loading: "lazy",
-      decoding: "async",
-    });
-    thumb.append(img);
+    thumb.append(thumbImage({ url: item.url, tags: item.tags }));
   }
 
   const time = options.subtitle ?? relativeTime(item.upload_time);

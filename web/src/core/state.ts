@@ -76,6 +76,17 @@ export function canOperateAccount(uid: string): boolean {
   return uid === state.user?.uid;
 }
 
+/**
+ * 账号在界面上怎么称呼。
+ *
+ * 访客账号叫「访客」：它没有主人，邮箱又是 RFC 2606 的保留域，把
+ * `visitor@pixora.invalid` 摆在列表和弹窗标题里既占宽度又读不懂。
+ * 真实邮箱在详情页的基本信息里仍然看得到。
+ */
+export function accountLabel(user: { guest?: boolean; email: string }): string {
+  return user.guest ? "访客" : user.email;
+}
+
 export function addons(): { baseUrl: string; uploadPrefix: string } {
   return {
     baseUrl: state.site?.base_url ?? location.origin,
@@ -116,6 +127,7 @@ export async function loadSite(): Promise<void> {
       thumb_server_fallback: false,
       appeal_email: null,
       background: null,
+      default_avatar: null,
       installed: true,
       plaza_grid_columns: 3,
       recycle_retention_days: 30,

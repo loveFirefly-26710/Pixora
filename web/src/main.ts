@@ -43,6 +43,7 @@ import { render as adminUserDetailPage } from "./pages/admin-user-detail";
 import { render as adminStoragePage } from "./pages/admin-storage";
 import { render as adminQuotaPage } from "./pages/admin-quota";
 import { render as adminIpPage } from "./pages/admin-ip";
+import { render as adminLogsPage } from "./pages/admin-logs";
 import { render as adminSettingsPage } from "./pages/admin-settings";
 import { render as passwordRequiredPage } from "./pages/password-required";
 import { render as adminTermsPage } from "./pages/admin-terms";
@@ -86,6 +87,7 @@ function registerRoutes(): void {
     admin: true,
   });
   route("/admin/ip", adminIpPage, { auth: true, admin: true });
+  route("/admin/logs", adminLogsPage, { auth: true, admin: true });
   route("/admin/settings", adminSettingsPage, { auth: true, admin: true });
   route("/admin/terms", adminTermsPage, { auth: true, admin: true });
 

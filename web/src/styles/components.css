@@ -1322,6 +1322,13 @@ tr.pick {
   -webkit-user-select: none;
 }
 
+/* 拖拽期间关掉过渡：那条 `.12s` 的动画会让图片一直慢半拍追光标，
+   手感上就是「按住拖不动、松开才飘过去」。只有正在拖的时候加这个类 */
+.lb .lb-stage.dragging img {
+  transition: none;
+  cursor: grabbing;
+}
+
 .lb .lb-nav {
   background: rgba(255, 255, 255, 0.14);
   border: 0;

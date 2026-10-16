@@ -39,9 +39,14 @@ export async function render(ctx: PageContext): Promise<void> {
   );
 
   const verifySlot = h("div");
+  const emailHost = h("div", { style: { marginBottom: "14px" } });
   const sessionsSlot = h("div");
 
-  pad.append(h("div.row", { style: { marginBottom: "14px" } }, passwordCard(), verifySlot), sessionsSlot);
+  pad.append(
+    h("div.row", { style: { marginBottom: "14px" } }, passwordCard(), verifySlot),
+    emailHost,
+    sessionsSlot,
+  );
 
   await load();
 
@@ -59,6 +64,9 @@ export async function render(ctx: PageContext): Promise<void> {
     }
     user = me.user;
     updateUser(user);
+    // 换绑邮箱那张卡只在拿到账号之后画一次：它自己有「发码 → 提交」两阶段状态，
+    // 跟着别人（比如二次验证开关）一起重画会把用户输了一半的验证码抹掉
+    emailHost.replaceChildren(emailCard(user, () => void load()));
     // 先用 /me 里冗余的恢复码数量渲染，再异步取精确值，避免多一次串行等待
     recoveryRemaining = user.recovery_codes_remaining;
     renderVerify();
@@ -157,6 +165,153 @@ function passwordCard(): HTMLElement {
     submit,
     // 「上次修改时间」接口没给，不编造；能确定的行为是改完踢其他设备
     h("div.tip", { text: "改完后其他设备上的会话会被踢下线，当前设备保持登录。" }),
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 换绑邮箱                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 换绑邮箱：验证码发到**新**地址，带上码提交。
+ *
+ * 要当前密码是因为邮箱是「找回账号」的备份凭据——会话被借用的场合，光凭会话
+ * 不该能把账号的找回入口改走。验证码只认新地址：新地址先收到码并验过，才证明
+ * 它确实由提出更换的人拿着。改完新旧两个地址各收一封通知。
+ */
+function emailCard(profile: UserProfile, reload: () => void): HTMLElement {
+  const emailInput = textInput({ placeholder: "新的邮箱地址", mono: true, name: "new-email" });
+  const passwordInput = textInput({ type: "password", placeholder: "当前密码", name: "new-email-password" });
+  const codeInput = textInput({ placeholder: "6 位验证码", mono: true, name: "new-email-code" });
+  const errorLine = h("div.tip", { style: { color: "var(--danger)" } });
+
+  const sendBtn = h("button.btn", { type: "button", text: "发送验证码" });
+  const submit = h("button.btn.pri", { type: "button", text: "确认更换" });
+
+  // 第二阶段（填码）在第一阶段完成前不露面：验证码是发给哪个地址的，
+  // 得先说清楚，否则用户会以为码发到了现在的邮箱
+  const codeRow = h(
+    "div.fld",
+    { style: { display: "none" } },
+    h("label.f", { text: "新邮箱收到的验证码" }),
+    codeInput,
+  );
+  const pendingLine = h("div.tip", { style: { display: "none" } });
+
+  let sentTo = "";
+  let countdown = 0;
+  let timer: number | undefined;
+
+  const startCountdown = (): void => {
+    countdown = 60;
+    sendBtn.disabled = true;
+    const tick = (): void => {
+      countdown -= 1;
+      if (countdown <= 0) {
+        sendBtn.textContent = "重新发送";
+        sendBtn.disabled = false;
+        if (timer !== undefined) window.clearInterval(timer);
+        timer = undefined;
+        return;
+      }
+      sendBtn.textContent = `${countdown} 秒后可重发`;
+    };
+    sendBtn.textContent = `${countdown} 秒后可重发`;
+    timer = window.setInterval(tick, 1000);
+  };
+
+  sendBtn.addEventListener("click", async () => {
+    errorLine.textContent = "";
+    const email = emailInput.value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      errorLine.textContent = "邮箱格式不正确。";
+      emailInput.focus();
+      return;
+    }
+    if (!passwordInput.value) {
+      errorLine.textContent = "请先填写当前密码。";
+      passwordInput.focus();
+      return;
+    }
+    sendBtn.disabled = true;
+    sendBtn.textContent = "发送中…";
+    try {
+      const result = await request<{ delivered: boolean; message: string }>("/me/email/code", {
+        method: "POST",
+        json: { email, password: passwordInput.value },
+      });
+      // 发信结果如实说：没投出去就不能让用户对着收件箱等
+      if (!result.delivered) {
+        errorLine.textContent = result.message || "验证码邮件没能发出，请稍后重试。";
+        sendBtn.textContent = "发送验证码";
+        sendBtn.disabled = false;
+        return;
+      }
+      sentTo = email;
+      // 码已经发给这个地址了，地址就不能再改：改了它就和收到的码对不上
+      emailInput.readOnly = true;
+      codeRow.style.display = "";
+      pendingLine.style.display = "";
+      pendingLine.textContent = `验证码已发到 ${sentTo}（10 分钟内有效）。邮箱收到之前不必重复点发送。`;
+      toastOk(`验证码已发到 ${sentTo}`);
+      startCountdown();
+      codeInput.focus();
+    } catch (err) {
+      errorLine.textContent = err instanceof ApiError ? err.message : "发送失败，请稍后重试。";
+      sendBtn.textContent = "发送验证码";
+      sendBtn.disabled = false;
+    }
+  });
+
+  submit.addEventListener("click", async () => {
+    errorLine.textContent = "";
+    if (!sentTo) {
+      errorLine.textContent = "先点「发送验证码」，把码发到新邮箱。";
+      return;
+    }
+    if (!codeInput.value.trim()) {
+      errorLine.textContent = "请填写收到的验证码。";
+      codeInput.focus();
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "提交中…";
+    try {
+      const result = await request<{ email: string; delivered: boolean; message: string }>("/me/email", {
+        method: "POST",
+        json: { email: sentTo, code: codeInput.value.trim() },
+      });
+      if (result.delivered) {
+        toastOk(`邮箱已改为 ${sentTo}，新旧地址都收到了变更通知`);
+      } else {
+        toast(`邮箱已改为 ${sentTo}，但变更通知没完全发出去：${result.message || "稍后重试"}`);
+      }
+      // 整页重拉：邮箱、验证状态、会话都可能变了，本地推测一定会和真相对不上
+      reload();
+    } catch (err) {
+      errorLine.textContent = err instanceof ApiError ? err.message : "更换失败，请稍后重试。";
+      submit.disabled = false;
+      submit.textContent = "确认更换";
+    }
+  });
+
+  return card(
+    "邮箱",
+    h(
+      "div.row",
+      null,
+      h("div.fld", null, h("label.f", { text: "当前邮箱" }), badge(profile.email, "mute")),
+      h("div.fld", null, h("label.f", { text: "新邮箱" }), emailInput),
+    ),
+    h("div.fld", null, h("label.f", { text: "当前密码" }), passwordInput),
+    h("div.flexline", { style: { gap: "8px" } }, sendBtn),
+    codeRow,
+    pendingLine,
+    h("div.flexline", { style: { marginTop: "10px" } }, submit),
+    errorLine,
+    h("div.tip", {
+      text: "验证码发到新邮箱；换绑成功后新旧两个地址各收一封通知。邮箱也是找回账号的凭据，所以要带当前密码。",
+    }),
   );
 }
 

@@ -122,6 +122,8 @@ API 客户端：
   "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
   "thumb_client": true, "thumb_server_fallback": false,
   "appeal_email": "admin@example.com", "background": null,
+  // 站点默认头像：账号自己没设头像时用它（新注册的账号也走这条），没配过是 null
+  "default_avatar": null,
   "installed": true, "terms": { "required": false, "version": "v2.1", "articles": 6 }
 } }
 ```
@@ -214,6 +216,11 @@ API 客户端：
 
 可改：`login_alert`、`new_device_guard`、`avatar`。响应同 3.1 的 `user`。
 
+`avatar` 接受站内直链（`/images/…`，也接受本站完整地址，会折成相对路径）、外链，空串或
+`null` 表示清掉。**换掉（或清掉）本地上传的那张头像时，服务端会顺手清理它**：只有自己名下、
+带 `avatar` 标签的那张会被删；同一份内容还有别的引用时只删这条引用，物理文件留给另一条
+（引用计数归零才回收）。手动把相册里某张照片的直链填成头像的人不受影响——那种图没有标签。
+
 `avatar` 是字符串或 `null`：站内直链会在入库前折成相对路径（`/images/x.png`），
 换域名、加反代前缀都不会让满库头像裂掉；`/` 开头的路径原样存，外链（`http(s)://`）
 原样存；空串与 `null` 都是「清掉」。上传头像不另开端点：走普通 `POST /upload`
@@ -241,6 +248,23 @@ API 客户端：
 并清掉 `must_change_password`——管理员直接设过密码的账号改完这一下就恢复正常使用。
 
 「必须改密码」状态下这个端点是放行的（另一个是 `GET /me`），其余接口一律 403。
+
+### `POST /api/v1/me/email/code` — write
+
+换绑邮箱的第一步：`{ "email": "新邮箱", "password": "当前密码" }`。
+
+验证码发到**新**地址。要当前密码是因为邮箱是找回账号的凭据，光有会话不该能把它改走；
+新地址的域名同样受注册白名单约束，已被别的账号占用时回 409。响应与找回密码发码同一形状：
+`{ "data": { "ok": true, "delivered": true, "detail": null, "message": "…" } }`——发不出去时
+`delivered` 为 false 且 `message` 说明卡在哪一步，绝不假装已发送。
+
+### `POST /api/v1/me/email` — write
+
+换绑邮箱的第二步：`{ "email": "新邮箱", "code": "482913" }`。
+
+验码通过后地址立即生效（新地址标记为已验证），新旧两个地址各收到一封变更通知；
+响应 `{ "data": { "email": "新邮箱", "delivered": …, "message": … } }`。这一步会写一条
+`account_email_change` 审计（`via: "self"`，见「系统日志」），管理员在后台看得到是谁改的。
 
 ### `GET /api/v1/me/sessions`
 
@@ -378,6 +402,9 @@ API 客户端：
 - 这个账号不接受登录：`POST /auth/login` 对它回 403，管理员的改邮箱、改密码、改角色
   与「切换登录」同样被拒（调配额、暂停封禁不受影响）。管理端用户对象带 `"guest": true`
   的就是它。
+- 它也不会被删：`DELETE /admin/users/{id}` 对它回 403——删掉等于把全站游客的图一次性
+  清空，而且下一次游客上传又会把它建回来。要停止游客上传，关掉「允许游客上传」或者
+  暂停这个账号；开关来回切不会动它，它名下的相册与图片都保留。
 - 客户端在入队口就按 `GET /site` 下发的 `guest_upload` 判许可：站点关着游客上传时，
   未登录的人选中的文件不进队列，本机不再计算 SHA-256，也不会发出预检——省掉两头的
   无用功。这一道只管少做无用的事，许可本身仍在服务端。
@@ -385,6 +412,9 @@ API 客户端：
   `X-CSRF-Token` 那双提交头。
 - 每次上传都在 `images.upload_ip` / `images.upload_agent` 两列记下来源，审计日志里
   也带 `guest` 与 `agent` 两个字段。
+- **访客上传只有公开**：那个账号登不进来，私有图片传完谁也看不见（连它自己都进不去），
+  所以服务端按账号把 `visibility` 定成 `public`，客户端传什么都不作数；上传面板上也不摆
+  可见性选择。
 - 站点开着「拒绝游客上传」时，未登录的上传与预检都返回 401。
 
 ### `POST /api/v1/images/batch` — write
@@ -452,19 +482,21 @@ API 客户端：
 | `thumb` | 否 | 客户端生成的 WebP 缩略图，服务端只存不缩放 |
 | `album_id` | 否 | 目标相册 |
 | `tags` | 否 | 逗号分隔 |
-| `visibility` | 否 | 默认 `private` |
+| `visibility` | 否 | 默认 `private`；**访客上传恒为公开**，服务端按账号定，不听这个值 |
 | `original_name` | 否 | 原始文件名，仅内部记录 |
+| `reuse_existing` | 否 | `1` / `true` 表示「这份内容我图库里已有就复用它」，不新增一条引用（头像那套用它） |
 
 响应：
 
 ```json
 { "data": { "id": 88214, "job_id": 991, "url": "https://…/images/a3f9….webp",
             "thumb_url": "https://…/images/a3f9….webp?thumb=1",
-            "sha256": "a3f9…", "size": 2411724, "dedup": false,
+            "sha256": "a3f9…", "size": 2411724, "dedup": false, "reused": false,
             "storage_type": "local", "fallback_message": null, "tags": ["风景"] } }
 ```
 
 `dedup = true` 表示服务器已有相同文件，本次没有消耗带宽与磁盘。
+`reused = true` 表示这次没有新建图片，复用了图库里已有的那张（`id` 就是它；标签只加不减）。
 `fallback_message` 非空表示远端后端失败已回退本地，前端要提示用户。
 
 ### `GET /api/v1/queue/{job_id}` — read
@@ -543,6 +575,10 @@ API 客户端：
   响应与 `GET /admin/users/{id}` 同一个形状。
 - `PATCH /api/v1/admin/users/{id}` → `{ "email": "…", "password": "…", "role": "user" }`（改邮箱会重置验证状态并写入处置记录；角色改名同时禁止降级最后一个管理员、禁止改自己；访客账号不接受登录，这三样对它一律 403）
 
+  改邮箱另外写一条 `account_email_change` 审计（`via: "admin"`，含操作人邮箱快照），
+  与用户自助换绑同一个动作名——「系统日志」里两条都在，靠 `via` 分得清是谁改的。
+  `DELETE /admin/users/{id}` 同样写 `account_delete`，账号删掉之后这条记录还查得到。
+
   传了 `password` 时：新密码随邮件发给用户，并置上 `must_change_password`——他下次登录
   会被要求自己改一个，改完之前账号只能访问 `/me` 与 `/me/password`。响应里多一个 `mail`
   字段说明邮件投递结果：`{ "delivered": true, "detail": null }`；`delivered` 为 false 时
@@ -584,6 +620,12 @@ API 客户端：
 ### 8.2 存储
 
 - `GET /api/v1/admin/storage` →
+
+  响应里带 `thumb_rebuild`：`{ "running": false, "done": 0, "total": 0 }`——缩略图重算的进度。
+- `POST /api/v1/admin/storage/thumbs/rebuild` → 把所有图片的缩略图按当前尺寸（最长边约 1024px）
+  重新生成一遍。`{ "data": { "ok": true, "running": true, "done": 0, "total": 159 } }`，
+  后台分批做，前端轮询 `GET /admin/storage` 的 `thumb_rebuild` 看进度。
+  客户端早期按 400px 生成缩略图，宽屏上放大两三倍就是糊的——老图靠这一步修。
 
 ```json
 { "data": {
@@ -685,6 +727,26 @@ API 客户端：
 - `DELETE /api/v1/admin/ratelimit/users/{uid}` → 恢复继承默认
 - `PUT /api/v1/admin/ratelimit/on_breach` ← `on_breach` 对象
 - `GET /api/v1/admin/ratelimit/logs?uid=&page=` → 限流事件分页（来自审计日志）
+- `GET /api/v1/admin/logs?action=&uid=&query=&page=&per_page=` → **账号历史**（后台「系统日志」）：
+
+```json
+{ "data": [ { "id": 1012, "action": "account_email_change", "action_label": "更换邮箱",
+              "target_uid": "1001", "email": "chenyu@example.com",
+              "actor_kind": "self", "actor_label": "本人（chenyu@example.com）",
+              "actor_id": 42, "ip": "203.0.113.18",
+              "detail": { "from": "old@example.com", "to": "chenyu@example.com", "via": "self" },
+              "created_at": "…" } ] }
+```
+
+  覆盖的动作：`register`、`account_email_change`、`account_delete`、`account_suspend`、
+  `account_ban`、`account_restore`、`temp_ban`、`password_reset`、`login_success`、
+  `login_fail`、`login_blocked`、`logout`——`action` 留空就是这一组，也可以给逗号分隔的
+  一串动作名精确筛选。`uid` 按 UID 精确筛，`query` 在 UID、详情与 IP 里找关键词。
+
+  `actor_kind` 说明这一步是谁做的：`self`（本人）/ `admin`（管理员，`actor_label` 里带邮箱）/
+  `system`（系统自己，例如累计违规的自动封禁）/ `unknown`（操作人账号已注销）。
+  数据取自审计流水（以 UID 为目标），**账号注销之后记录仍然在**——这是它与用户详情页
+  「处置记录」的区别（后者随账号级联删除）。
 
 **上传策略的按用户覆盖**：`max_file_size`、`max_batch_size`、`max_pixels` 与 `formats`
 四项走同一张策略表，`0`（数值）与空数组（格式）表示「跟随上一层」，
@@ -734,11 +796,18 @@ API 客户端：
             "appeal_email": "admin@example.com",
             "disposable_check": true, "mx_check": true, "third_party_check": false,
             "third_party_set": false },
-  "appearance": { "background": null }
+  "appearance": { "background": null, "default_avatar": null }
 } }
 ```
 
 - `PUT /api/v1/admin/settings` ← 上述任意子对象（只写传入的键）
+
+  `appearance.background` 与 `appearance.default_avatar` 都接受：外链地址、本站上传那张的
+  公开地址（`/api/v1/site/background`、`/api/v1/site/avatar`）、或 `null`（清掉，同时删掉
+  库里那份字节）。
+- `POST /api/v1/admin/settings/avatar` → 上传站点默认头像（multipart，字段名 `file`），
+  响应 `{ "data": { "ok": true, "url": "…", "bytes": 12345 } }`。字节存进库（不落文件系统），
+  上传完立刻生效：没设过头像的账号（含新注册的）都显示它。
 - `POST /api/v1/admin/settings/mail/test` → `{ "to": "admin@example.com" }` → `{ "data": { "ok": true, "message": "…" } }`
 - `POST /api/v1/admin/settings/formats` → `{ "formats": ["jpg","png","avif"] }`
 - `POST /api/v1/admin/thumbnails/rebuild` → `{ "data": { "queued": 128, "enabled": false } }`
@@ -775,10 +844,12 @@ API 客户端：
 
 ```
 GET /{upload_prefix}/{sha256}.{ext}            # 原图
-GET /{upload_prefix}/{sha256}.{ext}?thumb=1    # 缩略图（没有则回落到原图）
+GET /{upload_prefix}/{sha256}.{ext}?thumb=1    # 这张图的缩略图（没有则回落到原图）
 GET /{upload_prefix}/{sha256}.{ext}?download=1 # 强制下载（Content-Disposition: attachment）
 ```
 
+- 路径里那个 `sha256` 是**原图**的：`?thumb=1` 顺着图片行找到它的缩略图实体（另一份 webp），
+  所以列表页拿一条直链就能同时取到原图与缩略图；URL 里的 `ext` 也始终是原图的格式
 - **还挂着公开引用**的图片可以匿名取，响应头带 `Cache-Control: public, max-age=31536000, immutable`（内容寻址，永不变化）
 - **只被私有内容引用**的图片：直链只对「本人（含管理员）」放行，其余返回 404；拿到链接不等于有权限
   本人取到时带 `Cache-Control: private, max-age=300`，避免私人图片在共享缓存里停留

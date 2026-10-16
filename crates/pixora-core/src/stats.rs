@@ -61,6 +61,8 @@ pub struct StoragePayload {
     pub trend: Vec<TrendView>,
     pub hourly: Vec<TrendView>,
     pub recent: Vec<RecentImage>,
+    /// 缩略图重算的进度（管理员点过「重算缩略图」之后才有意义）
+    pub thumb_rebuild: ThumbRebuildView,
     pub average_size: i64,
     pub image_total: i64,
 }
@@ -146,6 +148,14 @@ pub struct MimeView {
     pub mime: String,
     pub count: i64,
     pub bytes: i64,
+}
+
+/// 缩略图重算的进度。
+#[derive(Debug, Clone, Serialize)]
+pub struct ThumbRebuildView {
+    pub running: bool,
+    pub done: i64,
+    pub total: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -240,6 +250,55 @@ pub struct AdminOverview {
 // ============================================================
 
 impl AppState {
+    /// 缩略图重算的进度。三个数都在设置表里，读起来不碰像素。
+    pub async fn thumb_rebuild_progress(&self) -> Result<ThumbRebuildView> {
+        let total = self
+            .setting_i64(crate::settings::keys::THUMB_REGEN_TOTAL)
+            .await;
+        let done = self
+            .setting_i64(crate::settings::keys::THUMB_REGEN_DONE)
+            .await;
+        Ok(ThumbRebuildView {
+            running: done < total,
+            done,
+            total,
+        })
+    }
+
+    /// 读一个整数设置；缺失或不是数字都当 0。
+    async fn setting_i64(&self, key: &str) -> i64 {
+        self.settings
+            .raw(key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0)
+            .max(0)
+    }
+
+    /// 开始（或重头开始）一轮缩略图重算：记下总张数并把游标归零。
+    ///
+    /// 真正的重算在后台队列里分批做（`pixora-queue` 的缩略图任务），
+    /// 所以这个接口立刻返回，界面轮询进度即可。
+    pub async fn start_thumb_rebuild(&self) -> Result<ThumbRebuildView> {
+        let total = self.repo.count_all_images().await?;
+        self.settings
+            .set(crate::settings::keys::THUMB_REGEN_CURSOR, "0")
+            .await?;
+        self.settings
+            .set(crate::settings::keys::THUMB_REGEN_DONE, "0")
+            .await?;
+        self.settings
+            .set(crate::settings::keys::THUMB_REGEN_TOTAL, &total.to_string())
+            .await?;
+        Ok(ThumbRebuildView {
+            running: total > 0,
+            done: 0,
+            total: total.max(0),
+        })
+    }
+
     pub async fn storage_admin_payload(&self) -> Result<StoragePayload> {
         let backends = self.repo.list_backends().await?;
         let stats = self.repo.storage_stats(12).await?;
@@ -263,6 +322,8 @@ impl AppState {
         for view in &stats.recent {
             recent.push(RecentImage::from_view(self, view).await);
         }
+
+        let thumb_rebuild = self.thumb_rebuild_progress().await?;
 
         Ok(StoragePayload {
             default_driver,
@@ -335,6 +396,7 @@ impl AppState {
                 })
                 .collect(),
             recent,
+            thumb_rebuild,
             average_size: stats.average_size,
             image_total: stats.image_count,
         })

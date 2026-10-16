@@ -402,6 +402,56 @@ pub async fn storage_get(
     finish(state.storage_admin_payload().await)
 }
 
+/// `POST /api/v1/admin/storage/thumbs/rebuild` — 重算全部缩略图。
+///
+/// 客户端早期按 400px 生成缩略图，宽屏上放大两倍多就是糊的。改过尺寸之后
+/// 老图不会自己变清楚，所以给管理员一个「按新尺寸重算一遍」的入口：
+/// 这里只把游标归零并记下总数，真正的重算在后台队列里分批做。
+pub async fn storage_thumbs_rebuild(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/storage/thumbs/rebuild");
+    match state.start_thumb_rebuild().await {
+        Ok(progress) => {
+            // 立刻开跑：队列那边的轮询默认是 5 分钟一轮，管理员点了按钮不该干等。
+            // 队列里同样会推进这个游标，它兜的是「进程中途重启」这种情况
+            let drain = state.clone();
+            tokio::spawn(async move {
+                loop {
+                    match pixora_queue::thumbs::regenerate_batch(&drain, 20).await {
+                        Ok(0) => break,
+                        Ok(count) => tracing::debug!(count, "重算缩略图"),
+                        Err(err) => {
+                            tracing::warn!(error = %err, "重算缩略图中断");
+                            break;
+                        }
+                    }
+                }
+            });
+            state
+                .audit_detail(
+                    actions::STORAGE_CHANGE,
+                    Some(auth.user.id),
+                    "thumb.rebuild",
+                    serde_json::json!({ "total": progress.total }),
+                    rectx.ip.as_deref(),
+                )
+                .await;
+            finish::<serde_json::Value>(Ok(serde_json::json!({
+                "ok": true,
+                "running": progress.running,
+                "done": progress.done,
+                "total": progress.total,
+                "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+            })))
+        }
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
 /// `PUT /api/v1/admin/storage/default` — 切换默认后端。
 ///
 /// 优先认 `backend_id`（精确到实例）；只给 `driver` 时找同类型的实例，
@@ -1361,10 +1411,38 @@ pub async fn ratelimit_logs(
     }
 }
 
+/// `GET /api/v1/admin/logs` — 账号历史（后台「系统日志」那一栏）。
+///
+/// 注册、换邮箱、处置、注销与登录记录都在这里。记录以 UID 为目标，账号删掉
+/// 之后流水仍在，每条还会说明是本人做的还是管理员做的——这两点正是它和
+/// 用户详情页那张「处置记录」的区别（那张随账号一起消失）。
+///
+/// `action` 支持逗号分隔的一串动作名，也接受空（用默认那一组账号动作）；
+/// `uid` 精确筛某个账号，`query` 在 UID、详情与 IP 里找关键词。
+pub async fn account_logs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let (_rectx, _auth) = admin_guard!(state, headers, method, peer, "/admin/logs");
+
+    let filter = pixora_core::account_log::AccountLogFilter {
+        action: parse_str(&query, "action").map(str::to_string),
+        uid: parse_str(&query, "uid").map(str::to_string),
+        query: parse_str(&query, "query").map(str::to_string),
+    };
+    let page = super::page_request(&query, 30, 200);
+    match state.account_log(&filter, page).await {
+        Ok(result) => finish_page::<pixora_core::account_log::AccountLogRow>(Ok(result)),
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
 // ============================================================
 // 8.5 IP 规则
 // ============================================================
-
 /// `GET /api/v1/admin/ip` — 策略 + 规则清单。
 pub async fn ip_get(
     State(state): State<Arc<AppState>>,
@@ -1624,6 +1702,10 @@ pub async fn settings_get(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    let default_avatar = match state.settings.default_avatar_url().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
     let background = match state.settings.background_public_url().await {
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
@@ -1716,7 +1798,7 @@ pub async fn settings_get(
             "third_party_check": mail.third_party_set,
             "third_party_set": mail.third_party_set,
         },
-        "appearance": { "background": background },
+        "appearance": { "background": background, "default_avatar": default_avatar },
     })))
 }
 
@@ -2044,6 +2126,29 @@ pub async fn settings_put(
             }
             touched.push(keys::APPEARANCE_BACKGROUND.to_string());
         }
+        if super::field_present(&appearance, "default_avatar") {
+            // 与背景图同一条规矩：显式 null 表示清掉，不再用上传的那张时把字节删了
+            let value = field_opt_str(&appearance, "default_avatar").unwrap_or_default();
+            if let Err(err) = state
+                .settings
+                .set(pixora_core::settings::keys::SITE_DEFAULT_AVATAR, &value)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            if field_opt_str(&appearance, "default_avatar").as_deref()
+                != Some(pixora_core::settings::keys::AVATAR_ASSET_MARKER)
+            {
+                if let Err(err) = state
+                    .repo
+                    .delete_asset(pixora_core::settings::keys::AVATAR_ASSET_KEY)
+                    .await
+                {
+                    tracing::warn!(error = %err, "删除默认头像资产失败");
+                }
+            }
+            touched.push(pixora_core::settings::keys::SITE_DEFAULT_AVATAR.to_string());
+        }
     }
 
     // SMTP 改了要重建邮件器，否则要重启进程才生效
@@ -2356,97 +2461,46 @@ pub async fn thumbnails_rebuild(
 // 8.6.1 背景图上传 / 免登录切换用户
 // ============================================================
 
-/// 背景图上传的体积上限。界面会先缩到 1920px 再上传，正常只有几百 KB；
-/// 这个上限是防止有人绕过界面直接 POST 一张 50MB 的原图进库。
+/// 站点资产（背景图 / 默认头像）上传的体积上限。
+///
+/// 界面会先压缩再上传，正常只有几百 KB；这个上限是防止有人绕过界面
+/// 直接 POST 一张 50MB 的原图进库。
 const BACKGROUND_MAX_BYTES: usize = 4 * 1024 * 1024;
+const AVATAR_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// 一个「站点资产」在库里的落点：字节存哪、设置里写哪个键、报错时叫它什么。
+struct SiteAsset<'a> {
+    /// `storage_objects` 里的键
+    asset_key: &'a str,
+    /// 设置键，上传成功后写成本资产的标志值
+    settings_key: &'a str,
+    /// 设置里表示「用上传的那张」的值
+    marker: &'a str,
+    /// 报错与审计里用的名字（背景图 / 默认头像）
+    label: &'a str,
+    max_bytes: usize,
+}
 
 /// `POST /api/v1/admin/settings/background` — 上传站点背景图。
-///
-/// 存进数据库（`storage_objects`），不落文件系统：背景图属于配置，
-/// 备份数据库时应该跟着走，也不该出现在用户内容的目录里。
-/// 上传成功后把 `appearance.background` 写成 `asset` 标记，
-/// `/site` 会把它翻译成本站的公开地址。
 pub async fn background_upload(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
-    mut multipart: axum::extract::Multipart,
+    multipart: axum::extract::Multipart,
 ) -> Response {
+    let asset = SiteAsset {
+        asset_key: pixora_core::settings::keys::BACKGROUND_ASSET_KEY,
+        settings_key: pixora_core::settings::keys::APPEARANCE_BACKGROUND,
+        marker: pixora_core::settings::keys::BACKGROUND_ASSET_MARKER,
+        label: "背景图",
+        max_bytes: BACKGROUND_MAX_BYTES,
+    };
     let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/settings/background");
-
-    let mut bytes: Option<Vec<u8>> = None;
-    loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(field)) => field,
-            Ok(None) => break,
-            Err(err) => {
-                return crate::http::error_response(AppError::bad_request(format!(
-                    "表单解析失败：{err}"
-                )))
-            }
-        };
-        let name = field.name().unwrap_or_default().to_ascii_lowercase();
-        if !matches!(name.as_str(), "file" | "image" | "background") {
-            continue;
-        }
-        match field.bytes().await {
-            Ok(chunk) => {
-                if chunk.len() > BACKGROUND_MAX_BYTES {
-                    return crate::http::error_response(AppError::bad_request(format!(
-                        "背景图不能超过 {} MiB；界面会自动压缩，这个提示说明你在直接调接口",
-                        BACKGROUND_MAX_BYTES / 1024 / 1024
-                    )));
-                }
-                bytes = Some(chunk.to_vec());
-            }
-            Err(err) => {
-                return crate::http::error_response(AppError::bad_request(format!(
-                    "读取背景图失败：{err}"
-                )))
-            }
-        }
-    }
-
-    let Some(bytes) = bytes else {
-        return crate::http::error_response(AppError::bad_request(
-            "没有收到图片文件（字段名用 file）",
-        ));
+    let stored = match upload_site_asset(&state, rectx, auth, multipart, &asset).await {
+        Ok(stored) => stored,
+        Err(response) => return response,
     };
-    let Some(sniffed) = pixora_core::media::sniff(&bytes) else {
-        return crate::http::error_response(AppError::bad_request("背景图格式无法识别"));
-    };
-    if !sniffed.mime.starts_with("image/") {
-        return crate::http::error_response(AppError::bad_request("背景图要是图片"));
-    }
-    // SVG 也让它过，但要走一次净化：背景图是站内渲染的，别把脚本带进来
-    let stored = if sniffed.mime == "image/svg+xml" {
-        pixora_core::media::sanitize_svg(&bytes)
-    } else {
-        bytes
-    };
-
-    if let Err(err) = state
-        .repo
-        .put_asset(
-            pixora_core::settings::keys::BACKGROUND_ASSET_KEY,
-            &stored,
-        )
-        .await
-    {
-        return crate::http::error_response(err.into());
-    }
-    if let Err(err) = state
-        .settings
-        .set(
-            pixora_core::settings::keys::APPEARANCE_BACKGROUND,
-            pixora_core::settings::keys::BACKGROUND_ASSET_MARKER,
-        )
-        .await
-    {
-        return crate::http::error_response(err);
-    }
-
     let url = state
         .settings
         .background_public_url()
@@ -2454,21 +2508,139 @@ pub async fn background_upload(
         .ok()
         .flatten()
         .unwrap_or_default();
+    site_asset_response(&headers, url, &stored, &asset)
+}
+
+/// `POST /api/v1/admin/settings/avatar` — 上传站点默认头像。
+///
+/// 与背景图同一条路：字节进库、设置里写 `asset` 标记，`/site` 把它翻译成
+/// 公开地址。没设过头像的账号（含新注册的）都用它。
+pub async fn avatar_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    multipart: axum::extract::Multipart,
+) -> Response {
+    let asset = SiteAsset {
+        asset_key: pixora_core::settings::keys::AVATAR_ASSET_KEY,
+        settings_key: pixora_core::settings::keys::SITE_DEFAULT_AVATAR,
+        marker: pixora_core::settings::keys::AVATAR_ASSET_MARKER,
+        label: "默认头像",
+        max_bytes: AVATAR_MAX_BYTES,
+    };
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/settings/avatar");
+    let stored = match upload_site_asset(&state, rectx, auth, multipart, &asset).await {
+        Ok(stored) => stored,
+        Err(response) => return response,
+    };
+    let url = state
+        .settings
+        .default_avatar_url()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    site_asset_response(&headers, url, &stored, &asset)
+}
+
+/// 收图 → 净化 → 进库 → 写设置标记。返回存下来的字节；出错时返回打包好的响应。
+///
+/// 存进 `storage_objects` 而不是文件系统：这些属于配置，备份数据库时该跟着走，
+/// 也不该混在用户内容目录里。
+async fn upload_site_asset(
+    state: &Arc<AppState>,
+    rectx: crate::http::RequestContext,
+    auth: crate::http::Authenticated,
+    mut multipart: axum::extract::Multipart,
+    asset: &SiteAsset<'_>,
+) -> Result<Vec<u8>, Response> {
+    let mut bytes: Option<Vec<u8>> = None;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(err) => {
+                return Err(crate::http::error_response(AppError::bad_request(format!(
+                    "表单解析失败：{err}"
+                ))))
+            }
+        };
+        let name = field.name().unwrap_or_default().to_ascii_lowercase();
+        if !matches!(name.as_str(), "file" | "image" | "background" | "avatar") {
+            continue;
+        }
+        match field.bytes().await {
+            Ok(chunk) => {
+                if chunk.len() > asset.max_bytes {
+                    return Err(crate::http::error_response(AppError::bad_request(format!(
+                        "{}不能超过 {} MiB；界面会自动压缩，这个提示说明你在直接调接口",
+                        asset.label,
+                        asset.max_bytes / 1024 / 1024
+                    ))));
+                }
+                bytes = Some(chunk.to_vec());
+            }
+            Err(err) => {
+                return Err(crate::http::error_response(AppError::bad_request(format!(
+                    "读取{}失败：{err}",
+                    asset.label
+                ))))
+            }
+        }
+    }
+
+    let Some(bytes) = bytes else {
+        return Err(crate::http::error_response(AppError::bad_request(
+            "没有收到图片文件（字段名用 file）",
+        )));
+    };
+    let Some(sniffed) = pixora_core::media::sniff(&bytes) else {
+        return Err(crate::http::error_response(AppError::bad_request(format!(
+            "{}格式无法识别",
+            asset.label
+        ))));
+    };
+    if !sniffed.mime.starts_with("image/") {
+        return Err(crate::http::error_response(AppError::bad_request(format!(
+            "{}要是图片",
+            asset.label
+        ))));
+    }
+    // SVG 也让它过，但要走一次净化：这两样都是站内渲染的，别把脚本带进来
+    let stored = if sniffed.mime == "image/svg+xml" {
+        pixora_core::media::sanitize_svg(&bytes)
+    } else {
+        bytes
+    };
+
+    if let Err(err) = state.repo.put_asset(asset.asset_key, &stored).await {
+        return Err(crate::http::error_response(err.into()));
+    }
+    if let Err(err) = state.settings.set(asset.settings_key, asset.marker).await {
+        return Err(crate::http::error_response(err));
+    }
+
     state
         .audit_detail(
             actions::SETTINGS_CHANGE,
             Some(auth.user.id),
-            "appearance.background",
+            asset.asset_key,
             serde_json::json!({ "bytes": stored.len(), "mime": sniffed.mime }),
             rectx.ip.as_deref(),
         )
         .await;
+    Ok(stored)
+}
 
+/// 站点资产上传的响应：新地址 + 字节数。
+fn site_asset_response(headers: &HeaderMap, url: String, stored: &[u8], asset: &SiteAsset<'_>) -> Response {
+    let _ = asset;
     finish::<serde_json::Value>(Ok(serde_json::json!({
         "ok": true,
         "url": url,
         "bytes": stored.len(),
-        "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+        "csrf_token": cookie_value(headers, CSRF_COOKIE),
     })))
 }
 

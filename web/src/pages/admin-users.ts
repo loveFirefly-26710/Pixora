@@ -16,7 +16,7 @@ import { describeMinutes, formatBytes, formatDate, formatNumber } from "../core/
 import { confirmDialog, openModal } from "../core/modal";
 import { navigate } from "../core/router";
 import type { PageContext } from "../core/router";
-import { canOperateAccount, getState } from "../core/state";
+import { accountLabel, canOperateAccount, getState } from "../core/state";
 import { toast, toastError, toastOk } from "../core/toast";
 import type { AdminStats, AdminUserRow } from "../core/types";
 import {
@@ -341,7 +341,12 @@ export async function render(ctx: PageContext): Promise<void> {
       h(
         "td",
         { "data-label": "邮箱" },
-        h("span", { text: row.email }),
+        h("span", { text: accountLabel(row) }),
+        // 访客账号在列表里叫「访客」：它没有主人，邮箱又是保留域，
+        // 把真实邮箱折成一行小字放在下面，需要时仍看得到
+        row.guest
+          ? h("div.mono", { style: { fontSize: "11px", color: "var(--faint)" }, text: row.email })
+          : null,
         row.rate_custom
           ? h("span.tag", { title: "该账号单独设置了频率限制", text: "限流自定义" })
           : null,
@@ -758,6 +763,14 @@ export async function render(ctx: PageContext): Promise<void> {
       },
     );
 
+    // 访客账号单独一套：只填时长与备注。它登不进来、邮箱是保留域（发出去必退信），
+    // 申诉邮箱、解封要求、通知邮件这几项对它没有意义
+    const guestTarget = targets.length === 1 && targets[0].guest === true;
+    if (guestTarget) notify = false;
+    const guestNote = h("div.tip", {
+      text: "访客账号不发通知邮件：它的邮箱收不到信，账号本身也登不进来。暂停它就是按住游客上传，恢复即重新开放。",
+    });
+
     const errorLine = h("div.tip", { style: { color: "var(--danger)" } });
     const progress = h("div.tip");
     const cancel = h("button.btn", { type: "button", text: "取消" });
@@ -789,17 +802,27 @@ export async function render(ctx: PageContext): Promise<void> {
           ),
           h("div.tip", { text: "留空表示永久，只能手动解封；填了就到期自动恢复。" }),
         ),
-        h(
-          "div.fld",
-          null,
-          h("label.f", { text: "申诉接收邮箱" }),
-          appeal,
-          h("div.tip", { text: "默认取注册发信邮箱，可改" }),
-        ),
+        ...(guestTarget
+          ? []
+          : [
+              h(
+                "div.fld",
+                null,
+                h("label.f", { text: "申诉接收邮箱" }),
+                appeal,
+                h("div.tip", { text: "默认取注册发信邮箱，可改" }),
+              ),
+            ]),
       ),
-      h("div.fld", null, h("label.f", { text: "处置原因（展示给用户，也写进邮件）" }), reason),
-      field("解封要求（写进通知邮件的「如何解封」部分）", requirements),
-      notifyRow,
+      h(
+        "div.fld",
+        null,
+        h("label.f", { text: guestTarget ? "备注（写进账号历史）" : "处置原因（展示给用户，也写进邮件）" }),
+        reason,
+      ),
+      ...(guestTarget
+        ? [guestNote]
+        : [field("解封要求（写进通知邮件的「如何解封」部分）", requirements), notifyRow]),
       h(
         "div",
         { style: { marginTop: "12px" } },
@@ -820,7 +843,7 @@ export async function render(ctx: PageContext): Promise<void> {
     const handle = openModal({
       title:
         targets.length === 1
-          ? `处置 ${targets[0].email}`
+          ? `处置 ${accountLabel(targets[0])}`
           : `批量处置 ${disposables.length} 个账号`,
       body,
       footer: [cancel, confirm],
@@ -833,7 +856,9 @@ export async function render(ctx: PageContext): Promise<void> {
         return;
       }
       if (!reason.value.trim()) {
-        errorLine.textContent = "请填写处置原因：它会展示给用户，也会写进通知邮件。";
+        errorLine.textContent = guestTarget
+          ? "请填写备注：它会写进账号历史。"
+          : "请填写处置原因：它会展示给用户，也会写进通知邮件。";
         reason.focus();
         return;
       }

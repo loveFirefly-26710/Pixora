@@ -198,9 +198,88 @@ function view(reload: () => void, data: StorageAdmin): Node[] {
       distributionCard(reload, data),
       capacityCard(reload, data),
       pathsCard(reload, data),
+      thumbsCard(reload, data),
     ),
     backendsCard(reload, data),
   ];
+}
+
+/**
+ * 缩略图：重算一遍。
+ *
+ * 客户端早期按 400px 生成缩略图，宽屏上放大两倍多就是糊的。尺寸改过之后老图
+ * 不会自己变清楚，所以给一个入口按新尺寸重算；重算在后台队列里分批做，
+ * 这一页轮询进度。
+ */
+function thumbsCard(reload: () => void, data: StorageAdmin): HTMLElement {
+  const progress = data.thumb_rebuild ?? { running: false, done: 0, total: 0 };
+  const line = h("div.tip", { style: { marginTop: "6px" } });
+  const button = h("button.btn.sm", { type: "button", text: "重算缩略图" });
+
+  const paint = (state: { running: boolean; done: number; total: number }): void => {
+    if (state.total === 0) {
+      line.textContent = "还没有图片，暂时不需要重算。";
+      button.disabled = state.running;
+      button.textContent = "重算缩略图";
+      return;
+    }
+    if (state.running) {
+      button.disabled = true;
+      button.textContent = "重算中…";
+      line.textContent = `正在重算：${state.done} / ${state.total} 张。可以离开这一页，后台会继续做完。`;
+      return;
+    }
+    button.disabled = false;
+    button.textContent = "重算缩略图";
+    line.textContent = `已完成 ${state.done} / ${state.total} 张。重算会把每张图的缩略图按当前尺寸重新生成一遍，占用一些 CPU。`;
+  };
+  paint(progress);
+
+  button.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "重算缩略图",
+      message:
+        "把所有图片的缩略图按当前尺寸重新生成一遍（约 1024px）。" +
+        "<br>宽屏上「预览糊、点开才清晰」的老图靠这一步修好；后台分批做，可以放着不管。",
+      confirmText: "开始重算",
+    });
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      const next = await request<{ running: boolean; done: number; total: number }>(
+        "/admin/storage/thumbs/rebuild",
+        { method: "POST" },
+      );
+      toastOk(`已开始重算（共 ${next.total} 张）`);
+      paint({ running: true, done: next.done, total: next.total });
+      // 后台分批做，这里轮询进度：跑完之前不重画整页，免得把滚动位置顶掉
+      const timer = window.setInterval(async () => {
+        try {
+          const fresh = await request<StorageAdmin>("/admin/storage");
+          const state = fresh.thumb_rebuild ?? { running: false, done: 0, total: 0 };
+          paint(state);
+          if (!state.running) {
+            window.clearInterval(timer);
+            toastOk("缩略图重算完成");
+            reload();
+          }
+        } catch {
+          window.clearInterval(timer);
+          button.disabled = false;
+        }
+      }, 3000);
+    } catch (err) {
+      toastError(err);
+      button.disabled = false;
+    }
+  });
+
+  return card(
+    "缩略图",
+    h("div", { text: "预览用的缩略图按最长边约 1024px 生成；老图是更小的尺寸，宽屏上放大就会糊。" }),
+    h("div.flexline", { style: { marginTop: "10px", gap: "8px" } }, button),
+    line,
+  );
 }
 
 /** 运行时路径：数据目录只读、直链前缀可改、目录结构只读。 */

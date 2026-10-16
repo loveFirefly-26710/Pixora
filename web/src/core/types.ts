@@ -22,6 +22,8 @@ export interface SiteInfo {
   thumb_server_fallback: boolean;
   appeal_email: string | null;
   background: string | null;
+  /** 站点默认头像：账号自己没设头像时用它，没配过是 null */
+  default_avatar?: string | null;
   installed: boolean;
   terms: { required: boolean; version: string | null; articles: number };
   /** 广场网格列数，管理员可配 */
@@ -361,6 +363,8 @@ export interface StorageAdmin {
   recent?: ImageItem[];
   average_size?: number;
   image_total?: number;
+  /** 缩略图重算的进度（管理员点过「重算缩略图」之后才有意义） */
+  thumb_rebuild?: { running: boolean; done: number; total: number };
 }
 
 export interface QuotaAdmin {
@@ -535,7 +539,7 @@ export interface AdminSettings {
     third_party_check: boolean;
     third_party_set: boolean;
   };
-  appearance: { background: string | null };
+  appearance: { background: string | null; default_avatar: string | null };
 }
 
 export interface AdminStats {

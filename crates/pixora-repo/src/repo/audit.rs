@@ -113,6 +113,68 @@ impl Repo {
         Ok(Page::new(items, total, page))
     }
 
+    /// 账号历史的流水：按一组动作 + 目标 UID + 关键词筛。
+    ///
+    /// 与 [`Repo::list_audit`] 分开，是因为这里要按**一组**动作过滤
+    /// （`action IN (...)`），而通用过滤器只认单个动作或前缀；关键词则在
+    /// UID、详情与 IP 三处找，方便「我记得是个 gmail 的地址」这种查法。
+    pub async fn list_account_audit(
+        &self,
+        actions: &[String],
+        uid: Option<&str>,
+        contains: Option<&str>,
+        page: PageRequest,
+    ) -> Result<Page<AuditLog>> {
+        let mut builder = WhereBuilder::new();
+
+        if !actions.is_empty() {
+            let names = actions.to_vec();
+            let placeholders = vec!["?"; names.len()].join(", ");
+            builder = builder.and(&format!("action IN ({placeholders})"), move |args| {
+                names.iter().fold(args, |acc, name| acc.text(name.clone()))
+            });
+        }
+        if let Some(uid) = uid.map(str::trim).filter(|value| !value.is_empty()) {
+            builder = builder.and("target = ?", |args| args.text(uid));
+        }
+        if let Some(text) = contains.map(str::trim).filter(|value| !value.is_empty()) {
+            let escaped = text
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let pattern = format!("%{escaped}%");
+            builder = builder.and(
+                "(target LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR ip LIKE ? ESCAPE '\\')",
+                move |args| args.text(pattern.clone()).text(pattern.clone()).text(pattern),
+            );
+        }
+
+        let where_sql = builder.sql_string();
+        let args = builder.args();
+
+        let total = self
+            .db
+            .count(
+                &format!("SELECT COUNT(*) AS total FROM audit_logs{where_sql}"),
+                args.clone(),
+            )
+            .await?;
+
+        let sql = format!(
+            "SELECT {AUDIT_COLUMNS} FROM audit_logs{where_sql} \
+             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        );
+        let rows = self
+            .db
+            .fetch_all(&sql, args.int(page.per_page).int(page.offset()))
+            .await?;
+        let items = rows
+            .iter()
+            .map(AuditLog::from_row)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Page::new(items, total, page))
+    }
+
     /// 某个动作在窗口内发生的次数。`actor_id` 给了就只数这个人，
     /// 管理后台「近 24 小时命中限制」那一列用的就是它。
     pub async fn count_audit_action_since(
