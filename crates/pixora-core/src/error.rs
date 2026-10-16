@@ -110,6 +110,17 @@ impl AppError {
         }
     }
 
+    /// 这次失败还值不值得重试。
+    ///
+    /// 目前只有邮件一类带这个信息：收件服务器明确拒收（5xx）与认证失败都是
+    /// 一次性的结论，发件箱不该再拿它排队重发——重发只是往发信账号里堆退信。
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            AppError::Mail(err) => err.is_permanent(),
+            _ => false,
+        }
+    }
+
     pub fn status(&self) -> u16 {
         match self {
             AppError::BadRequest(_) | AppError::TotpInvalid(_) | AppError::Config(_) => 400,
@@ -364,5 +375,16 @@ mod tests {
     fn server_faults_are_marked() {
         assert!(AppError::Internal("x".into()).is_server_fault());
         assert!(!AppError::BadRequest("x".into()).is_server_fault());
+    }
+
+    /// 「还值不值得重试」只对邮件类有讲究：收件服务器拒收与认证失败是一次性
+    /// 结论，别的（网络超时、TLS、内部错误）都还值得再来一次
+    #[test]
+    fn only_mail_rejections_are_permanent() {
+        assert!(AppError::Mail(MailError::Rejected("550 user unknown".into())).is_permanent());
+        assert!(AppError::Mail(MailError::Auth("535 auth failed".into())).is_permanent());
+        assert!(!AppError::Mail(MailError::Transport("timed out".into())).is_permanent());
+        assert!(!AppError::Mail(MailError::NotConfigured("没配".into())).is_permanent());
+        assert!(!AppError::Internal("别的错".into()).is_permanent());
     }
 }

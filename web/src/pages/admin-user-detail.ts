@@ -151,10 +151,10 @@ function basicCard(detail: UserDetailPayload, reload: () => void): HTMLElement {
     role.disabled = true;
     quota.readOnly = true;
   }
-  // 访客账号是系统账号、不接受登录：邮箱与角色（连同下面那张密码卡）都不能改。
-  // 配额留着——管理员用它可以按住游客上传
+  // 访客账号是系统账号、不接受登录：角色不能改（下面那张密码卡同理）。
+  // 邮箱可以改——它只是个记号，用来认「这只相册是谁的」，不走验证也不发信；
+  // 配额也留着，管理员用它可以按住游客上传
   if (user.guest) {
-    email.readOnly = true;
     role.disabled = true;
   }
 
@@ -206,13 +206,16 @@ function basicCard(detail: UserDetailPayload, reload: () => void): HTMLElement {
         );
         if (patch.email) {
           const mail = payload?.mail ?? null;
-          // 变更通知发不发得出去要如实说：管理员容易以为「改完他就知道了」
+          // 变更通知发不发得出去要如实说：管理员容易以为「改完他就知道了」。
+          // 访客账号没有通知这回事（它不收信、也不登录），照实说没有
           done.push(
-            mail?.delivered
-              ? `邮箱已改为 ${patch.email}，变更通知已发到新旧两个地址`
-              : `邮箱已改为 ${patch.email}，但变更通知没发出去：${
-                  mail?.detail ?? "已留在发件箱等重试"
-                }`,
+            user.guest
+              ? `邮箱已改为 ${patch.email}（访客账号的邮箱只是个记号，不发验证与通知）`
+              : mail?.delivered
+                ? `邮箱已改为 ${patch.email}，变更通知已发到新旧两个地址`
+                : `邮箱已改为 ${patch.email}，但变更通知没发出去：${
+                    mail?.detail ?? "已留在发件箱等重试"
+                  }`,
           );
         }
         if (patch.role) done.push(`角色已改为${patch.role === "admin" ? "管理员" : "普通用户"}`);
@@ -259,7 +262,7 @@ function basicCard(detail: UserDetailPayload, reload: () => void): HTMLElement {
     errorLine,
     h("div.tip", {
       text: user.guest
-        ? "访客账号是系统账号，不接受登录，因此没有可设的密码，也发不出重置邮件。游客上传的图片都归在它名下。"
+        ? "访客账号是系统账号，不接受登录（没有可设的密码，也发不出重置邮件），因此邮箱只起个记号作用：改了它不会验证、不会发通知，也不能拿它登录。游客上传的图片都归在它名下。"
         : operable
           ? "改邮箱后账号立即以新地址登录（管理员填写即视为可信），并给新旧两个地址各发一封变更通知。"
           : "这是安装时创建的管理员账号，只有它自己能改这些；要换主账号，先给另一个账号管理员权限。",

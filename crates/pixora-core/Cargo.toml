@@ -25,6 +25,7 @@ image.workspace = true
 governor.workspace = true
 ipnet.workspace = true
 reqwest.workspace = true
+hickory-resolver.workspace = true
 base64.workspace = true
 hex.workspace = true
 

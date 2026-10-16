@@ -318,6 +318,10 @@ async fn is_publicly_referenced(state: &AppState, blob_id: i64) -> pixora_core::
 ///
 /// 只看会话 Cookie：`<img>` 标签带不了 Authorization 头，所以这里是浏览器会话的
 /// 判断。Token 访问图片走的是带鉴权的详情接口，不经过直链。
+///
+/// 回收站里的引用也算数：那里的图片是软删的行，本人当然还「有权限」，
+/// 而回收站页面上的预览图用的正是这条直链——把它们排除掉，本人打开回收站
+/// 看到的就是一排碎图标。
 async fn owner_is_requesting(
     state: &AppState,
     headers: &HeaderMap,
@@ -336,7 +340,7 @@ async fn owner_is_requesting(
         .repo
         .db()
         .fetch_optional(
-            "SELECT 1 AS hit FROM images WHERE owner_id = ? AND (blob_id = ? OR thumb_blob_id = ?)              AND deleted_at IS NULL",
+            "SELECT 1 AS hit FROM images WHERE owner_id = ? AND (blob_id = ? OR thumb_blob_id = ?)",
             pixora_repo::Args::new().int(user.id).int(blob_id).int(blob_id),
         )
         .await?;

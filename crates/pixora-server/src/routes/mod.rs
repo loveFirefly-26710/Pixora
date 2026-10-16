@@ -970,9 +970,10 @@ mod tests {
         let csrf = "csrf-1000";
         let guest = state.ensure_guest_user().await.expect("访客账号");
 
+        // 密码与角色决定「这个账号能不能被登进来、是不是管理员」，两样都要拒。
+        // 邮箱不在此列：它只是个记号（访客登不进来、也不收发信），管理员可以改
         for (field, body) in [
             ("password", serde_json::json!({ "password": "Visitor-Login-2026x" })),
-            ("email", serde_json::json!({ "email": "someone-else@example.com" })),
             ("role", serde_json::json!({ "role": "admin" })),
         ] {
             let response = app(state.clone())
@@ -993,6 +994,28 @@ mod tests {
             assert_error(&payload, "FORBIDDEN");
         }
 
+        // 改邮箱放行：访客账号的邮箱只用来认「这只相册是谁的」，
+        // 不走验证、不发通知——它既不登录，也没法收发信
+        let response = app(state.clone())
+            .oneshot(patch_json(
+                &format!("/api/v1/admin/users/{}", guest.id),
+                Some(&cookie),
+                Some(csrf),
+                serde_json::json!({ "email": "visitor-bucket@example.com" }),
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(response.status(), StatusCode::OK, "访客账号的邮箱可以改");
+        let payload = body_json(response).await;
+        assert!(
+            payload["data"]["mail"].is_null(),
+            "访客账号不该有变更通知邮件：{payload}"
+        );
+        assert_eq!(
+            payload["data"]["user"]["email"], "visitor-bucket@example.com",
+            "返回里要带上改后的邮箱：{payload}"
+        );
+
         let after = state
             .repo
             .find_user_by_id(guest.id)
@@ -1000,8 +1023,24 @@ mod tests {
             .expect("读用户")
             .expect("访客账号还在");
         assert_eq!(after.password_hash, "!", "口令哈希不能被换掉");
-        assert_eq!(after.email, guest.email, "邮箱不能被改");
         assert_eq!(after.role, "user", "角色不能被提成管理员");
+        assert_eq!(
+            after.email, "visitor-bucket@example.com",
+            "邮箱这一列要给管理员留着"
+        );
+
+        // 邮件的另一条出口（重置邮件）仍然对它关着：这个账号不接受登录
+        let response = app(state.clone())
+            .oneshot(post_json(
+                &format!("/api/v1/admin/users/{}/password-reset-mail", guest.id),
+                Some(&cookie),
+                Some(csrf),
+                serde_json::json!({}),
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "访客账号不该能收重置邮件");
+        assert_error(&body_json(response).await, "FORBIDDEN");
 
         // 免登录切换同样要拒：那是给访客账号发一张登录凭据
         let response = app(state.clone())
@@ -1498,6 +1537,208 @@ mod tests {
             .await
             .expect("数图片");
         assert_eq!(count, 2, "两次上传加一次复用：图库里应当只有两条记录");
+    }
+
+    /// 私有图片的直链要鉴权：匿名和旁人都拿到 404，只有本人与管理员能看。
+    #[tokio::test]
+    async fn private_direct_links_need_the_owner() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "private@example.com", "8901", false).await;
+        let cookie = login_cookie(&state, &user).await;
+        let other = add_user(&state, "stranger@example.com", "8902", false).await;
+        let other_cookie = login_cookie(&state, &other).await;
+        let admin = add_user(&state, "root@example.com", "1000", true).await;
+        let admin_cookie = login_cookie(&state, &admin).await;
+        let thumb = tiny_webp();
+
+        let uploaded = app(state.clone())
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Session { cookie: &cookie, csrf: "csrf-8901" },
+                PNG_1X1,
+                "secret.png",
+                &[("visibility", "private")],
+                Some(&thumb),
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let body = body_json(uploaded).await;
+        let url = body["data"]["url"]
+            .as_str()
+            .expect("直链")
+            .replace("https://img.example.com", "");
+        let thumb_url = body["data"]["thumb_url"]
+            .as_str()
+            .expect("缩略图直链")
+            .replace("https://img.example.com", "");
+
+        for (label, path) in [("原图", &url), ("缩略图", &thumb_url)] {
+            let anonymous = app(state.clone())
+                .oneshot(get(path, None))
+                .await
+                .expect("发请求");
+            assert_eq!(
+                anonymous.status(),
+                StatusCode::NOT_FOUND,
+                "匿名请求私有{label}直链应当 404"
+            );
+            let stranger = app(state.clone())
+                .oneshot(get(path, Some(&other_cookie)))
+                .await
+                .expect("发请求");
+            assert_eq!(
+                stranger.status(),
+                StatusCode::NOT_FOUND,
+                "别的用户请求私有{label}直链应当 404"
+            );
+            let owner = app(state.clone())
+                .oneshot(get(path, Some(&cookie)))
+                .await
+                .expect("发请求");
+            assert_eq!(owner.status(), StatusCode::OK, "本人应当能看私有{label}");
+            let admin_response = app(state.clone())
+                .oneshot(get(path, Some(&admin_cookie)))
+                .await
+                .expect("发请求");
+            assert_eq!(
+                admin_response.status(),
+                StatusCode::OK,
+                "管理员应当能看私有{label}"
+            );
+        }
+    }
+
+    /// 回收站里的图片：本人（与管理员）拿直链能看到预览，别人拿不到——
+    /// 那些软删的行对本人来说仍然「有权限」，回收站页面上的预览就靠它。
+    #[tokio::test]
+    async fn recycled_direct_links_stay_with_the_owner() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "recycle@example.com", "8903", false).await;
+        let cookie = login_cookie(&state, &user).await;
+        let other = add_user(&state, "stranger2@example.com", "8904", false).await;
+        let other_cookie = login_cookie(&state, &other).await;
+
+        let uploaded = app(state.clone())
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Session { cookie: &cookie, csrf: "csrf-8903" },
+                PNG_1X1,
+                "pixel.png",
+                &[("visibility", "public")],
+                Some(&tiny_webp()),
+            ))
+            .await
+            .expect("发请求");
+        let body = body_json(uploaded).await;
+        let id = body["data"]["id"].as_i64().expect("图片 id");
+        let url = body["data"]["url"]
+            .as_str()
+            .expect("直链")
+            .replace("https://img.example.com", "");
+        let thumb_url = body["data"]["thumb_url"]
+            .as_str()
+            .expect("缩略图直链")
+            .replace("https://img.example.com", "");
+
+        // 公开图片：谁都能取
+        let anonymous = app(state.clone())
+            .oneshot(get(&url, None))
+            .await
+            .expect("发请求");
+        assert_eq!(anonymous.status(), StatusCode::OK);
+
+        // 进回收站（软删）
+        let deleted = app(state.clone())
+            .oneshot(post_json(
+                "/api/v1/images/batch",
+                Some(&cookie),
+                Some("csrf-8903"),
+                serde_json::json!({ "action": "delete", "ids": [id] }),
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(deleted.status(), StatusCode::OK);
+        assert_eq!(body_json(deleted).await["data"]["affected"], 1);
+
+        for (label, path) in [("原图", &url), ("缩略图", &thumb_url)] {
+            let owner = app(state.clone())
+                .oneshot(get(path, Some(&cookie)))
+                .await
+                .expect("发请求");
+            assert_eq!(owner.status(), StatusCode::OK, "本人应当能看回收站里的{label}");
+            let stranger = app(state.clone())
+                .oneshot(get(path, Some(&other_cookie)))
+                .await
+                .expect("发请求");
+            assert_eq!(
+                stranger.status(),
+                StatusCode::NOT_FOUND,
+                "别人拿回收站里的{label}应当 404"
+            );
+            let anonymous = app(state.clone())
+                .oneshot(get(path, None))
+                .await
+                .expect("发请求");
+            assert_eq!(
+                anonymous.status(),
+                StatusCode::NOT_FOUND,
+                "匿名拿回收站里的{label}应当 404"
+            );
+        }
+    }
+
+    /// 没有缩略图的图片：带 `?thumb` 的直链回落到原图，权限判定仍然按原图走。
+    #[tokio::test]
+    async fn thumb_requests_fall_back_to_the_original_with_the_same_guard() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "nothumb@example.com", "8905", false).await;
+        let cookie = login_cookie(&state, &user).await;
+
+        let uploaded = app(state.clone())
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Session { cookie: &cookie, csrf: "csrf-8905" },
+                PNG_1X1,
+                "pixel.png",
+                &[("visibility", "private")],
+                None,
+            ))
+            .await
+            .expect("发请求");
+        let body = body_json(uploaded).await;
+        assert!(body["data"]["thumb_url"].is_null(), "没传缩略图时不该给缩略图直链");
+        let url = body["data"]["url"].as_str().expect("直链");
+        let with_thumb = format!("{url}?thumb=2");
+
+        let anonymous = app(state.clone())
+            .oneshot(get(
+                &with_thumb.replace("https://img.example.com", ""),
+                None,
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(
+            anonymous.status(),
+            StatusCode::NOT_FOUND,
+            "私有图片带 ?thumb 也不能匿名取（回落的是原图，权限照原图判）"
+        );
+        let owner = app(state.clone())
+            .oneshot(get(
+                &with_thumb.replace("https://img.example.com", ""),
+                Some(&cookie),
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(owner.status(), StatusCode::OK);
+        assert_eq!(
+            owner
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("image/png"),
+            "回落时就发原图那一份"
+        );
     }
 
     /// 账号注销之后，账号历史仍然查得到，并且看得出是管理员做的还是本人做的。
