@@ -39,6 +39,12 @@ pub fn build(state: Arc<AppState>) -> Router {
         .route("/healthz", get(crate::routes::public::healthz))
         .nest("/api/v1", api)
         .fallback(fallback)
+        // 跨域放在最外层：预检请求就地答掉，不占业务逻辑的资源。
+        // 没配 PIXORA_CORS_ORIGINS 时它什么都不做（连响应头都不加）
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::cors::cors,
+        ))
         // 中间件由外到内：限体积 → 限时 → 追踪 → 压缩
         .layer(RequestBodyLimitLayer::new(MAX_UPLOAD_BODY))
         // 超时返回 408：客户端等的是「服务在忙」而不是 500

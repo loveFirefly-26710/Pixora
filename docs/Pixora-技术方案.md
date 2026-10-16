@@ -693,19 +693,20 @@ services:
 
 ```dockerfile
 FROM rust:1.98 AS build
-RUN rustup target add x86_64-unknown-linux-musl
+# 架构按构建机自身决定：buildx 多平台构建时它已经在目标架构上了
+RUN set -eu;     case "$(uname -m)" in       x86_64)  MUSL=x86_64-unknown-linux-musl ;;       aarch64) MUSL=aarch64-unknown-linux-musl ;;     esac;     echo "$MUSL" > /tmp/musl-target;     rustup target add "$MUSL"
 WORKDIR /src
 COPY . .
-RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN cargo build --release --target "$(cat /tmp/musl-target)"
 
 FROM scratch
-COPY --from=build /src/target/x86_64-unknown-linux-musl/release/pixora /pixora
+COPY --from=build /src/target/*/release/pixora /pixora
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 ENV TZ=Asia/Shanghai
 ENTRYPOINT ["/pixora"]
 ```
 
-跨平台编译交给 Docker 就行，本机不需要装 musl 目标——本地开发用 msvc 目标跑 `cargo run`，出镜像时才进容器编 musl。
+跨平台编译交给 Docker 就行，本机不需要装 musl 目标——本地开发用 msvc 目标跑 `cargo run`，出镜像时才进容器编 musl。多架构镜像交给 GitHub Actions 的 `docker.yml`：`docker buildx build --platform linux/amd64,linux/arm64` 一条命令出两份，arm64 那趟靠 QEMU 模拟，慢但一次性。
 
 ### 9.2 环境准备
 
@@ -721,15 +722,24 @@ ENTRYPOINT ["/pixora"]
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PIXORA_DB_DRIVER` | `postgres` | `postgres` / `mysql` / `sqlite` |
-| `PIXORA_DB_DSN` | — | 连接串，SQLite 时填文件路径 |
+| `PIXORA_DB_DRIVER` | `sqlite` | `sqlite` / `postgres` / `mysql` |
+| `PIXORA_DB_DSN` | 数据目录里的 `pixora.db` | 连接串，SQLite 时填文件路径 |
 | `PIXORA_DATA_DIR` | `./data` | 数据目录，容器里是挂载点 |
-| `PIXORA_MASTER_KEY` | — | 加密主密钥，用于存储后端凭据与 SMTP 密码 |
+| `PIXORA_MASTER_KEY` | 首次启动自动生成到数据目录 | 加密主密钥，用于存储后端凭据与 SMTP 密码 |
 | `PIXORA_WORKERS` | 等于 CPU 核数 | 队列 worker 数 |
 | `PIXORA_BIND` | `0.0.0.0:8080` | 监听地址 |
 | `PIXORA_BASE_URL` | 自动探测 | 生成直链用的基础地址，反代场景必须显式设置 |
 | `PIXORA_TRUST_PROXY` | `1` | 可信代理层数，用于取真实 IP |
+| `PIXORA_CORS_ORIGINS` | 空 | 放行的前端来源，前后端分开部署时填（见 9.5） |
+| `PIXORA_COOKIE_SAMESITE` | 配了 CORS 就 `none`，否则 `lax` | 会话 Cookie 的跨站策略 |
+| `PIXORA_SECURE_COOKIES` | 按 `BASE_URL` 是否 https | 本地 http 调试时可以显式设 false |
+| `PIXORA_DB_MAX_CONNECTIONS` | SQLite 4 / 其它 10 | 连接池上限 |
+| `PIXORA_ACCEL_PREFIX` | 空 | `X-Accel-Redirect` 前缀，让 Nginx 直接发文件 |
+| `PIXORA_WEB_DIR` | 空 | 指向前端产物目录则读盘而不是读嵌入资源（开发用） |
+| `PIXORA_DEV_RETURN_CODES` | 关 | 把邮箱验证码放进响应里（仅本机开发） |
 | `RUST_LOG` | `info` | 日志级别 |
+
+完整清单与示例见 `deploy/.env.example`。
 
 两个容易踩的点。`PIXORA_BASE_URL` 在反向代理后面必须显式设置，否则自动探测出来的是容器内部地址，直链全是错的。`PIXORA_TRUST_PROXY` 如果设成不限制，客户端可以伪造 `X-Forwarded-For` 绕过 IP 黑名单，所以只信最靠近服务端的那一层。
 
@@ -738,6 +748,24 @@ ENTRYPOINT ["/pixora"]
 首次启动跑一个交互式安装向导：填数据库连接、管理员账号、站点域名、邮件 SMTP、默认存储方式。校验通过后写配置、建表、创建管理员，然后锁定安装入口。
 
 存储路径不在向导里填，由 `PIXORA_DATA_DIR` 注入。本地直接跑时默认取当前目录下的 `./data`。
+
+### 9.5 前后端分开部署
+
+前端产物是一堆静态文件，可以单独发到 Vercel / Cloudflare Pages / EdgeOne Makers；
+后端（那个 Rust 进程）留在容器或虚拟机上。两种接法：
+
+- **边缘反代**：平台把 `/api/*` 与直链转发给后端，浏览器眼里只有一个源，不需要跨域配置；
+- **跨域直连**：前端直接调后端域名，后端用 `PIXORA_CORS_ORIGINS` 放行来源，
+  Cookie 自动切到 `SameSite=None; Secure`，OAuth 授权完按同一份名单跳回前端站点。
+
+前端的接口地址由站点根目录的 `config.js` 决定（构建时可用 `PIXORA_API_BASE` 写入），
+所以同一份产物能指向不同的后端。配置样例在 `deploy/static/`。
+
+### 9.6 自动化
+
+`.github/workflows/` 下四个工作流：CI（类型检查 + 测试 + 端到端冒烟 + Windows 编译检查）、
+Docker 镜像（多架构推到 GHCR）、发行版二进制（打 `v*` 标签出 Linux/Windows 可执行文件）、
+前端静态站点（可选，发到上面那几个平台）。推送标签即发版，不需要手工打包。
 
 ## 10. 迭代计划
 

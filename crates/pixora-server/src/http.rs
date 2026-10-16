@@ -383,6 +383,26 @@ pub fn verify_csrf(
     Err(AppError::Csrf)
 }
 
+/// Cookie 的公共属性：`Path` + `Secure` + `SameSite`。
+///
+/// 集中在这里是因为 `SameSite` 现在是可配的：前端托管在别的域名上时，
+/// 必须换成 `None` 且带 `Secure`，浏览器才会把会话 Cookie 发给跨站接口。
+/// 之前五处各写一遍 `; SameSite=Lax`，改一处漏一处的后果是「登录着登录着就掉了」。
+pub fn cookie_attrs(config: &pixora_core::Config) -> String {
+    let mut attrs = String::from("; Path=/");
+    if config.cookie_secure() {
+        attrs.push_str("; Secure");
+    }
+    attrs.push_str("; SameSite=");
+    attrs.push_str(config.samesite.as_str());
+    attrs
+}
+
+/// 同 [`cookie_attrs`]，但用于清 Cookie：过期时间归零。
+pub fn clear_attrs(config: &pixora_core::Config) -> String {
+    format!("; Max-Age=0{}", cookie_attrs(config))
+}
+
 /// 造登录成功后的两个 Cookie。
 ///
 /// `remember` 只决定 Cookie 的 `Max-Age`；服务端那份有效期在
@@ -406,17 +426,11 @@ pub async fn session_cookies(
     } else {
         String::new()
     };
-    let secure = if state.config.secure_cookies {
-        "; Secure"
-    } else {
-        ""
-    };
+    let attrs = cookie_attrs(&state.config);
 
-    let session = format!(
-        "{SESSION_COOKIE}={session_token}; Path=/; HttpOnly; SameSite=Lax{secure}{max_age}"
-    );
+    let session = format!("{SESSION_COOKIE}={session_token}; HttpOnly{attrs}{max_age}");
     // CSRF Cookie 必须能被 JS 读到（双提交模式的前提），所以不设 HttpOnly
-    let csrf = format!("{CSRF_COOKIE}={csrf_token}; Path=/; SameSite=Lax{secure}{max_age}");
+    let csrf = format!("{CSRF_COOKIE}={csrf_token}{attrs}{max_age}");
 
     if let Ok(value) = HeaderValue::from_str(&session) {
         headers.append(header::SET_COOKIE, value);
@@ -431,9 +445,8 @@ pub async fn session_cookies(
 ///
 /// 游客上传也要过双提交校验，可访客没有会话、也就没有随会话下发的令牌，
 /// 所以 `/site` 会补一个。它本身不授权任何东西，只是「同一个浏览器」的凭据。
-pub fn csrf_cookie(token: &str, secure_cookies: bool) -> String {
-    let secure = if secure_cookies { "; Secure" } else { "" };
-    format!("{CSRF_COOKIE}={token}; Path=/; SameSite=Lax{secure}")
+pub fn csrf_cookie(state: &AppState, token: &str) -> String {
+    format!("{CSRF_COOKIE}={token}{}", cookie_attrs(&state.config))
 }
 
 /// 把一串已经拼好的 Set-Cookie 值包成响应头。
@@ -448,15 +461,9 @@ pub fn cookie_headers(cookie: String) -> HeaderMap {
 /// 清空两个 Cookie。
 pub fn clear_cookies(state: &AppState) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    let secure = if state.config.secure_cookies {
-        "; Secure"
-    } else {
-        ""
-    };
+    let attrs = clear_attrs(&state.config);
     for name in [SESSION_COOKIE, CSRF_COOKIE] {
-        if let Ok(value) = HeaderValue::from_str(&format!(
-            "{name}=; Path=/; Max-Age=0; SameSite=Lax{secure}"
-        )) {
+        if let Ok(value) = HeaderValue::from_str(&format!("{name}=;{attrs}")) {
             headers.append(header::SET_COOKIE, value);
         }
     }
@@ -471,15 +478,11 @@ pub fn impersonator_cookie(headers: &HeaderMap) -> Option<String> {
 /// 写下管理员的会话令牌，供切回时使用。
 pub fn impersonator_cookie_header(state: &AppState, admin_token: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    let secure = if state.config.secure_cookies {
-        "; Secure"
-    } else {
-        ""
-    };
     // 与 CSRF Cookie 一样的寿命：会话 Cookie（关浏览器即失效）。
     // 更短会让人以为切不回去了，更长则多留一份长期凭据
     if let Ok(value) = HeaderValue::from_str(&format!(
-        "{IMPERSONATOR_COOKIE}={admin_token}; Path=/; HttpOnly; SameSite=Lax{secure}"
+        "{IMPERSONATOR_COOKIE}={admin_token}; HttpOnly{}",
+        cookie_attrs(&state.config)
     )) {
         headers.append(header::SET_COOKIE, value);
     }
@@ -489,13 +492,9 @@ pub fn impersonator_cookie_header(state: &AppState, admin_token: &str) -> Header
 /// 清掉「切回管理员」的 Cookie。
 pub fn clear_impersonator_cookie(state: &AppState) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    let secure = if state.config.secure_cookies {
-        "; Secure"
-    } else {
-        ""
-    };
     if let Ok(value) = HeaderValue::from_str(&format!(
-        "{IMPERSONATOR_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax{secure}"
+        "{IMPERSONATOR_COOKIE}=;{}",
+        clear_attrs(&state.config)
     )) {
         headers.append(header::SET_COOKIE, value);
     }

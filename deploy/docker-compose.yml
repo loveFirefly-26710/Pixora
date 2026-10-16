@@ -11,13 +11,21 @@
 # 想更省内存就用 SQLite：把 db 服务与 depends_on 去掉，
 # 环境变量改成 PIXORA_DB_DRIVER=sqlite / PIXORA_DB_DSN=/data/pixora.db，
 # 整栈可以压到 80MB 以内。
+#
+# 想用托管数据库（Neon / Supabase / RDS / 云厂商 MySQL）同样把 db 服务去掉，
+# 把 PIXORA_DB_DRIVER 与 PIXORA_DB_DSN 指向那台实例即可（连接串带 SSL 参数）。
+# 图片存储改到对象存储（R2 / OSS / COS / MinIO）在后台「存储」页配，不需要动这里。
 
 services:
   pixora:
+    # 本地构建（默认）。用 CI 推上来的镜像就删掉 build 两行，改成：
+    #   image: ghcr.io/<你的 GitHub 用户名>/pixora:latest
     image: pixora:latest
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      # 想让这份镜像里的前端指向别的后端时给这个参数：
+      # args: { PIXORA_API_BASE: "https://img-api.example.com" }
     restart: unless-stopped
     environment:
       PIXORA_DB_DRIVER: ${PIXORA_DB_DRIVER:-postgres}
@@ -35,6 +43,9 @@ services:
       # 直接把 CAS 目录暴露成公开路径会绕过私有图片的访问判断。
       # PIXORA_ACCEL_PREFIX: /data-files
       PIXORA_WORKERS: ${PIXORA_WORKERS:-4}
+      # 前后端分开部署（前端在 Vercel / Cloudflare Pages / EdgeOne）时填前端来源，
+      # 逗号分隔；留空即前后端同源，一个跨域头都不发。见 README 的部署一节
+      PIXORA_CORS_ORIGINS: ${PIXORA_CORS_ORIGINS:-}
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - ./data:/data

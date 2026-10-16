@@ -8,7 +8,7 @@
  */
 
 import { ApiError, request } from "../core/api";
-import { h } from "../core/dom";
+import { h, nodes } from "../core/dom";
 import {
   describeMinutes,
   formatBytes,
@@ -97,29 +97,33 @@ export async function render(ctx: PageContext): Promise<void> {
     body.replaceChildren(skeletonBlock(3));
     try {
       const detail = await request<UserDetailPayload>(`/admin/users/${id}`);
+      // `identitiesCard()` 在没有第三方绑定时返回 null：由 nodes() 过滤掉，
+      // 别把 null 交给原生 replaceChildren（它会把 null 当成字符串插进去）
       body.replaceChildren(
-        h(
-          "div.row",
-          { style: { marginBottom: "14px" } },
-          basicCard(detail, () => void load()),
-          passwordCard(detail.user),
-        ),
-        h(
-          "div.row",
-          { style: { marginBottom: "14px" } },
-          statusCard(detail, {
-            onDispose: (preset) => openDispositionDialog(detail.user, preset, () => void load()),
-            onRestore: () => void restoreUser(detail.user, () => void load()),
+        ...nodes(
+          h(
+            "div.row",
+            { style: { marginBottom: "14px" } },
+            basicCard(detail, () => void load()),
+            passwordCard(detail.user),
+          ),
+          h(
+            "div.row",
+            { style: { marginBottom: "14px" } },
+            statusCard(detail, {
+              onDispose: (preset) => openDispositionDialog(detail.user, preset, () => void load()),
+              onRestore: () => void restoreUser(detail.user, () => void load()),
+            }),
+            actionsCard(detail),
+          ),
+          identitiesCard(detail, () => void load()),
+          rateLimitCard(detail, () => void load()),
+          h("div.note.d", {
+            text:
+              "暂停与封禁都会让网页登录和 API 同时失效，区别在后续：暂停可申请解封、随时恢复；" +
+              "封禁会隐藏公开内容并阻断重新注册，要管理员手动解封。",
           }),
-          actionsCard(detail),
         ),
-        identitiesCard(detail, () => void load()),
-        rateLimitCard(detail, () => void load()),
-        h("div.note.d", {
-          text:
-            "暂停与封禁都会让网页登录和 API 同时失效，区别在后续：暂停可申请解封、随时恢复；" +
-            "封禁会隐藏公开内容并阻断重新注册，要管理员手动解封。",
-        }),
       );
     } catch (err) {
       body.replaceChildren(errorBlock(err, () => void load()));
@@ -689,13 +693,15 @@ function identitiesCard(detail: UserDetailPayload, reload: () => void): HTMLElem
           click: async () => {
             const ok = await confirmDialog({
               title: `摘除 ${item.label}`,
-              message: `${user.email} 将不能用 ${item.label} 登录。如果这是他唯一的登录方式，服务端会拒绝。`,
+              message: `${detail.user.email} 将不能用 ${item.label} 登录。如果这是他唯一的登录方式，服务端会拒绝。`,
               confirmText: "摘除",
               danger: true,
             });
             if (!ok) return;
             try {
-              await request(`/admin/users/${user.id}/identities/${item.provider}`, { method: "DELETE" });
+              await request(`/admin/users/${detail.user.id}/identities/${item.provider}`, {
+                method: "DELETE",
+              });
               toastOk(`${item.label} 已摘除`);
               reload();
             } catch (err) {

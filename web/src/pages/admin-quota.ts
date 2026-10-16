@@ -165,7 +165,9 @@ function view(
       h("button.btn.pri", {
         type: "button",
         text: "保存设置",
-        on: { click: (event) => void save(reload, paint, draft, data, event.target as HTMLButtonElement) },
+        on: {
+          click: (event) => void save(paint, draft, data, event.target as HTMLButtonElement),
+        },
       }),
     ),
   ];
@@ -468,7 +470,6 @@ async function adjustQuota(reload: () => void, user: AdminUserRow): Promise<void
  * 「点了没反应」是最难查的一类投诉——分不清是没保存上还是保存了但没变化。
  */
 async function save(
-  reload: () => void,
   paint: (fresh: QuotaAdmin) => void,
   draft: QuotaDraft,
   was: QuotaAdmin,

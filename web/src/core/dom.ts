@@ -96,6 +96,23 @@ function append(parent: Node, children: Child[]): void {
   }
 }
 
+/**
+ * 收集一组子节点，跳过空值。
+ *
+ * 原生 `replaceChildren` 只接受 `Node | string`，混进一个 `null` 不会报错，
+ * 而是被 WebIDL 的联合类型转成字符串——页面上凭空多出一行字面量 `null`。
+ * 由 `h()` 拼出来的元素本来就过滤空值，这个助手是给 `replaceChildren`
+ * 直接收「可能为 null 的卡片」这种写法兜底的。
+ */
+export function nodes(...items: Child[]): Array<Node | string> {
+  const out: Array<Node | string> = [];
+  for (const item of items) {
+    if (item === null || item === undefined || item === false) continue;
+    out.push(typeof item === "object" ? item : String(item));
+  }
+  return out;
+}
+
 /** 事件委托：在容器上监听，按 `[data-act]` 派发。 */
 export function delegate(
   root: HTMLElement,

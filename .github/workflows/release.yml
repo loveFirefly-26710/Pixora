@@ -1,0 +1,147 @@
+name: 发行版二进制
+
+# 打一个 v 开头的标签就出一版：Windows 与 Linux 的可执行文件，
+# 连同部署样例一起挂到 GitHub Release 上。
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# 为什么是 musl：Linux 那份完全静态链接，不挑发行版、不挑 glibc 版本，
+# Alpine、群晖、老 CentOS 上都能直接跑。代价是体积大一点（约 10MB 上下）。
+#
+# ARM Linux 不在这里出：Docker 镜像已经是多架构的，ARM 服务器用镜像更省事；
+# 真要裸二进制，在 arm 机器上 `cargo build --release --target aarch64-unknown-linux-musl`
+# 一条命令就能得到（前端产物已提交在仓库里，不需要先进目录跑 npm）。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            packages: musl-tools
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            packages: ""
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 前端产物：仓库里提交了一份，这里重新构建一遍以保证与这份源码严格一致
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: 装 musl 工具链
+        if: matrix.packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: 编译
+        run: cargo build --release --target ${{ matrix.target }} -p pixora-server
+
+      - name: 打包（Linux）
+        if: matrix.archive == 'tar.gz'
+        run: |
+          mkdir -p dist/pixora
+          cp target/${{ matrix.target }}/release/pixora dist/pixora/pixora
+          cp README.md dist/pixora/ 2>/dev/null || true
+          cp deploy/.env.example dist/pixora/ 2>/dev/null || true
+          mkdir -p dist/pixora/deploy
+          cp deploy/docker-compose.yml deploy/Caddyfile dist/pixora/deploy/ 2>/dev/null || true
+          tar -czf pixora-${{ github.ref_name }}-${{ matrix.name }}.tar.gz -C dist pixora
+
+      - name: 打包（Windows）
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/pixora | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/pixora.exe dist/pixora/pixora.exe
+          if (Test-Path README.md) { Copy-Item README.md dist/pixora/ }
+          if (Test-Path deploy/.env.example) { Copy-Item deploy/.env.example dist/pixora/ }
+          New-Item -ItemType Directory -Force -Path dist/pixora/deploy | Out-Null
+          if (Test-Path deploy/docker-compose.yml) { Copy-Item deploy/docker-compose.yml dist/pixora/deploy/ }
+          if (Test-Path deploy/Caddyfile) { Copy-Item deploy/Caddyfile dist/pixora/deploy/ }
+          Compress-Archive -Path dist/pixora -DestinationPath pixora-${{ github.ref_name }}-${{ matrix.name }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pixora-${{ matrix.name }}
+          path: |
+            pixora-*.tar.gz
+            pixora-*.zip
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 算校验和
+        run: |
+          cd artifacts
+          sha256sum pixora-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/pixora-*.tar.gz
+            artifacts/pixora-*.zip
+            artifacts/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            单文件发行版：解压即用，没有运行时依赖。
+
+            - `pixora-*-linux-x86_64.tar.gz` —— 静态链接（musl），任何 Linux 发行版都能跑
+            - `pixora-*-windows-x86_64.zip` —— Windows 10/11
+
+            跑起来：
+
+            ```bash
+            # Linux
+            tar -xzf pixora-*-linux-x86_64.tar.gz
+            cd pixora && ./pixora            # 首次启动会生成 ./data，然后访问 :8080
+            ```
+
+            ```powershell
+            # Windows
+            Expand-Archive pixora-*-windows-x86_64.zip .
+            cd pixora\pixora
+            .\pixora.exe
+            ```
+
+            首次访问 <http://127.0.0.1:8080> 会进安装向导（环境检查 → 数据库 → 管理员 → 站点与邮件）。
+            数据库默认用数据目录里的 SQLite；要换成 PostgreSQL / MySQL 就设
+            `PIXORA_DB_DRIVER` 与 `PIXORA_DB_DSN`，详见 README 的部署章节。

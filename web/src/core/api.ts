@@ -6,6 +6,8 @@
  * 失败统一抛 `ApiError`（带 code / message / detail / status）。
  */
 
+import { CREDENTIALS, apiUrl } from "./config";
+
 export type ApiErrorCode =
   | "BAD_REQUEST"
   | "UNAUTHORIZED"
@@ -91,6 +93,9 @@ export class ApiError extends Error {
 }
 
 const PREFIX = "/api/v1";
+
+/** 接口前缀。跨域部署时前面会带上 `config.js` 里配的后端地址。 */
+const API_ROOT = apiUrl(PREFIX);
 
 /** CSRF 令牌存在内存里，并用一个非 HttpOnly Cookie 备份，刷新后能还原。 */
 let csrfToken: string | null = null;
@@ -318,7 +323,7 @@ async function refreshCsrfToken(): Promise<void> {
   const cookie = readCookie("pixora_csrf");
   if (cookie) setCsrfToken(cookie);
   try {
-    const response = await fetch(`${PREFIX}/me`, { credentials: "same-origin" });
+    const response = await fetch(apiUrl(`${PREFIX}/me`), { credentials: CREDENTIALS });
     const payload = await response.json().catch(() => null);
     absorbCsrf(payload?.data);
   } catch {
@@ -327,7 +332,7 @@ async function refreshCsrfToken(): Promise<void> {
 }
 
 async function sendRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const url = `${PREFIX}${path}${buildQuery(options.query)}`;
+  const url = `${API_ROOT}${path}${buildQuery(options.query)}`;
   const headers: Record<string, string> = { ...(options.headers ?? {}) };
 
   const method = (options.method ?? (options.json || options.form ? "POST" : "GET")).toUpperCase();
@@ -366,7 +371,7 @@ async function sendRequest<T>(path: string, options: RequestOptions = {}): Promi
           method,
           headers,
           body,
-          credentials: "same-origin",
+          credentials: CREDENTIALS,
           signal: options.signal,
         });
         return (await parseResponse(response.status, await response.text(), response.headers)) as T;
@@ -382,7 +387,7 @@ async function sendRequest<T>(path: string, options: RequestOptions = {}): Promi
       method,
       headers,
       body,
-      credentials: "same-origin",
+      credentials: CREDENTIALS,
       signal: options.signal,
     });
   } catch (err) {
@@ -401,11 +406,11 @@ export async function requestPage<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<Page<T>> {
-  const url = `${PREFIX}${path}${buildQuery(options.query)}`;
+  const url = `${API_ROOT}${path}${buildQuery(options.query)}`;
   const response = await fetch(url, {
     method: "GET",
     headers: options.headers,
-    credentials: "same-origin",
+    credentials: CREDENTIALS,
     signal: options.signal,
   });
   const text = await response.text();
