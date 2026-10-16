@@ -598,6 +598,9 @@ function baselineOf(data: RateLimitAdmin, row: UserRow): PolicyFields {
     upload_per_hour: global.upload_per_hour,
     upload_per_day: row.upload_per_day,
     upload_bytes_per_day: row.upload_bytes_per_day,
+    // 下载限额：用户行里给的是解析后的生效值，没有覆盖时就是全局默认
+    download_per_minute: row.download_per_minute,
+    download_per_day: row.download_per_day,
     max_concurrent_uploads: upload?.max_concurrent_uploads ?? global.max_concurrent_uploads,
     ...uploadFields,
     unlimited: row.unlimited,

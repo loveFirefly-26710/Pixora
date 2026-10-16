@@ -13,6 +13,7 @@ import { h, mount } from "../core/dom";
 import { currentPath, navigate } from "../core/router";
 import { getState, impersonator, isAdmin, loadSite, setUser, subscribe } from "../core/state";
 import { request } from "../core/api";
+import { absUrl } from "../core/config";
 import { toast, toastError } from "../core/toast";
 
 export interface NavItem {
@@ -121,7 +122,9 @@ export function renderNavbar(): HTMLElement {
     // 中键、新标签页打开时同样落到广场）
     on: {
       click: (event: Event) => {
-        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        // 带修饰键的点击放行：那是「在新标签页打开」，别被就地跳转抢走
+        const click = event as MouseEvent;
+        if (click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return;
         event.preventDefault();
         navigate("/");
       },
@@ -226,7 +229,8 @@ function avatarLetterNode(size: "md" | "sm"): HTMLElement {
  * 所以首字母几乎走不到——它只留给「站点把默认头像配成了一个坏地址」这种情形。
  */
 function avatarFallbackNode(size: "md" | "sm"): HTMLElement {
-  const site = (getState().site?.default_avatar ?? "").trim();
+  // 站点默认头像可能是后端上传的那张（站内相对路径），跨域部署时要补后端地址
+  const site = absUrl(getState().site?.default_avatar).trim();
   // 站点没配默认头像就用内置那张：它是个 data URI，不会再失败
   if (!site) {
     return h("img.avatar-img", { class: size === "sm" ? "sm" : "", src: BUILTIN_AVATAR, alt: "" });
@@ -294,12 +298,11 @@ export const BUILTIN_AVATAR = `data:image/svg+xml;charset=utf-8,${encodeURICompo
  * 所有没设头像的账号立刻跟着换。三级都空不了，所以调用方拿到的永远是一张图。
  */
 export function avatarUrl(user: { avatar?: string | null } | null): string {
-  if (!user) return BUILTIN_AVATAR;
-  return (
-    (user.avatar ?? "").trim() ||
-    (getState().site?.default_avatar ?? "").trim() ||
-    BUILTIN_AVATAR
-  );
+  const siteDefault = absUrl(getState().site?.default_avatar).trim();
+  if (!user) return siteDefault || BUILTIN_AVATAR;
+  // 自己的头像有两种形态：外链原样用；传进图库的那种存的是站内相对路径
+  // （`/images/xxx.png`），跨域部署时要补上后端地址，否则会去静态托管那边找
+  return absUrl(user.avatar).trim() || siteDefault || BUILTIN_AVATAR;
 }
 
 export function renderTabbar(): HTMLElement {

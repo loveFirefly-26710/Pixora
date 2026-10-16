@@ -9,6 +9,7 @@
  */
 
 import { request } from "../core/api";
+import { apiUrl } from "../core/config";
 import { h } from "../core/dom";
 import type { LoginMethods } from "../core/types";
 import { toastError } from "../core/toast";
@@ -17,7 +18,8 @@ import { qtip, textInput } from "./widgets";
 /** 后端发起授权的地址（`mode=bind` 时要带上登录态）。 */
 export function oauthStartUrl(provider: string, mode: "login" | "bind", next: string): string {
   const params = new URLSearchParams({ mode, next });
-  return `/api/v1/auth/oauth/${provider}/start?${params.toString()}`;
+  // 这是一个整页跳转的入口：跨域部署时必须指向后端，否则静态托管那边没有这个路由
+  return apiUrl(`/api/v1/auth/oauth/${provider}/start?${params.toString()}`);
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -199,7 +201,9 @@ export function scanPanel(
 
   const paint = (): void => {
     paintChips();
-    const embed = `/api/v1/auth/oauth/${current}/start?mode=login&embed=1&next=${encodeURIComponent(next)}`;
+    const embed = apiUrl(
+      `/api/v1/auth/oauth/${current}/start?mode=login&embed=1&next=${encodeURIComponent(next)}`,
+    );
     frameHost.replaceChildren(
       h("iframe.qr-iframe", { src: embed, title: `${PROVIDER_LABELS[current]} 扫码登录` }),
     );

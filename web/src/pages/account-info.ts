@@ -9,7 +9,7 @@
  */
 
 import { ApiError, request } from "../core/api";
-import { h, mount } from "../core/dom";
+import { h, mount, nodes } from "../core/dom";
 import {
   formatBytes,
   formatDate,
@@ -51,21 +51,25 @@ export async function render(ctx: PageContext): Promise<void> {
       const payload = await request<{ user: UserProfile }>("/me");
       // 顺手同步全局状态：外壳上的头像与「管理后台」入口都读这份数据
       updateUser(payload.user);
+      // `mobileNavCard()` 在宽屏返回 null：用 nodes() 收口，别把 null 交给
+      // 原生 replaceChildren（它会把 null 当成字符串插进去）
       body.replaceChildren(
-        h(
-          "div.row",
-          { style: { marginBottom: "14px" } },
-          avatarCard(payload.user, () => void load()),
-          identityCard(payload.user),
+        ...nodes(
+          h(
+            "div.row",
+            { style: { marginBottom: "14px" } },
+            avatarCard(payload.user, () => void load()),
+            identityCard(payload.user),
+          ),
+          h(
+            "div.row",
+            { style: { marginBottom: "14px" } },
+            usageCard(payload.user),
+            limitsCard(payload.user.limits),
+          ),
+          // 窄屏没有侧边栏，后台与学生那些页面得从这里进
+          mobileNavCard(),
         ),
-        h(
-          "div.row",
-          { style: { marginBottom: "14px" } },
-          usageCard(payload.user),
-          limitsCard(payload.user.limits),
-        ),
-        // 窄屏没有侧边栏，后台与学生那些页面得从这里进
-        mobileNavCard(),
       );
     } catch (err) {
       body.replaceChildren(errorBlock(err, () => void load()));

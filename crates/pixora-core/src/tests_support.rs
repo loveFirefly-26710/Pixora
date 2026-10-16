@@ -13,8 +13,34 @@ use pixora_repo::model::User;
 use pixora_repo::repo::users::NewUser;
 
 /// 装一个跑在临时目录上的实例。数据库、数据目录、主密钥都在 `dir` 里。
+///
+/// 同源 Cookie、不联网：多数用例的默认环境。
 pub async fn test_state(dir: &TempDir) -> Arc<AppState> {
-    let config = Config {
+    test_state_with_origins(dir, "").await
+}
+
+/// 同上，但允许指定放行的前端来源（验跨域与跨站 Cookie 的用例要用）。
+pub async fn test_state_with_origins(dir: &TempDir, origins: &str) -> Arc<AppState> {
+    let config = test_config(dir, origins);
+    let state = AppState::bootstrap(config).await.expect("装配 AppState");
+    // 测试不联网：发信前的收件域名校验（MX 查询）默认关掉。哪条测试要验它，
+    // 自己在用例里打开——查询真实 DNS 的用例在这里是少数
+    state
+        .settings
+        .set_bool(crate::settings::keys::ANTISPAM_MX, false)
+        .await
+        .expect("关掉 MX 校验");
+    state
+}
+
+/// 一份跑在临时目录上的配置。`origins` 是逗号分隔的跨域来源清单。
+pub fn test_config(dir: &TempDir, origins: &str) -> Config {
+    let cors_origins: Vec<String> = origins
+        .split(',')
+        .map(|item| item.trim().trim_end_matches('/').to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+    Config {
         bind: "127.0.0.1:0".parse().expect("监听地址"),
         db_driver: pixora_repo::DbDriver::Sqlite,
         db_dsn: dir
@@ -32,18 +58,15 @@ pub async fn test_state(dir: &TempDir) -> Arc<AppState> {
         web_dir: None,
         accel_prefix: None,
         secure_cookies: false,
+        samesite: if cors_origins.is_empty() {
+            crate::config::SameSite::Lax
+        } else {
+            crate::config::SameSite::None
+        },
+        cors_origins,
         dev_return_codes: false,
         log_level: "warn".into(),
-    };
-    let state = AppState::bootstrap(config).await.expect("装配 AppState");
-    // 测试不联网：发信前的收件域名校验（MX 查询）默认关掉。哪条测试要验它，
-    // 自己在用例里打开——查询真实 DNS 的用例在这里是少数
-    state
-        .settings
-        .set_bool(crate::settings::keys::ANTISPAM_MX, false)
-        .await
-        .expect("关掉 MX 校验");
-    state
+    }
 }
 
 /// 造一个已激活的普通用户。多数测试只关心它的 id。

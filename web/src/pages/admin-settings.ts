@@ -13,6 +13,7 @@
  */
 
 import { ApiError, request } from "../core/api";
+import { absUrl } from "../core/config";
 import { h, mount } from "../core/dom";
 import { formatBytes, formatNumber, parseSize } from "../core/format";
 import { confirmDialog, promptDialog } from "../core/modal";
@@ -892,7 +893,7 @@ function defaultAvatarCard(reload: () => void, draft: SettingsDraft, data: Admin
   const isUploaded = (data.appearance.default_avatar ?? "").startsWith("/api/v1/site/avatar");
   const preview = h("div.avatar-preview");
   const sync = (): void => {
-    const url = draft.defaultAvatar.value.trim() || BUILTIN_AVATAR;
+    const url = absUrl(draft.defaultAvatar.value.trim()) || BUILTIN_AVATAR;
     mount(preview, h("img", { src: url, alt: "当前默认头像" }));
   };
   sync();
@@ -1006,7 +1007,7 @@ function appearanceCard(
       mount(preview, "地址看起来不对");
       return;
     }
-    mount(preview, h("img", { src: url, alt: "当前背景图" }));
+    mount(preview, h("img", { src: absUrl(url), alt: "当前背景图" }));
   };
   sync();
   draft.background.addEventListener("input", sync);

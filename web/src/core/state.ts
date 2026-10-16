@@ -7,6 +7,7 @@
  */
 
 import { request, cacheSite, currentCsrfToken, setCsrfToken, type ApiError } from "./api";
+import { API_BASE, absUrl } from "./config";
 import type { ImpersonatorInfo, SiteInfo, UserProfile } from "./types";
 
 type Listener = () => void;
@@ -88,8 +89,10 @@ export function accountLabel(user: { guest?: boolean; email: string }): string {
 }
 
 export function addons(): { baseUrl: string; uploadPrefix: string } {
+  // 站点信息里没有后端地址时（自托管没配 PIXORA_BASE_URL），跨域部署下也不能
+  // 退回 `location.origin`——那是静态托管自己的域名，拼出来的直链谁都不认。
   return {
-    baseUrl: state.site?.base_url ?? location.origin,
+    baseUrl: state.site?.base_url || API_BASE || location.origin,
     uploadPrefix: state.site?.upload_prefix ?? "images",
   };
 }
@@ -111,7 +114,7 @@ export async function loadSite(): Promise<void> {
     // 站点信息拿不到也要能渲染：用一份保守的默认值
     state.site = state.site ?? {
       name: "Pixora",
-      base_url: location.origin,
+      base_url: API_BASE || location.origin,
       upload_prefix: "images",
       registration_open: false,
       registration_closed_reason: "服务暂时不可用",
@@ -159,7 +162,8 @@ export function applySiteIdentity(): void {
     node.textContent = name;
   }
 
-  const background = (site.background ?? "").trim();
+  // 背景图可能是后端上传的那张（站内相对路径），跨域部署时要补上后端地址
+  const background = absUrl(site.background).trim();
   const root = document.documentElement;
   if (background) {
     root.style.setProperty("--site-bg-image", `url("${background}")`);

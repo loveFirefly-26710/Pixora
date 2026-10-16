@@ -5,13 +5,29 @@
 #
 # 本机不需要装 musl 目标：本地开发用 msvc/gnu 目标跑 `cargo run`，
 # 出镜像时才进容器编 musl（交叉编译交给 Docker）。
+#
+# 架构按构建机自身决定（`uname -m`）：这与 `docker buildx --platform` 的
+# 语义一致——buildx 会把整个构建阶段放到目标架构上跑（原生运行器上就是原生，
+# 加了 QEMU 才是模拟）。所以同一个 Dockerfile 既能出 amd64 也能出 arm64 镜像：
+#
+#   docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Dockerfile .
+#
+# 用 `uname -m` 而不是 buildx 注入的 `TARGETARCH`：前者在 `docker build`、
+# `docker compose build`、多平台 buildx 三种入口下都成立。
 
 # ---------- 构建阶段 ----------
 FROM rust:1.98 AS build
 
-# musl 目标 + 前端构建工具
-RUN rustup target add x86_64-unknown-linux-musl \
-    && apt-get update && apt-get install -y --no-install-recommends \
+# musl 目标 + 前端构建工具。架构名对齐 rustc 的三元组后缀
+RUN set -eu; \
+    case "$(uname -m)" in \
+      x86_64)  MUSL=x86_64-unknown-linux-musl ;; \
+      aarch64) MUSL=aarch64-unknown-linux-musl ;; \
+      *) echo "不支持的架构：$(uname -m)（只出了 x86_64 与 aarch64 两套）" >&2; exit 1 ;; \
+    esac; \
+    echo "$MUSL" > /tmp/musl-target; \
+    rustup target add "$MUSL"; \
+    apt-get update && apt-get install -y --no-install-recommends \
        musl-tools nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
@@ -26,14 +42,20 @@ RUN cd web && npm ci
 
 # 再拷源码（前端源码变化不影响依赖层的缓存）
 COPY web ./web
-RUN cd web && npm run build
+# 想把这份镜像里的前端指向别的后端时，构建时给这个参数（默认同源）
+ARG PIXORA_API_BASE=""
+RUN cd web && PIXORA_API_BASE="$PIXORA_API_BASE" npm run build
 
-RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN cargo build --release --target "$(cat /tmp/musl-target)"
 
 # ---------- 运行阶段 ----------
 FROM scratch
 
-COPY --from=build /src/target/x86_64-unknown-linux-musl/release/pixora /pixora
+LABEL org.opencontainers.image.title="Pixora" \
+      org.opencontainers.image.description="自托管的图片托管服务：单二进制、内容寻址、低内存占用" \
+      org.opencontainers.image.licenses="MIT"
+
+COPY --from=build /src/target/*/release/pixora /pixora
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 ENV TZ=Asia/Shanghai \

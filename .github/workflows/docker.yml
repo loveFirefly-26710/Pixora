@@ -1,0 +1,109 @@
+name: Docker 镜像
+
+# 出一份能直接 `docker run` 的镜像，推到 GHCR（公开仓库免费）。
+# 不用另配任何东西：GITHUB_TOKEN 就能推 ghcr.io。
+#
+#   main / master 分支  → ghcr.io/<owner>/pixora:edge、:<分支名> 与 :sha-<短哈希>
+#   打 v1.2.3 这种标签   → ghcr.io/<owner>/pixora:1.2.3、:v1.2.3、:latest
+#   手动点一次          → 同上按当前分支/标签算，可临时改 platforms
+#
+# 想要 Docker Hub 就加两个仓库密钥（DOCKERHUB_USERNAME / DOCKERHUB_TOKEN），
+# 下面那两步会自动跟上；没配就跳过。
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 构建哪些架构（不需要 ARM 就写 linux/amd64，能省一半时间）
+        required: false
+        default: linux/amd64,linux/arm64
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pixora
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # arm64 走 QEMU 模拟：首次构建慢（几十分钟），之后靠 GHA 缓存。
+      # 嫌慢就把输入改成 linux/amd64，或把 arm64 换成原生 arm 运行器单独出一个 job
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 登录 Docker Hub（配了密钥才走）
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 推哪儿：GHCR 恒定，Docker Hub 只在配了密钥时加一份。
+      # 空字符串在 metadata-action 里会被当成一个镜像名，所以这里用脚本拼
+      - name: 选定镜像名
+        id: targets
+        run: |
+          {
+            echo "list<<PIXORA_EOF"
+            echo "$IMAGE"
+            if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+              echo "${{ secrets.DOCKERHUB_USERNAME }}/pixora"
+            fi
+            echo "PIXORA_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 生成标签与标注
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.targets.outputs.list }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 三层缓存：cargo 依赖、npm 依赖、最终产物。arm64 那趟第一次会很慢
+          cache-from: type=gha,scope=${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=${{ github.ref_name }}
+
+      - name: 镜像摘要
+        run: |
+          {
+            echo "## Docker 镜像"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "架构：${{ inputs.platforms || 'linux/amd64,linux/arm64' }}"
+          } >> "$GITHUB_STEP_SUMMARY"

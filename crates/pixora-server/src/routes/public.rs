@@ -53,7 +53,7 @@ pub async fn site(
         (None, Some(_)) if crate::http::cookie_value(&headers, crate::http::CSRF_COOKIE).is_none() => {
             pixora_crypto::token::new_csrf_token()
                 .ok()
-                .map(|token| crate::http::csrf_cookie(&token, state.config.secure_cookies))
+                .map(|token| crate::http::csrf_cookie(&state, &token))
         }
         _ => None,
     };
