@@ -159,15 +159,8 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
       h(
         "div",
         { style: { flex: "1 1 220px", minWidth: "200px" } },
-        h("div", { text: "建议使用正方形图片。上传后将存入「默认相册」，并标记 avatar 标签。" }),
-        h("div.tip", {
-          style: { marginTop: "6px" },
-          text: "没设过头像时显示站点默认头像（管理员可在系统设置里换）；站点也没配过，就是默认那张轮廓头像。",
-        }),
-        h("div.tip", {
-          style: { marginTop: "6px" },
-          text: "也可直接填写图片地址（外链或本站直链）。换成别的头像（或移除）时，上一张本地上传的头像图会一并清理。",
-        }),
+        h("div", { text: "推荐使用 URL 地址；不设置时采用站点默认头像。" }),
+        h("div.tip", { style: { marginTop: "6px" }, text: "上传的图会存进「默认相册」，并标记 avatar 标签。" }),
       ),
       h("div", { style: { flex: "0 0 auto", display: "flex", gap: "8px", flexWrap: "wrap" } }, uploadBtn, remove),
       fileInput,

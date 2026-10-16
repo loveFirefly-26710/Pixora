@@ -151,7 +151,7 @@ export function phoneForm(
       "div",
       { style: { display: "grid", gap: "8px" } },
       phoneInput,
-      h("div", { style: { display: "flex", gap: "8px" } }, codeInput, send),
+      h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } }, codeInput, send),
       status,
       submit,
     ),
