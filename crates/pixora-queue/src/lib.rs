@@ -162,6 +162,19 @@ pub fn spawn(state: Arc<AppState>, config: QueueConfig) -> Vec<tokio::task::Join
         let state = state.clone();
         let interval = config.thumb_poll_seconds.max(60);
         async move {
+            // 开机把偏小的缩略图一路重算完：客户端早期按 400px 生成的缩略图在宽屏上
+            // 就是糊的，让它们自己跟上新尺寸，不必等管理员想起来点「重算缩略图」。
+            // 分批做，每批之间让出时间片；跑完就退出这个内层循环，之后交给轮询兜着
+            loop {
+                match thumbs::refresh_small_thumbs(&state, 40).await {
+                    Ok(0) => break,
+                    Ok(count) => tracing::info!(count, "把偏小的缩略图重算了一批"),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "自动重算缩略图失败");
+                        break;
+                    }
+                }
+            }
             // 上一轮有没有在重算：决定这一次睡多久
             let mut regen_running = false;
             loop {
@@ -189,6 +202,16 @@ pub fn spawn(state: Arc<AppState>, config: QueueConfig) -> Vec<tokio::task::Join
                         .await
                         .map(|progress| progress.running)
                         .unwrap_or(false);
+                }
+                // 顺带把「缩略图偏小」的收一批（旧客户端传上来的那种）。
+                // 有活可干就按短间隔继续，别让一批老图等上几个小时
+                match thumbs::refresh_small_thumbs(&state, 20).await {
+                    Ok(0) => {}
+                    Ok(count) => {
+                        regen_running = true;
+                        tracing::info!(count, "重算了偏小的缩略图");
+                    }
+                    Err(err) => tracing::warn!(error = %err, "自动重算缩略图失败"),
                 }
             }
         }

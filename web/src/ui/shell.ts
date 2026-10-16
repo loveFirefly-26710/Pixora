@@ -204,14 +204,33 @@ export function avatarNode(size: "md" | "sm"): HTMLElement {
 }
 
 /**
- * 一个账号最终显示的头像地址：自己的 → 站点默认 → 空串（由调用方回落到首字母）。
+ * 内置默认头像：一张随前端一起打包的 SVG（灰底 + 头像轮廓）。
  *
- * 站点默认头像放在后端下发（`/site` 的 `default_avatar`）而不是注册时写进用户行：
- * 管理员换一张，所有没设头像的账号立刻跟着换。
+ * 以前没头像就回落到「邮箱首字母方块」——能用，但一排字母块看着像界面没做完。
+ * 有了它，**什么都没配的站点也有默认头像**：账号自己的 → 站点默认（后台可换）
+ * → 内置这张。首字母只剩「头像图挂了」时的最后一档。
+ */
+const DEFAULT_AVATAR_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+  '<rect width="64" height="64" fill="#e2e8f0"/>' +
+  '<circle cx="32" cy="25" r="11" fill="#94a3b8"/>' +
+  '<path d="M10 62c0-13 10-20 22-20s22 7 22 20z" fill="#94a3b8"/>' +
+  "</svg>";
+export const BUILTIN_AVATAR = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(DEFAULT_AVATAR_SVG)}`;
+
+/**
+ * 一个账号最终显示的头像地址：自己的 → 站点默认（后端下发）→ 内置的那张。
+ *
+ * 站点默认头像放在 `/site` 里下发而不是注册时写进用户行：管理员换一张，
+ * 所有没设头像的账号立刻跟着换。三级都空不了，所以调用方拿到的永远是一张图。
  */
 export function avatarUrl(user: { avatar?: string | null } | null): string {
-  if (!user) return "";
-  return (user.avatar ?? "").trim() || (getState().site?.default_avatar ?? "").trim();
+  if (!user) return BUILTIN_AVATAR;
+  return (
+    (user.avatar ?? "").trim() ||
+    (getState().site?.default_avatar ?? "").trim() ||
+    BUILTIN_AVATAR
+  );
 }
 
 export function renderTabbar(): HTMLElement {

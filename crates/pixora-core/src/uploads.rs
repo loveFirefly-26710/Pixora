@@ -732,6 +732,11 @@ impl AppState {
         {
             return Ok(Some(existing.id));
         }
+        // 记下这张缩略图自己的像素尺寸：判断「是不是该按新尺寸重算」全靠它
+        // （尺寸读不出来不影响上传，留 0 表示未知）
+        let (thumb_width, thumb_height) = media::dimensions(&buffer, sniffed.mime)
+            .map(|(w, h)| (Some(w as i32).filter(|v| *v > 0), Some(h as i32).filter(|v| *v > 0)))
+            .unwrap_or((None, None));
 
         let key = cas_key(&sha256, ext);
         let (resolved, _) = self
@@ -756,8 +761,8 @@ impl AppState {
                 size: buffer.len() as i64,
                 mime_type: sniffed.mime.to_string(),
                 ext: ext.to_string(),
-                width: None,
-                height: None,
+                width: thumb_width,
+                height: thumb_height,
                 storage_driver: driver_name,
                 storage_key: resolved.key,
                 backend_id,

@@ -94,10 +94,10 @@ export function addons(): { baseUrl: string; uploadPrefix: string } {
   };
 }
 
-/** 拼直链。缩略图走 `?thumb=1`。 */
+/** 拼直链。缩略图走 `?thumb=2`（版本号，见后端 `direct_url` 的说明）。 */
 export function directUrl(hash: string, ext: string, thumb = false): string {
   const { baseUrl, uploadPrefix } = addons();
-  const suffix = thumb ? "?thumb=1" : "";
+  const suffix = thumb ? "?thumb=2" : "";
   return `${baseUrl.replace(/\/$/, "")}/${uploadPrefix}/${hash}.${ext}${suffix}`;
 }
 
