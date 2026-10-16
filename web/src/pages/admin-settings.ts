@@ -965,7 +965,16 @@ function defaultAvatarCard(reload: () => void, draft: SettingsDraft, data: Admin
       h("div", { style: { flex: "0 0 76px", paddingBottom: "13px" } }, preview),
       h(
         "div",
-        { style: { flex: "0 0 auto", paddingBottom: "13px", display: "flex", gap: "8px" } },
+        {
+          style: {
+            flex: "0 0 auto",
+            paddingBottom: "13px",
+            display: "flex",
+            gap: "8px",
+            // 窄屏三个按钮一行放不下：换行，别顶出卡片
+            flexWrap: "wrap",
+          },
+        },
         saveBtn,
         uploadBtn,
         removeBtn,
@@ -1054,7 +1063,16 @@ function appearanceCard(
       h("div", { style: { flex: "0 0 200px" } }, preview),
       h(
         "div",
-        { style: { flex: "0 0 auto", paddingBottom: "13px", display: "flex", gap: "8px" } },
+        {
+          style: {
+            flex: "0 0 auto",
+            paddingBottom: "13px",
+            display: "flex",
+            gap: "8px",
+            // 同上：窄屏换行，别顶出卡片
+            flexWrap: "wrap",
+          },
+        },
         uploadBtn,
         removeBtn,
       ),
