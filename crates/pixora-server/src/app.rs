@@ -248,10 +248,6 @@ fn api_routes() -> Router<Arc<AppState>> {
         )
         .route("/admin/settings/formats", post(r::admin::formats_put))
         .route(
-            "/admin/thumbnails/rebuild",
-            post(r::admin::thumbnails_rebuild),
-        )
-        .route(
             "/admin/terms",
             get(r::admin::terms_list).post(r::admin::terms_create),
         )

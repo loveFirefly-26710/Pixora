@@ -2423,40 +2423,6 @@ pub async fn storage_gc(
     })))
 }
 
-/// `POST /api/v1/admin/thumbnails/rebuild` — 服务端兜底缩略图重建。
-///
-/// 兜底关着时回 `{enabled: false, queued: 0}`：契约要求如实说明「没做」，
-/// 而不是假装排队了 128 张。真正的生成交给后台任务按轮次跑。
-pub async fn thumbnails_rebuild(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    method: Method,
-    peer: PeerAddr,
-) -> Response {
-    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/thumbnails/rebuild");
-
-    match pixora_queue::thumbs::rebuild_all(&state).await {
-        Ok(outcome) => {
-            let actor = auth.user.id;
-            state
-                .audit_detail(
-                    actions::SETTINGS_CHANGE,
-                    Some(actor),
-                    "thumbnails.rebuild",
-                    serde_json::json!({ "enabled": outcome.enabled, "queued": outcome.pending }),
-                    rectx.ip.as_deref(),
-                )
-                .await;
-            finish::<serde_json::Value>(Ok(serde_json::json!({
-                "queued": outcome.pending,
-                "enabled": outcome.enabled,
-                "csrf_token": cookie_value(&headers, CSRF_COOKIE),
-            })))
-        }
-        Err(err) => crate::http::error_response(err),
-    }
-}
-
 // ============================================================
 // 8.6.1 背景图上传 / 免登录切换用户
 // ============================================================
