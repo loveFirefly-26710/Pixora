@@ -101,6 +101,48 @@ expect "下发会话有效期" '"idle_minutes"' "$out"
 say "收件域名校验：MX 查到就拒（null MX 的域名收不到信）"
 # 这一关默认开着。冒烟里的地址都是假域名，先单独验一次它的判定，
 # 后面统一关掉——跑冒烟不该依赖外网 DNS 通不通
+say "暂停注册：对外只说暂停，开关与自动关闭状态一致"
+# 容量自动关闭会把系统设置里的注册开关一起翻成关闭（管理员看到的必须与真实状态一致）。
+# 这条不变式在任何磁盘占用下都成立，所以在这里断言它而不是断言具体占用率
+out=$(req GET /admin/settings)
+AUTO_CLOSED=$(printf '%s' "$out" | jq_get "['site']['register_auto_closed']")
+REG_ENABLED=$(printf '%s' "$out" | jq_get "['site']['register_enabled']")
+if [ "$AUTO_CLOSED" = "True" ] && [ "$REG_ENABLED" = "False" ]; then
+  ok "自动关闭时注册开关同步为关闭"
+elif [ "$AUTO_CLOSED" = "False" ] && [ "$REG_ENABLED" = "True" ]; then
+  ok "没有自动关闭时注册开关保持打开"
+else
+  bad "注册开关与自动关闭状态不一致" "auto_closed=$AUTO_CLOSED enabled=$REG_ENABLED"
+fi
+out=$(curl -s "$BASE/site")
+CLOSED_REASON=$(printf '%s' "$out" | python -c "import json,sys; print(json.load(sys.stdin)['data'].get('registration_closed_reason') or '')")
+if [ -z "$CLOSED_REASON" ]; then
+  ok "注册开着时不带关闭原因"
+else
+  case "$CLOSED_REASON" in
+    *暂停*时间待定*) ok "对外只说暂停与时间待定" ;;
+    *) bad "对外不该带具体口径" "$CLOSED_REASON" ;;
+  esac
+  case "$CLOSED_REASON" in
+    *占用*|*阈值*|*%) bad "对外不该出现占用率或阈值" "$CLOSED_REASON" ;;
+    *) ok "对外不带占用率与阈值" ;;
+  esac
+fi
+
+say "管理员手动打开注册：自动关闭不再抢开关"
+out=$(req PUT /admin/settings '{"site":{"register_enabled":true}}')
+expect "手动打开注册" '"ok":true' "$out"
+out=$(req GET /admin/settings)
+expect "注册开关已是打开" '"register_enabled":true' "$out"
+expect "覆盖标记立起来了" '"register_auto_close_override":true' "$out"
+if printf '%s' "$out" | grep -q '"register_auto_closed":true'; then
+  bad "手动打开后不该还被闩锁关着" "$out"
+else
+  ok "闩锁已解除"
+fi
+out=$(curl -s "$BASE/site")
+expect "站点信息里注册已开放" '"registration_open":true' "$out"
+
 # 这台机器的磁盘常年九成满，注册入口会被容量阈值自动关掉；这一节要验的是
 # 收件域名那一关，先把容量自动关闭关掉，免得它先拦下来（顺带也验了这条开关）
 out=$(req PUT /admin/quota '{"auto_close_enabled":false}')

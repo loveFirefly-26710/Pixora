@@ -20,25 +20,22 @@ import { oauthButtons } from "../ui/login-methods";
 export async function render(ctx: PageContext): Promise<void> {
   const site = getState().site;
 
-  // 注册关闭：整页提示，说明已注册用户不受影响、什么时候可能恢复
+  // 注册关闭：整页提示。只说「暂停」与「时间待定」——具体原因与恢复时间
+  // 都是运维口径，而且随时会变，写在对外页面上只会误导
   if (site && !site.registration_open) {
     ctx.outlet.append(
       h(
         "div",
         { style: { maxWidth: "520px", margin: "0 auto", padding: "48px 18px", textAlign: "center" } },
         h("div", { style: { fontSize: "34px", marginBottom: "10px" }, text: "🚧" }),
-        h("h2", { style: { fontSize: "19px", margin: "0 0 8px" }, text: "系统存储容量已达上限，暂停新用户注册" }),
+        h("h2", { style: { fontSize: "19px", margin: "0 0 8px" }, text: "暂停新用户注册" }),
         h("p", {
           style: { color: "var(--muted)", fontSize: "13px", lineHeight: "1.9" },
-          text:
-            site.registration_closed_reason ??
-            "管理员正在清理空间或扩容。已注册用户完全不受影响，照常上传。",
+          // 只通告「暂停了」：具体口径（占用多少、阈值多少）是运维信息，
+          // 摆在注册页上对访客没用，而且天天在变
+          text: "注册入口暂时关闭，重新开放时间待定。已注册用户不受影响，照常使用。",
         }),
-        qtip(
-          "info",
-          "已注册用户不受影响",
-          "占用率降到恢复阈值以下时注册会自动重新开放，不需要管理员手动操作。",
-        ),
+        qtip("info", "已注册用户不受影响", "登录、上传、浏览一切照常。注册恢复后这里会重新出现注册表单。"),
         h(
           "div",
           { style: { marginTop: "18px" } },

@@ -105,7 +105,9 @@ impl AppState {
         let allocated = self.repo.sum_allocated_quota(None).await?;
         let (default_quota_bytes, per_user_max) = self.settings.quota_values().await?;
         let policy = self.auto_close_policy().await?;
-        let (register_open, closed_reason) = self.register_open().await?;
+        let (register_open, _) = self.register_open().await?;
+        // 管理员要看的是「占用多少、阈值多少」那句；对外（/site）只说暂停
+        let closed_reason = self.auto_close_reason().await?;
 
         let total = capacity.total;
         let ceiling = allocatable_ceiling(total, capacity.host_used);
@@ -307,6 +309,17 @@ impl AppState {
             self.settings
                 .set_bool(crate::stats::KEY_AUTO_CLOSE_ENABLED, value)
                 .await?;
+            if value && !policy_before.enabled {
+                // 从「关」重新打开这项策略：把旧闩锁与管理员覆盖都清掉，
+                // 让下一次判定从当下的占用率重新算。留着旧闩锁的话，
+                // 开关显示打开、注册却还是关的，管理员只能靠猜
+                self.settings
+                    .set_bool(crate::stats::KEY_AUTO_CLOSED, false)
+                    .await?;
+                self.settings
+                    .set_bool(crate::stats::KEY_AUTO_CLOSE_OVERRIDE, false)
+                    .await?;
+            }
         }
         if let Some(value) = input.auto_close_on {
             self.settings

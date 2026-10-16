@@ -30,15 +30,21 @@ const PROVIDER_LABELS: Record<string, string> = {
 /**
  * 第三方登录按钮组。一个都没启用时返回 `null`（调用方直接不摆这一块）。
  *
- * `mode=bind` 时按钮文案改成「绑定」，用于账号安全页。
+ * `mode=bind` 时按钮文案改成「绑定」，用于账号安全页。登录页上「扫码」那两家
+ * （微信、QQ）由 `scanPanel` 出二维码，这里就不再重复摆一份按钮——`skipQr`
+ * 就是给登录页用的。
  */
 export function oauthButtons(
   methods: LoginMethods | null | undefined,
   mode: "login" | "bind",
   next: string,
+  options: { skipQr?: boolean } = {},
 ): HTMLElement | null {
   if (!methods) return null;
-  const enabled = (["github", "google", "qq", "wechat"] as const).filter((name) => methods[name]);
+  const candidates = options.skipQr
+    ? (["github", "google"] as const)
+    : (["github", "google", "qq", "wechat"] as const);
+  const enabled = candidates.filter((name) => methods[name]);
   if (enabled.length === 0) return null;
 
   const buttons = enabled.map((name) =>
@@ -149,6 +155,70 @@ export function phoneForm(
       status,
       submit,
     ),
+  );
+}
+
+/**
+ * 扫码登录（微信 / QQ）。
+ *
+ * 把对方的授权页嵌进 iframe：微信的 `qrconnect` 与 QQ 的登录页本来就是
+ * 「给人扫的二维码」，扫完由对方把结果推给我们的回调（`embed=1` 让回调去
+ * 带走顶层窗口，而不是把站内页面塞进这一小块框里）。
+ *
+ * 对方要是拒绝被嵌（有些网络环境下会），下面的「在新窗口打开」是退路。
+ */
+export function scanPanel(
+  methods: LoginMethods | null | undefined,
+  next: string,
+): HTMLElement | null {
+  const available = (["wechat", "qq"] as const).filter((name) => methods?.[name]);
+  if (available.length === 0) return null;
+
+  let current: "wechat" | "qq" = available[0];
+  const frameHost = h("div.qr-frame");
+  const chips = h("div.flexline", { style: { justifyContent: "center", marginBottom: "10px" } });
+  const fallback = h("a", { style: { color: "var(--primary)" }, text: "在新窗口打开" });
+
+  const paintChips = (): void => {
+    chips.replaceChildren(
+      ...available.map((name) => {
+        const chip = h("button.chip", {
+          type: "button",
+          class: current === name ? "on" : "",
+          text: PROVIDER_LABELS[name],
+        });
+        chip.addEventListener("click", () => {
+          if (current === name) return;
+          current = name;
+          paint();
+        });
+        return chip;
+      }),
+    );
+  };
+
+  const paint = (): void => {
+    paintChips();
+    const embed = `/api/v1/auth/oauth/${current}/start?mode=login&embed=1&next=${encodeURIComponent(next)}`;
+    frameHost.replaceChildren(
+      h("iframe.qr-iframe", { src: embed, title: `${PROVIDER_LABELS[current]} 扫码登录` }),
+    );
+    fallback.setAttribute("href", oauthStartUrl(current, "login", next));
+    fallback.setAttribute("target", "_blank");
+    fallback.setAttribute("rel", "noopener");
+  };
+  paint();
+
+  return h(
+    "div.oauth-box",
+    null,
+    available.length > 1 ? chips : null,
+    frameHost,
+    h("div.tip", {
+      style: { textAlign: "center", marginTop: "10px" },
+      text: "用手机上的对应 App 扫码，在手机上确认即可登录",
+    }),
+    h("div.tip", { style: { textAlign: "center", margin: "4px 0 0" } }, fallback),
   );
 }
 

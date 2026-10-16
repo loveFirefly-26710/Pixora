@@ -1768,6 +1768,19 @@ pub async fn settings_get(
             "plaza_public": site.plaza_public,
             "require_login_to_upload": site.require_login_to_upload,
             "register_enabled": site.register_enabled,
+            // 注册开关可能被「容量触顶自动关闭」替管理员翻成关闭：把状态与口径
+            // 一并给出，界面上要能解释「为什么开关自己关了」
+            "register_auto_closed": state
+                .settings
+                .bool(pixora_core::stats::KEY_AUTO_CLOSED, false)
+                .await
+                .unwrap_or(false),
+            "register_closed_reason": state.auto_close_reason().await.unwrap_or(None),
+            "register_auto_close_override": state
+                .settings
+                .bool(pixora_core::stats::KEY_AUTO_CLOSE_OVERRIDE, false)
+                .await
+                .unwrap_or(false),
             "email_domains": site.email_domains.to_value(),
             "plaza_grid_columns": site.plaza_grid_columns,
             "recycle_retention_days": state
@@ -1869,6 +1882,8 @@ pub async fn settings_put(
 
     if let Some(site) = body.get("site").and_then(|value| value.as_object()) {
         let site = serde_json::Value::Object(site.clone());
+        // 这个值要在下面单独处理：注册开关一动，就得联动自动关闭的覆盖标记
+        let register_enabled_value = field_opt_bool(&site, "register_enabled");
         let writes: [(&str, Option<String>); 8] = [
             (keys::SITE_NAME, field_opt_str(&site, "name")),
             (keys::SITE_BASE_URL, field_opt_str(&site, "base_url")),
@@ -1917,6 +1932,27 @@ pub async fn settings_put(
         if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
             return resp;
         }
+        // 注册开关与「容量触顶自动关闭」是一对：管理员手动打开时，把自动关闭的
+        // 覆盖标记立起来——不然占用率还在阈值之上，开关刚打开就被自动关闭按回去，
+        // 管理员会以为开关坏了。管理员显式关掉时把标记清掉，让策略重新接管
+        if let Some(_enabled) = register_enabled_value {
+            // 管理员一动手就由他接管：
+            //   - 覆盖标记立起来：抑制自动关闭（不然刚打开就被按回去，看起来像
+            //     开关坏了；关掉时不立这个标记，容量恢复又会被自动打开）
+            //   - 闩锁与「是我们关的」一起清掉：那个闩锁的含义是「此刻因容量而关」，
+            //     开关已经在管理员手里，这个说法不再成立
+            for key in [
+                pixora_core::stats::KEY_AUTO_CLOSE_OVERRIDE,
+                pixora_core::stats::KEY_AUTO_CLOSED,
+                pixora_core::stats::KEY_AUTO_CLOSE_OWNED,
+            ] {
+                let value = key == pixora_core::stats::KEY_AUTO_CLOSE_OVERRIDE;
+                if let Err(err) = state.settings.set_bool(key, value).await {
+                    return crate::http::error_response(err);
+                }
+                touched.push(key.to_string());
+            }
+        }
     }
 
     if let Some(upload) = body.get("upload").and_then(|value| value.as_object()) {
@@ -1950,6 +1986,7 @@ pub async fn settings_put(
         if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
             return resp;
         }
+
     }
 
     if let Some(session) = body.get("session").and_then(|value| value.as_object()) {

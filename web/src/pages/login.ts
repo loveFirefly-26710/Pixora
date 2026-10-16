@@ -17,7 +17,7 @@ import { navigate, type PageContext } from "../core/router";
 import { getState, loadMe } from "../core/state";
 import { toastError } from "../core/toast";
 import { field, qtip, textInput } from "../ui/widgets";
-import { oauthButtons, oauthErrorTip, phoneForm } from "../ui/login-methods";
+import { oauthButtons, oauthErrorTip, phoneForm, scanPanel } from "../ui/login-methods";
 
 export async function render(ctx: PageContext): Promise<void> {
   const next = ctx.query.get("next") ?? "/";
@@ -145,25 +145,66 @@ export async function render(ctx: PageContext): Promise<void> {
     h("span", { style: { color: "var(--muted)", fontSize: "12.5px" }, text: "还没有账号？" }),
     h("a.btn", { href: "#/register", text: "注册" }),
   );
+  // 手机号与扫码各自一块面板，由上面的标签切换：不把两套输入框叠在同一屏里
+  const phonePanel = phoneForm({
+    mode: "login",
+    onError: (message) => showError(step1Error, message),
+    onDone: async () => {
+      await loadMe();
+      navigate(next.startsWith("/") ? next : "/", { replace: true });
+    },
+  });
+  const qrPanel = scanPanel(site?.login_methods, next);
+
+  const panels: Array<{ key: string; label: string; node: HTMLElement }> = [
+    { key: "account", label: "账密登录", node: step1 },
+  ];
+  if (phonePanel) panels.push({ key: "phone", label: "手机号登录", node: phonePanel });
+  if (qrPanel) panels.push({ key: "qr", label: "扫码登录", node: qrPanel });
+
+  let activePanel = panels[0].key;
+  const tabs = h(
+    "div.auth-tabs",
+    null,
+    ...panels.map((panel) => {
+      const tab = h("button", {
+        type: "button",
+        class: activePanel === panel.key ? "on" : "",
+        text: panel.label,
+      });
+      tab.addEventListener("click", () => {
+        activePanel = panel.key;
+        for (const child of Array.from(tabs.children)) {
+          child.classList.toggle("on", (child as HTMLElement).dataset.key === panel.key);
+        }
+        for (const item of panels) item.node.style.display = item.key === panel.key ? "" : "none";
+        // 「登录」按钮服务账密面板与第二步：手机号、扫码面板各有自己的按钮，
+        // 摆一个按下去什么也不做的按钮在旁边最容易被误点
+        submit.style.display = panel.key === "account" ? "" : "none";
+        step1Error.style.display = "none";
+        if (panel.key === "account") emailInput.focus();
+      });
+      tab.dataset.key = panel.key;
+      return tab;
+    }),
+  );
+  for (const panel of panels) {
+    panel.node.style.display = panel.key === activePanel ? "" : "none";
+  }
+
   const firstStepTail = h(
     "div",
     null,
     registerRow,
     oauthErrorTip(ctx.query.get("oauth_error")),
-    oauthButtons(site?.login_methods, "login", next),
-    phoneForm({
-      mode: "login",
-      onError: (message) => showError(step1Error, message),
-      onDone: async () => {
-        await loadMe();
-        navigate(next.startsWith("/") ? next : "/", { replace: true });
-      },
-    }),
+    // 第三方（GitHub / Google）：它们本来就是一次跳转，摆成按钮而不是输入框；
+    // 扫码那两家（微信 / QQ）在「扫码登录」标签里
+    oauthButtons(site?.login_methods, "login", next, { skipQr: true }),
     site && !site.registration_open
       ? qtip(
           "warn",
           "注册入口当前关闭",
-          site.registration_closed_reason ?? "系统容量已达上限，暂停新用户注册。已注册用户不受影响。",
+          "重新开放时间待定。已注册用户不受影响，照常登录使用。",
         )
       : qtip("info", null, "账号被管理员暂停或封禁时，这里会给出明确原因和申诉入口。"),
   );
@@ -177,9 +218,10 @@ export async function render(ctx: PageContext): Promise<void> {
       h("div.logo", { style: { fontSize: "20px" }, html: "Pi<em>x</em>ora" }),
       subtitle,
     ),
-    step1,
-    step2,
+    tabs,
+    ...panels.map((panel) => panel.node),
     submit,
+    step2,
     // 返回按钮归第二步，注册入口与提示条归第一步，各自收放
     backRow,
     firstStepTail,
@@ -190,7 +232,11 @@ export async function render(ctx: PageContext): Promise<void> {
   /** 翻到第几步。第二步把「填动态码」摆成正常的一步，不用错误提示吓人。 */
   function showStep(which: 1 | 2): void {
     step = which;
-    step1.style.display = which === 1 ? "" : "none";
+    tabs.style.display = which === 1 ? "" : "none";
+    for (const panel of panels) {
+      panel.node.style.display = which === 1 && panel.key === activePanel ? "" : "none";
+    }
+    submit.style.display = which === 1 && activePanel !== "account" ? "none" : "";
     step2.style.display = which === 2 ? "" : "none";
     backRow.style.display = which === 2 ? "" : "none";
     firstStepTail.style.display = which === 1 ? "" : "none";
@@ -201,6 +247,8 @@ export async function render(ctx: PageContext): Promise<void> {
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    // 手机号与扫码面板有自己的按钮；这里的回车只对账密那一步有意义
+    if (step === 1 && activePanel !== "account") return;
     const code = totpInput.value.trim();
     if (step === 2 && !code) {
       showError(step2Error, "请输入动态验证码，或改用一枚恢复码。");

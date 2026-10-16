@@ -518,6 +518,12 @@ export interface AdminSettings {
     plaza_public: boolean;
     require_login_to_upload: boolean;
     register_enabled: boolean;
+    /** 注册是否被「容量触顶自动关闭」关着（开关是它替管理员翻的） */
+    register_auto_closed?: boolean;
+    /** 自动关闭的具体口径（占用率、阈值），只有管理端能看到 */
+    register_closed_reason?: string | null;
+    /** 管理员是否手动开过注册（容量恢复前不会再自动关） */
+    register_auto_close_override?: boolean;
     /** 允许注册的邮箱域名白名单，逗号分隔；空 = 不限域名 */
     email_domains: string;
     plaza_grid_columns: number;
