@@ -1,9 +1,13 @@
 name: 发行版二进制
 
-# 打一个 v 开头的标签就出一版：Windows 与 Linux 的可执行文件，
-# 连同部署样例一起挂到 GitHub Release 上。
+# 两种触发方式，随便挑：
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   1. 打标签推送（推荐，版本号跟着 git 历史走）
+#        git tag v0.1.0 && git push origin v0.1.0
+#   2. 在 Actions 页面手动跑一次，填个版本号（比如 0.1.0）——
+#      工作流会自动创建 v0.1.0 这个标签，并以它为准发版
+#
+# 产物：Windows 与 Linux 的可执行文件，附 SHA-256 校验和，挂到 GitHub Release 上。
 #
 # 为什么是 musl：Linux 那份完全静态链接，不挑发行版、不挑 glibc 版本，
 # Alpine、群晖、老 CentOS 上都能直接跑。代价是体积大一点（约 10MB 上下）。
@@ -16,12 +20,36 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 版本号，例如 0.1.0（不要写 v，会自己加）
+        required: true
 
 permissions:
   contents: write
 
 jobs:
+  # 先定下这次发版的标签：手动触发按输入算，推标签时用标签本身。
+  # 单独一个 job 是为了让「标签」只有一个来源，后面所有步骤都引用它
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        env:
+          RAW: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: |
+          RAW="${RAW#v}"
+          if [ -z "$RAW" ]; then
+            echo "::error::没拿到版本号：手动触发要在 inputs.version 里填，推标签时才会自动带上"
+            exit 1
+          fi
+          echo "tag=v${RAW}" >> "$GITHUB_OUTPUT"
+          echo "本次发版：v${RAW}" >> "$GITHUB_STEP_SUMMARY"
+
   build:
+    needs: meta
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +97,8 @@ jobs:
 
       - name: 打包（Linux）
         if: matrix.archive == 'tar.gz'
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
         run: |
           mkdir -p dist/pixora
           cp target/${{ matrix.target }}/release/pixora dist/pixora/pixora
@@ -76,11 +106,13 @@ jobs:
           cp deploy/.env.example dist/pixora/ 2>/dev/null || true
           mkdir -p dist/pixora/deploy
           cp deploy/docker-compose.yml deploy/Caddyfile dist/pixora/deploy/ 2>/dev/null || true
-          tar -czf pixora-${{ github.ref_name }}-${{ matrix.name }}.tar.gz -C dist pixora
+          tar -czf "pixora-${TAG}-${{ matrix.name }}.tar.gz" -C dist pixora
 
       - name: 打包（Windows）
         if: matrix.archive == 'zip'
         shell: pwsh
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
         run: |
           New-Item -ItemType Directory -Force -Path dist/pixora | Out-Null
           Copy-Item target/${{ matrix.target }}/release/pixora.exe dist/pixora/pixora.exe
@@ -89,7 +121,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/pixora/deploy | Out-Null
           if (Test-Path deploy/docker-compose.yml) { Copy-Item deploy/docker-compose.yml dist/pixora/deploy/ }
           if (Test-Path deploy/Caddyfile) { Copy-Item deploy/Caddyfile dist/pixora/deploy/ }
-          Compress-Archive -Path dist/pixora -DestinationPath pixora-${{ github.ref_name }}-${{ matrix.name }}.zip
+          Compress-Archive -Path dist/pixora -DestinationPath "pixora-${env:TAG}-${{ matrix.name }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -100,7 +132,7 @@ jobs:
           retention-days: 7
 
   release:
-    needs: build
+    needs: [meta, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -116,6 +148,10 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # 标签不存在时它会按 target_commitish 创建（手动触发那条路靠这个）
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: Pixora ${{ needs.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: |
             artifacts/pixora-*.tar.gz
             artifacts/pixora-*.zip
@@ -124,24 +160,31 @@ jobs:
           body: |
             单文件发行版：解压即用，没有运行时依赖。
 
-            - `pixora-*-linux-x86_64.tar.gz` —— 静态链接（musl），任何 Linux 发行版都能跑
-            - `pixora-*-windows-x86_64.zip` —— Windows 10/11
+            | 文件 | 说明 |
+            |---|---|
+            | `pixora-*-linux-x86_64.tar.gz` | 静态链接（musl），任何 Linux 发行版都能跑 |
+            | `pixora-*-windows-x86_64.zip` | Windows 10 / 11 |
 
             跑起来：
 
             ```bash
             # Linux
             tar -xzf pixora-*-linux-x86_64.tar.gz
-            cd pixora && ./pixora            # 首次启动会生成 ./data，然后访问 :8080
+            cd pixora && ./pixora
             ```
 
             ```powershell
             # Windows
             Expand-Archive pixora-*-windows-x86_64.zip .
-            cd pixora\pixora
-            .\pixora.exe
+            cd pixora\pixora; .\pixora.exe
             ```
 
             首次访问 <http://127.0.0.1:8080> 会进安装向导（环境检查 → 数据库 → 管理员 → 站点与邮件）。
             数据库默认用数据目录里的 SQLite；要换成 PostgreSQL / MySQL 就设
             `PIXORA_DB_DRIVER` 与 `PIXORA_DB_DSN`，详见 README 的部署章节。
+
+            同一个提交还会出一个容器镜像（多架构），拉取方式：
+
+            ```bash
+            docker pull ghcr.io/lovefirefly-26710/pixora:latest
+            ```
