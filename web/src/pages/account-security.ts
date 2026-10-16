@@ -16,6 +16,7 @@ import type { PageContext } from "../core/router";
 import { getState, updateUser } from "../core/state";
 import { toastError, toastOk, toastWithCode, toast } from "../core/toast";
 import type { SessionRow, UserProfile } from "../core/types";
+import { loginMethodsCard } from "../ui/identities-card";
 import {
   badge,
   card,
@@ -40,15 +41,24 @@ export async function render(ctx: PageContext): Promise<void> {
 
   const verifySlot = h("div");
   const emailHost = h("div", { style: { marginBottom: "14px" } });
+  const identitiesSlot = h("div", { style: { marginBottom: "14px" } });
   const sessionsSlot = h("div");
 
   pad.append(
     h("div.row", { style: { marginBottom: "14px" } }, passwordCard(), verifySlot),
+    identitiesSlot,
     emailHost,
     sessionsSlot,
   );
 
   await load();
+
+  /** 「去设置密码」的落点：滚到密码那张卡并聚焦第一个输入框。 */
+  function focusPassword(): void {
+    const first = pad.querySelector<HTMLInputElement>('input[autocomplete="current-password"], input[type="password"]');
+    first?.scrollIntoView({ block: "center" });
+    first?.focus();
+  }
 
   async function load(): Promise<void> {
     verifySlot.replaceChildren(skeletonBlock(1));
@@ -67,6 +77,13 @@ export async function render(ctx: PageContext): Promise<void> {
     // 换绑邮箱那张卡只在拿到账号之后画一次：它自己有「发码 → 提交」两阶段状态，
     // 跟着别人（比如二次验证开关）一起重画会把用户输了一半的验证码抹掉
     emailHost.replaceChildren(emailCard(user, () => void load()));
+    // 登录方式那张卡自己拉数据、自己刷新：解绑之后只重画它，不动别人输了一半的表单
+    identitiesSlot.replaceChildren(
+      loginMethodsCard(
+        () => identitiesSlot.replaceChildren(loginMethodsCard(() => void load(), focusPassword)),
+        focusPassword,
+      ),
+    );
     // 先用 /me 里冗余的恢复码数量渲染，再异步取精确值，避免多一次串行等待
     recoveryRemaining = user.recovery_codes_remaining;
     renderVerify();

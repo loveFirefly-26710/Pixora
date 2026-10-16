@@ -182,6 +182,7 @@ impl AppState {
             .await?
             .ok_or_else(|| AppError::not_found("用户"))?;
         let actions = self.repo.list_user_actions(id, 50).await?;
+        let identities = self.identities_of(&user).await.unwrap_or_default();
         let policy = self.repo.effective_policy(&user).await?;
         let custom = self.repo.user_policy(id).await?;
         // 上传策略按生效值展示：用户卡上填了 0（跟随）也不该让详情页显示 0，
@@ -273,6 +274,7 @@ impl AppState {
                     .unwrap_or_default(),
                 note: row.note.clone(),
             }),
+            identities,
         })
     }
 
@@ -983,6 +985,8 @@ pub struct AdminUserDetail {
     /// 编辑界面回传时要带这一份而不是上面的生效值：生效值是解析结果，
     /// 写回去会把「跟随」固化成「等于当前全局值」的覆盖
     pub policy_override: Option<PolicyRow>,
+    /// 这个账号挂着的第三方登录方式（邮箱不在这里，它是账号本身）
+    pub identities: Vec<crate::identities::IdentityView>,
 }
 
 #[cfg(test)]

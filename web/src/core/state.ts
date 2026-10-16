@@ -128,6 +128,8 @@ export async function loadSite(): Promise<void> {
       appeal_email: null,
       background: null,
       default_avatar: null,
+      // 拿不到站点信息时一个第三方入口都不摆：按钮点下去大概率也是报错
+      login_methods: { github: false, google: false, qq: false, wechat: false, phone: false },
       installed: true,
       plaza_grid_columns: 3,
       recycle_retention_days: 30,

@@ -81,6 +81,12 @@ impl MasterKey {
         Ok(Self { key })
     }
 
+    /// 主密钥的原始字节。同 crate 内部用（`sign` 模块拿去做 HMAC），
+    /// 不对外暴露——上层只需要「签名 / 验签 / 加解密」这几个动作。
+    pub(crate) fn bytes(&self) -> &[u8; KEY_LEN] {
+        &self.key
+    }
+
     fn cipher(&self) -> Result<Aes256Gcm> {
         Aes256Gcm::new_from_slice(&self.key).map_err(|e| CryptoError::Cipher(e.to_string()))
     }

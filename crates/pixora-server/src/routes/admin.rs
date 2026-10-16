@@ -26,12 +26,14 @@ use pixora_core::stats::BackendView;
 use pixora_core::{AppError, AppState};
 use pixora_repo::model::{now, RateLimitPolicy};
 use pixora_repo::repo::audit::AuditFilter;
+use pixora_repo::repo::identities::provider;
 use pixora_repo::repo::backends::{BackendPatch, NewBackend};
 use pixora_repo::repo::iprules::{IpRuleFilter, NewIpRule};
 use pixora_repo::repo::users::UserFilter;
 use pixora_repo::PageRequest;
 use crate::http::{
-    cookie_value, finish, finish_page, parse_i64, parse_str, request_context, rfc3339, CSRF_COOKIE,
+    cookie_value, error_response, finish, finish_page, parse_i64, parse_str, request_context,
+    rfc3339, CSRF_COOKIE,
 };
 
 use super::{
@@ -955,10 +957,13 @@ pub async fn quota_put(
     };
 
     match state.quota_update(auth.user.id, input).await {
-        Ok(()) => finish::<serde_json::Value>(Ok(serde_json::json!({
-            "ok": true,
-            "csrf_token": cookie_value(&headers, CSRF_COOKIE),
-        }))),
+        // 保存后把整页生效值回给界面（与 GET 同一个形状）：改了哪几项、允许
+        // 改到多少、注册入口现在开没开，页面上立刻是服务端确认过的那份，
+        // 不用靠「保存成功」这四个字去猜
+        Ok(()) => match state.quota_payload().await {
+            Ok(payload) => finish(Ok(payload)),
+            Err(err) => crate::http::error_response(err),
+        },
         Err(err) => crate::http::error_response(err),
     }
 }
@@ -1018,6 +1023,10 @@ pub async fn ratelimit_get(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    let download_settings = match state.settings.download().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
     let depth = match state.repo.queue_depth().await {
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err.into()),
@@ -1064,6 +1073,8 @@ pub async fn ratelimit_get(
                 "formats": upload.formats,
                 "max_concurrent_uploads": upload.max_concurrent_uploads,
             },
+            "download_per_minute": effective.download_per_minute,
+            "download_per_day": effective.download_per_day,
             "hits_24h": row.hits_24h,
         }));
         realtime.push(serde_json::json!({
@@ -1092,6 +1103,12 @@ pub async fn ratelimit_get(
             "max_height": upload_settings.max_height,
             "queue_depth": upload_settings.queue_depth,
             "formats": upload_settings.formats,
+        },
+        // 游客的下载限额：登录用户那两格在 `global` 里（可按用户覆盖），
+        // 游客没有账号可挂，只能放站点设置里
+        "download_policy": {
+            "anon_per_minute": download_settings.anon_per_minute,
+            "anon_per_day": download_settings.anon_per_day,
         },
         "on_breach": read_on_breach(&state).await,
         "queue_depth": { "threshold": upload_settings.queue_depth, "current": depth.total() },
@@ -1123,6 +1140,8 @@ fn policy_json(policy: &RateLimitPolicy) -> serde_json::Value {
             .as_deref()
             .map(pixora_core::settings::parse_format_list)
             .unwrap_or_default(),
+        "download_per_minute": policy.download_per_minute,
+        "download_per_day": policy.download_per_day,
         "unlimited": policy.unlimited,
     })
 }
@@ -1148,6 +1167,21 @@ pub async fn ratelimit_global_put(
 
     if let Err(err) = state.repo.upsert_global_policy(&policy).await {
         return crate::http::error_response(err.into());
+    }
+    // 游客的下载限额是系统设置（游客没有账号，挂不进策略表）。同一个卡片一起
+    // 提交，所以在这里一并落库——分成两个接口会让「保存」按两次才有用
+    for (key, value) in [
+        (keys::DOWNLOAD_ANON_PER_MINUTE, field_opt_i64(&body, "download_anon_per_minute")),
+        (keys::DOWNLOAD_ANON_PER_DAY, field_opt_i64(&body, "download_anon_per_day")),
+    ] {
+        if let Some(value) = value {
+            if value < 0 {
+                return bad_request("下载限额不能是负数（0 表示不限）");
+            }
+            if let Err(err) = state.settings.set_integer(key, value).await {
+                return crate::http::error_response(err);
+            }
+        }
     }
     let actor = auth.user.id;
     state
@@ -1194,6 +1228,10 @@ fn policy_with(base: Option<&RateLimitPolicy>, body: &serde_json::Value) -> Rate
         max_width: field_opt_i64(body, "max_width").unwrap_or(fallback.max_width),
         max_height: field_opt_i64(body, "max_height").unwrap_or(fallback.max_height),
         formats: field_opt_formats(body, "formats").or(fallback.formats),
+        download_per_minute: field_opt_i64(body, "download_per_minute")
+            .unwrap_or(fallback.download_per_minute),
+        download_per_day: field_opt_i64(body, "download_per_day")
+            .unwrap_or(fallback.download_per_day),
         unlimited: field_opt_bool(body, "unlimited").unwrap_or(fallback.unlimited),
         note: field_opt_str(body, "note").or(fallback.note),
         updated_at: now(),
@@ -3040,5 +3078,215 @@ pub async fn terms_delete(
             })))
         }
         Err(err) => crate::http::error_response(err.into()),
+    }
+}
+
+/// 某个提供方在设置表里的三个键名（开关、客户端 ID、密钥）。
+/// 拼错一个字符就会写到一个没人读的键上，所以收在一处。
+fn login_keys(provider_name: &str) -> (String, String, String) {
+    (
+        format!("login.{provider_name}.enabled"),
+        format!("login.{provider_name}.client_id"),
+        format!("login.{provider_name}.client_secret"),
+    )
+}
+/// `GET /api/v1/admin/login-methods` — 后台「登录方式」页要的现状。
+///
+/// 密钥只回「配没配」（`has_secret`），不回明文：界面上显示「已配置」就够了，
+/// 明文每回一次就多一份泄露面。
+pub async fn admin_login_methods_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+) -> Response {
+    let (_rectx, _auth) = admin_guard!(state, headers, method, peer, "/admin/login-methods");
+
+    let mut providers = serde_json::Map::new();
+    for name in provider::ALL {
+        if name == provider::PHONE {
+            continue;
+        }
+        let (enabled_key, id_key, secret_key) = login_keys(name);
+        providers.insert(
+            name.to_string(),
+            serde_json::json!({
+                "label": provider::label(name),
+                "enabled": state.settings.bool(&enabled_key, false).await.unwrap_or(false),
+                "client_id": state.settings.string(&id_key, "").await.unwrap_or_default(),
+                "has_secret": state.settings.secret_configured(&secret_key).await.unwrap_or(false),
+                // 回调地址要在对方平台原样登记，页面上直接给出来让人复制
+                "callback": crate::routes::oauth::redirect_uri(&state, name),
+            }),
+        );
+    }
+    finish::<serde_json::Value>(Ok(serde_json::json!({
+        "providers": providers,
+        "phone": {
+            "enabled": state
+                .settings
+                .bool(keys::LOGIN_PHONE_ENABLED, false)
+                .await
+                .unwrap_or(false),
+        },
+        "sms": {
+            "enabled": state.settings.bool(keys::SMS_ENABLED, false).await.unwrap_or(false),
+            "access_key_id": state.settings.string(keys::SMS_ACCESS_KEY_ID, "").await.unwrap_or_default(),
+            "has_secret": state
+                .settings
+                .secret_configured(keys::SMS_ACCESS_KEY_SECRET)
+                .await
+                .unwrap_or(false),
+            "sign_name": state.settings.string(keys::SMS_SIGN_NAME, "").await.unwrap_or_default(),
+            "template_code": state.settings.string(keys::SMS_TEMPLATE_CODE, "").await.unwrap_or_default(),
+        },
+    })))
+}
+
+/// `PUT /api/v1/admin/login-methods` — 保存登录方式的配置。
+///
+/// 密钥类字段只在「给了非空值」时写：界面上的空输入意思是「保持原值」，
+/// 与 SMTP 密码同一套规矩。清空某个提供方的凭据就关掉它的开关。
+pub async fn admin_login_methods_put(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/login-methods");
+    let mut touched: Vec<String> = Vec::new();
+
+    if let Some(providers) = body.get("providers").and_then(|value| value.as_object()) {
+        for (name, entry) in providers {
+            if !provider::is_known(name) || name == provider::PHONE {
+                return bad_request(format!("不支持的登录方式：{name}"));
+            }
+            let (enabled_key, id_key, secret_key) = login_keys(name);
+            if let Some(enabled) = entry.get("enabled").and_then(|value| value.as_bool()) {
+                if let Err(err) = state.settings.set_bool(&enabled_key, enabled).await {
+                    return error_response(err);
+                }
+                touched.push(enabled_key);
+            }
+            if let Some(client_id) = field_opt_str(entry, "client_id") {
+                if let Err(err) = state.settings.set(&id_key, client_id.trim()).await {
+                    return error_response(err);
+                }
+                touched.push(id_key);
+            }
+            if let Some(secret) = field_opt_str(entry, "client_secret") {
+                if !secret.trim().is_empty() {
+                    if let Err(err) = state.settings.set_secret(&secret_key, secret.trim()).await {
+                        return error_response(err);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(phone) = body.get("phone") {
+        if let Some(enabled) = phone.get("enabled").and_then(|value| value.as_bool()) {
+            if let Err(err) = state
+                .settings
+                .set_bool(keys::LOGIN_PHONE_ENABLED, enabled)
+                .await
+            {
+                return error_response(err);
+            }
+            touched.push(keys::LOGIN_PHONE_ENABLED.to_string());
+        }
+    }
+
+    if let Some(sms) = body.get("sms") {
+        let writes: [(&str, Option<String>); 4] = [
+            (
+                keys::SMS_ENABLED,
+                sms.get("enabled")
+                    .and_then(|value| value.as_bool())
+                    .map(|value| value.to_string()),
+            ),
+            (
+                keys::SMS_ACCESS_KEY_ID,
+                field_opt_str(sms, "access_key_id").map(|value| value.trim().to_string()),
+            ),
+            (
+                keys::SMS_SIGN_NAME,
+                field_opt_str(sms, "sign_name").map(|value| value.trim().to_string()),
+            ),
+            (
+                keys::SMS_TEMPLATE_CODE,
+                field_opt_str(sms, "template_code").map(|value| value.trim().to_string()),
+            ),
+        ];
+        for (key, value) in writes {
+            if let Some(value) = value {
+                if let Err(err) = state.settings.set(key, &value).await {
+                    return error_response(err);
+                }
+                touched.push(key.to_string());
+            }
+        }
+        if let Some(secret) = field_opt_str(sms, "access_key_secret") {
+            if !secret.trim().is_empty() {
+                if let Err(err) = state
+                    .settings
+                    .set_secret(keys::SMS_ACCESS_KEY_SECRET, secret.trim())
+                    .await
+                {
+                    return error_response(err);
+                }
+            }
+        }
+    }
+
+    state
+        .audit_detail(
+            pixora_core::audit::actions::SETTINGS_CHANGE,
+            Some(auth.user.id),
+            "login-methods",
+            serde_json::json!({ "touched": touched }),
+            rectx.ip.as_deref(),
+        )
+        .await;
+
+    finish::<serde_json::Value>(Ok(serde_json::json!({
+        "ok": true,
+        "touched": touched,
+        "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+    })))
+}
+
+/// 管理端：把某个用户的某个登录方式摘掉（用户自己来不了时才用得上）。
+pub async fn admin_identity_unbind(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path((user_id, provider_name)): Path<(i64, String)>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match require_admin(&state, &headers, rectx.ip.as_deref(), &method, "/admin/users").await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    let target = match state.repo.find_user_by_id(user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return not_found("用户"),
+        Err(err) => return error_response(err.into()),
+    };
+    if let Err(err) = state.ensure_not_install_admin(&auth.user, &target).await {
+        return error_response(err);
+    }
+    let provider_name = provider_name.to_ascii_lowercase();
+    match state
+        .unbind_identity(&target, &provider_name, rectx.ip.as_deref())
+        .await
+    {
+        Ok(()) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "ok": true,
+            "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+        }))),
+        Err(err) => error_response(err),
     }
 }

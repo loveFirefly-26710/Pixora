@@ -134,6 +134,10 @@ pub struct IssuedSession {
     pub csrf_token: String,
 }
 
+/// 邮箱在「登录方式」里的名字。它不在 `user_identities` 表里——邮箱是账号本身
+/// （`users.email`），必需且不可解绑，列在这里只为让界面与接口有个统一的叫法。
+pub const PASSWORD_IDENTITY: &str = "email";
+
 /// 登录第二步用哪种二次验证码。
 ///
 /// 动态码、邮箱验证码、恢复码……都是同一串 6 位（或 8 位）字符，服务端分不清，
@@ -569,7 +573,7 @@ impl AppState {
     ///
     /// `remember` 为真时写死绝对到期时间（设置里的 `session.remember_days`），
     /// 之后不再按闲置时长判——选了「记住我」就该隔几天打开还是登录状态。
-    async fn issue_session(
+    pub(crate) async fn issue_session(
         &self,
         user: &User,
         device: &DeviceInfo,
@@ -1259,7 +1263,7 @@ impl AppState {
     ///
     /// 只挂在注册的两个入口（发验证码、提交注册）。找回密码不看它：
     /// 域名后来被移出白名单的老账号还得能改密码。
-    async fn ensure_register_domain_allowed(&self, email: &str) -> Result<()> {
+    pub(crate) async fn ensure_register_domain_allowed(&self, email: &str) -> Result<()> {
         let site = self.settings.site(self.config.base_url.as_deref()).await?;
         if site.email_domains.allows(email) {
             return Ok(());
@@ -1297,7 +1301,7 @@ impl AppState {
     }
 
     /// 校验并消费验证码。
-    async fn consume_code(&self, email: &str, purpose_value: &str, code: &str) -> Result<()> {
+    pub(crate) async fn consume_code(&self, email: &str, purpose_value: &str, code: &str) -> Result<()> {
         let Some(record) = self
             .repo
             .find_latest_verification(email, purpose_value)

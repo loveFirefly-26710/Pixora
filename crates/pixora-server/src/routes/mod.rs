@@ -21,6 +21,7 @@ pub mod admin;
 pub mod auth;
 pub mod catalog;
 pub mod install;
+pub mod oauth;
 pub mod public;
 pub mod recycle;
 pub mod upload;

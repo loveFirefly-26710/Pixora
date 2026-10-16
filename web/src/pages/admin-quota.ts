@@ -15,7 +15,7 @@ import { h, mount } from "../core/dom";
 import { formatBytes, formatNumber, parseSize, percent, toGigabytes } from "../core/format";
 import { promptDialog } from "../core/modal";
 import type { PageContext } from "../core/router";
-import { toastError, toastOk } from "../core/toast";
+import { toast, toastError, toastOk } from "../core/toast";
 import type { AdminUserRow, QuotaAdmin, StorageAdmin } from "../core/types";
 import {
   badge,
@@ -123,13 +123,23 @@ export async function render(ctx: PageContext): Promise<void> {
       request<QuotaAdmin>("/admin/quota"),
       request<StorageAdmin>("/admin/storage").catch(() => null),
     ]);
-    mount(root, ...view(reload, quota, storage));
+    // 保存接口会把保存后的整页生效值回传，就地用它重画：页面显示的一定是
+    // 服务端确认过的数字，不再是一次额外的 GET 之后的猜测
+    const paint = (fresh: QuotaAdmin): void => {
+      mount(root, ...view(reload, paint, fresh, storage));
+    };
+    paint(quota);
   } catch (err) {
     mount(root, errorBlock(err, reload));
   }
 }
 
-function view(reload: () => void, data: QuotaAdmin, storage: StorageAdmin | null): Node[] {
+function view(
+  reload: () => void,
+  paint: (fresh: QuotaAdmin) => void,
+  data: QuotaAdmin,
+  storage: StorageAdmin | null,
+): Node[] {
   const draft: QuotaDraft = {
     mode: () => "auto",
     manualTotal: textInput({ value: toGigabytes(data.capacity.total ?? 0), mono: true }),
@@ -155,7 +165,7 @@ function view(reload: () => void, data: QuotaAdmin, storage: StorageAdmin | null
       h("button.btn.pri", {
         type: "button",
         text: "保存设置",
-        on: { click: (event) => void save(reload, draft, event.target as HTMLButtonElement) },
+        on: { click: (event) => void save(reload, paint, draft, data, event.target as HTMLButtonElement) },
       }),
     ),
   ];
@@ -428,8 +438,20 @@ async function adjustQuota(reload: () => void, user: AdminUserRow): Promise<void
   }
 }
 
-/** 保存整页配置。超额时服务端拒绝，这里把原因和差额显示出来。 */
-async function save(reload: () => void, draft: QuotaDraft, button: HTMLButtonElement): Promise<void> {
+/**
+ * 保存整页配置。
+ *
+ * 服务端会重算一遍可分配上限（本地盘要问一次磁盘占用），偶尔要一两秒，
+ * 所以按钮上先写清楚在干什么。保存完之后不管成功失败都必须有反馈：
+ * 「点了没反应」是最难查的一类投诉——分不清是没保存上还是保存了但没变化。
+ */
+async function save(
+  reload: () => void,
+  paint: (fresh: QuotaAdmin) => void,
+  draft: QuotaDraft,
+  was: QuotaAdmin,
+  button: HTMLButtonElement,
+): Promise<void> {
   const defaultBytes = parseSizeInput(draft.defaultQuota.value);
   const maxBytes = parseSizeInput(draft.perUserMax.value);
   if (defaultBytes === null || defaultBytes <= 0) {
@@ -462,12 +484,32 @@ async function save(reload: () => void, draft: QuotaDraft, button: HTMLButtonEle
     body.manual_total = manual;
   }
 
+  // 与页面上加载到的值逐个比：什么都没改就直说，别让一次空点击看起来像坏了
+  const changes = describeChanges(was, {
+    capacity_mode: draft.mode(),
+    default_quota_bytes: defaultBytes,
+    per_user_max: maxBytes,
+    auto_close_enabled: draft.autoEnabled,
+    auto_close_on: Number(draft.autoOn.value),
+    auto_close_off: Number(draft.autoOff.value),
+    manual_total: typeof body.manual_total === "number" ? body.manual_total : null,
+  });
+  if (changes.length === 0) {
+    toast("没有需要保存的改动");
+    return;
+  }
+
   button.disabled = true;
   button.textContent = "保存中…";
+  // 超过两秒还没回来（多半在等磁盘探测）就把话说透，别让人以为卡死了
+  const slow = window.setTimeout(() => {
+    button.textContent = "重算容量中…";
+  }, 2000);
   try {
-    await request("/admin/quota", { method: "PUT", json: body });
-    toastOk("配额设置已保存");
-    reload();
+    const fresh = await request<QuotaAdmin>("/admin/quota", { method: "PUT", json: body });
+    toastOk(`已保存：${changes.join("；")}`);
+    // 服务端把保存后的整页生效值回给我们了：直接用它重画，不必再拉一次
+    paint(fresh);
   } catch (err) {
     if (err instanceof ApiError && err.detail) {
       // 契约保证超额时 detail 里带「还差多少」，这一句必须让人看见
@@ -475,7 +517,54 @@ async function save(reload: () => void, draft: QuotaDraft, button: HTMLButtonEle
     } else {
       toastError(err);
     }
+  } finally {
+    window.clearTimeout(slow);
     button.disabled = false;
     button.textContent = "保存设置";
   }
 }
+
+/** 把「这次改了哪几项」写成一句人话，一项都没改就返回空数组。 */
+function describeChanges(
+  was: QuotaAdmin,
+  next: {
+    capacity_mode: string;
+    default_quota_bytes: number;
+    per_user_max: number;
+    auto_close_enabled: boolean;
+    auto_close_on: number;
+    auto_close_off: number;
+    manual_total: number | null;
+  },
+): string[] {
+  const out: string[] = [];
+  if (was.capacity.mode !== next.capacity_mode) {
+    out.push(`容量口径改为「${MODE_LABEL[next.capacity_mode] ?? next.capacity_mode}」`);
+  }
+  if (was.default_quota_bytes !== next.default_quota_bytes) {
+    out.push(`新用户默认配额 ${formatBytes(was.default_quota_bytes)} → ${formatBytes(next.default_quota_bytes)}`);
+  }
+  if (was.per_user_max !== next.per_user_max) {
+    out.push(`单用户上限 ${formatBytes(was.per_user_max)} → ${formatBytes(next.per_user_max)}`);
+  }
+  if (was.auto_close.enabled !== next.auto_close_enabled) {
+    out.push(`容量触顶自动关闭注册${next.auto_close_enabled ? "打开" : "关闭"}`);
+  }
+  if (was.auto_close.on !== next.auto_close_on) {
+    out.push(`触发阈值 ${was.auto_close.on}% → ${next.auto_close_on}%`);
+  }
+  if (was.auto_close.off !== next.auto_close_off) {
+    out.push(`恢复阈值 ${was.auto_close.off}% → ${next.auto_close_off}%`);
+  }
+  if (next.manual_total !== null && was.capacity.total !== next.manual_total) {
+    out.push(`系统总额 ${next.manual_total ? formatBytes(next.manual_total) : "未填"}`);
+  }
+  return out;
+}
+
+/** 三种容量口径的界面说法，改了什么要能念出来。 */
+const MODE_LABEL: Record<string, string> = {
+  auto: "自动探测磁盘",
+  manual: "管理员手动配置",
+  hidden: "不显示磁盘容量",
+};

@@ -21,8 +21,8 @@ import { navigate } from "../core/router";
 import type { PageContext } from "../core/router";
 import { accountLabel, canOperateAccount, getState } from "../core/state";
 import { toast, toastError, toastOk } from "../core/toast";
-import type { AdminUserRow, PolicyFields, UserActionRow } from "../core/types";
-import { openRateLogs } from "./ratelimit-cards";
+import type { AdminUserRow, IdentityView, PolicyFields, UserActionRow } from "../core/types";
+import { openRateLogs, toMegabytes } from "./ratelimit-cards";
 import {
   badge,
   card,
@@ -58,6 +58,8 @@ interface UserDetailPayload {
   policy_override?: PolicyFields | null;
   /** 当前生效的限流参数（含继承结果） */
   limits: PolicyFields | null;
+  /** 这个账号挂着的第三方登录方式（邮箱不在其中，它是账号本身） */
+  identities?: IdentityView[];
 }
 
 interface StatusResult {
@@ -111,6 +113,7 @@ export async function render(ctx: PageContext): Promise<void> {
           }),
           actionsCard(detail),
         ),
+        identitiesCard(detail, () => void load()),
         rateLimitCard(detail, () => void load()),
         h("div.note.d", {
           text:
@@ -665,6 +668,69 @@ function shortValue(key: string, value: unknown): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* 登录方式                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 这个账号挂了哪些登录方式（第三方身份）。
+ *
+ * 管理员能摘掉某一条：用户换号、平台账号丢了这类情况下只能从这里动手。
+ * 摘之前服务端会确认「还剩别的方式能进得来」，唯一的入口摘不掉。
+ */
+function identitiesCard(detail: UserDetailPayload, reload: () => void): HTMLElement | null {
+  const list = detail.identities ?? [];
+  const rows = list.map((item) => {
+    const row = responsiveRow(item.label, item.display ?? "—", item.created_at);
+    row.append(
+      h("button.btn.sm.dgr", {
+        type: "button",
+        text: "摘除",
+        on: {
+          click: async () => {
+            const ok = await confirmDialog({
+              title: `摘除 ${item.label}`,
+              message: `${user.email} 将不能用 ${item.label} 登录。如果这是他唯一的登录方式，服务端会拒绝。`,
+              confirmText: "摘除",
+              danger: true,
+            });
+            if (!ok) return;
+            try {
+              await request(`/admin/users/${user.id}/identities/${item.provider}`, { method: "DELETE" });
+              toastOk(`${item.label} 已摘除`);
+              reload();
+            } catch (err) {
+              toastError(err);
+            }
+          },
+        },
+      }),
+    );
+    return row;
+  });
+
+  return card(
+    "登录方式",
+    rows.length === 0
+      ? h("div.tip", { text: "这个账号只用邮箱 + 密码登录，没有额外的登录方式。" })
+      : h("div", { style: { display: "grid", gap: "8px" } }, ...rows),
+    h("div.tip", {
+      text: "邮箱是账号本身，不可摘除；解绑第三方方式走的也是同一套「别把人锁在门外」的规则。",
+    }),
+  );
+}
+
+/** 一行：名称 + 展示值 + 操作按钮（窄屏自动折成竖排）。 */
+function responsiveRow(title: string, value: string, createdAt: string): HTMLElement {
+  return h(
+    "div",
+    { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+    h("b", { style: { minWidth: "72px" }, text: title }),
+    h("span.mono", { style: { flex: "1", color: "var(--muted)" }, text: value }),
+    h("span.tip", { style: { margin: "0" }, text: createdAt.slice(0, 10) }),
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* 频率限制覆盖                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -680,6 +746,20 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
     value: effective?.upload_bytes_per_day ? toGigabytes(effective.upload_bytes_per_day) : "",
     mono: true,
   });
+  // 单张图片最大大小：0（空）表示跟随全局默认。上传时由服务端按生效值卡住，
+  // 客户端队列也拿 /me 里的 limits 提前拦——两处读的是同一份解析结果
+  const maxFileSize = textInput({
+    value: effective?.max_file_size ? toMegabytes(effective.max_file_size) : "",
+    mono: true,
+  });
+  const downloadPerMinute = textInput({
+    value: String(effective?.download_per_minute ?? ""),
+    mono: true,
+  });
+  const downloadPerDay = textInput({
+    value: String(effective?.download_per_day ?? ""),
+    mono: true,
+  });
   const errorLine = h("div.tip", { style: { color: "var(--danger)" } });
 
   const save = h("button.btn.sm.pri", { type: "button", text: "保存覆盖" });
@@ -690,10 +770,14 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
       upload_per_minute: Number(uploadPerMinute.value),
       upload_per_day: Number(uploadPerDay.value),
       upload_bytes_per_day: parseQuota(bytesPerDay.value) ?? NaN,
+      // 单张图片最大大小：空 = 跟随全局默认（0）；填数字按 MB，也可以写 20 MB
+      max_file_size: maxFileSize.value.trim() ? (parseQuota(`${maxFileSize.value} MB`) ?? NaN) : 0,
+      download_per_minute: Number(downloadPerMinute.value),
+      download_per_day: Number(downloadPerDay.value),
     };
     for (const [key, value] of Object.entries(values)) {
       if (!Number.isFinite(value) || value < 0) {
-        errorLine.textContent = `${key} 不是有效数字，单日流量可写「0.5 GB」或字节数。`;
+        errorLine.textContent = `${key} 不是有效数字，单日流量可写「0.5 GB」或字节数，单张大小可写「20 MB」。`;
         return;
       }
     }
@@ -755,7 +839,9 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
   const summary = effective
     ? `API ${formatNumber(effective.api_per_minute)} 次/分 · 上传 ${formatNumber(
         effective.upload_per_minute,
-      )} 张/分 · 单日流量 ${formatBytes(effective.upload_bytes_per_day)}`
+      )} 张/分 · 单日流量 ${formatBytes(effective.upload_bytes_per_day)} · 单张上限 ${
+        effective.max_file_size > 0 ? formatBytes(effective.max_file_size) : "跟随默认"
+      }`
     : "接口没有返回该账号的限流参数";
 
   return card(
@@ -782,11 +868,27 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
       ),
       h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "上传 张 / 天" }), uploadPerDay),
       h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "单日流量（GB）" }), bytesPerDay),
+      h(
+        "div.fld",
+        { style: { margin: "0" } },
+        h("label.f", { text: "单张图片最大大小" }),
+        maxFileSize,
+      ),
+    ),
+    h(
+      "div.row",
+      { style: { marginTop: "10px" } },
+      h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "下载 次 / 分钟" }), downloadPerMinute),
+      h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "下载 次 / 天" }), downloadPerDay),
+      h("div.fld", { style: { margin: "0" } }, h("span.tip", {
+        style: { margin: "0" },
+        text: "单张大小留空 = 跟随全局默认；下载填 0 = 这一项不限。",
+      })),
     ),
     h("div", { style: { marginTop: "12px" } }, save),
     errorLine,
     h("div.tip", {
-      text: "全局默认、超限处理与所有用户的额度都在「系统设置」里；这一栏只改这个账号的四项额度。",
+      text: "全局默认、超限处理与所有用户的额度都在「系统设置」里；这一栏只改这个账号自己的这几项。单张图片最大大小直接管住这个账号能传多大的图。",
     }),
   );
 }

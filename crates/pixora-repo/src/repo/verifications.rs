@@ -23,6 +23,10 @@ pub mod purpose {
     pub const TOTP_DISABLE: &str = "totp_disable";
     /// 登录第二步用邮箱验证码替代动态码
     pub const LOGIN_CODE: &str = "login_code";
+    /// 手机号 + 验证码登录（键位存的是手机号）
+    pub const PHONE_LOGIN: &str = "phone_login";
+    /// 把手机号绑到已登录的账号上
+    pub const PHONE_BIND: &str = "phone_bind";
 }
 
 impl Repo {

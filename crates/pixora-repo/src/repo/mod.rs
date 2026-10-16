@@ -14,6 +14,7 @@ pub mod albums;
 pub mod audit;
 pub mod backends;
 pub mod blobs;
+pub mod identities;
 pub mod images;
 pub mod iprules;
 pub mod jobs;

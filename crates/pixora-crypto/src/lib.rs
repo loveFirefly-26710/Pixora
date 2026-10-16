@@ -8,6 +8,7 @@ pub mod cipher;
 pub mod error;
 pub mod hash;
 pub mod password;
+pub mod sign;
 pub mod token;
 pub mod totp;
 

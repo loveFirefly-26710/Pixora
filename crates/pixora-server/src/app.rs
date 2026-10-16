@@ -71,6 +71,13 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/auth/login", post(r::auth::login))
         .route("/auth/logout", post(r::auth::logout))
         .route("/auth/password/code", post(r::auth::password_code))
+        // 第三方登录：start 跳去对方站点，callback 带着授权码回来
+        .route("/auth/oauth/{provider}/start", get(r::oauth::oauth_start))
+        .route("/auth/oauth/{provider}/callback", get(r::oauth::oauth_callback))
+        .route("/auth/oauth/complete", post(r::oauth::complete_signup))
+        // 手机号 + 验证码
+        .route("/auth/phone/code", post(r::oauth::phone_code))
+        .route("/auth/phone/login", post(r::oauth::phone_login))
         // 登录第二步可以改用邮箱验证码（验证器不在手边时）
         .route(
             "/auth/login/email-code",
@@ -89,6 +96,9 @@ fn api_routes() -> Router<Arc<AppState>> {
         // 换绑邮箱：先给新地址发码，再带上码提交
         .route("/me/email/code", post(r::account::email_change_code))
         .route("/me/email", post(r::account::email_change))
+        .route("/me/identities", get(r::oauth::identities_get).post(r::oauth::identity_bind))
+        .route("/me/identities/phone/code", post(r::oauth::phone_bind_code))
+        .route("/me/identities/{provider}", delete(r::oauth::identity_unbind))
         .route("/me/totp", post(r::account::totp))
         .route(
             "/me/recovery-codes",
@@ -240,6 +250,14 @@ fn api_routes() -> Router<Arc<AppState>> {
             post(r::admin::avatar_upload),
         )
         .route("/admin/settings/mail/test", post(r::admin::mail_test))
+        .route(
+            "/admin/login-methods",
+            get(r::admin::admin_login_methods_get).put(r::admin::admin_login_methods_put),
+        )
+        .route(
+            "/admin/users/{id}/identities/{provider}",
+            delete(r::admin::admin_identity_unbind),
+        )
         // 邮件模板：管理员能在后台改文案、恢复内置
         .route("/admin/mail/templates", get(r::admin::mail_templates_get))
         .route(
@@ -273,6 +291,7 @@ async fn fallback(
     State(state): State<Arc<AppState>>,
     uri: axum::http::Uri,
     Query(params): Query<std::collections::HashMap<String, String>>,
+    peer: crate::routes::PeerAddr,
     headers: HeaderMap,
 ) -> axum::response::Response {
     let path = uri.path().trim_start_matches('/');
@@ -283,6 +302,7 @@ async fn fallback(
             State(state),
             Path((segments[0].to_string(), segments[1].to_string())),
             Query(params),
+            peer,
             headers,
         )
         .await;

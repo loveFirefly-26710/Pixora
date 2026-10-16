@@ -2,7 +2,7 @@
  * 预览浮层。
  *
  * 一套交互覆盖 PC 与移动：
- *   - PC：`←` `→` 切换、滚轮缩放、`Esc` 关闭、点缩略图跳转
+ *   - PC：`←` `→` 切换、滚轮缩放（以指针为锚点）、`Esc` 关闭、点缩略图跳转
  *   - 移动：左右滑切换、双指缩放、下拉关闭（下拉超过阈值才关，避免误触）
  *
  * 单独抽成模块是因为广场、相册网格、相册列表三处都要用它，
@@ -10,14 +10,11 @@
  */
 
 import { h, copyText } from "../core/dom";
-import { formatBytes, formatDateTime, formatDimensions, middleEllipsis } from "../core/format";
+import { formatBytes, formatDateTime, formatDimensions } from "../core/format";
 import { toastWithCode } from "../core/toast";
 import type { ImageItem } from "../core/types";
-import { directUrl } from "../core/state";
 
 export interface LightboxOptions {
-  /** 未登录：下载与复制直链换成「登录后可用」 */
-  anonymous?: boolean;
   /** 关闭后的回调（相册页用它恢复滚动位置） */
   onClose?: () => void;
   /** 从浮层删除当前图片（相册页提供） */
@@ -54,10 +51,12 @@ export function openLightbox(
   let pullDistance = 0;
 
   const image = h("img", { alt: "", draggable: false });
-  const stage = h("div.lb-stage", null, image);
+  // 缩放百分比只在放大/缩小时显示（见 applyTransform）
+  const zoomBadge = h("div.lb-zoom", { hidden: true });
+  const stage = h("div.lb-stage", null, image, zoomBadge);
   const title = h("b");
   const counter = h("span.cnt");
-  const hint = h("span", {
+  const hint = h("span.lb-hint", {
     text: window.matchMedia("(hover: none)").matches
       ? "左右滑切换 · 双指缩放 · 下拉关闭"
       : "← → 切换 · 滚轮缩放 · Esc 关闭",
@@ -98,10 +97,47 @@ export function openLightbox(
     return items[index] ?? current;
   }
 
+  /**
+   * 把偏移夹在「图片还能盖住舞台」的范围内。
+   *
+   * 用布局尺寸（`offsetWidth`，不受 transform 影响）而不是 `getBoundingClientRect`：
+   * 后者已经把缩放算进去了，拿它来算范围会把边界算错。1× 时最大偏移是 0，
+   * 也就是没放大就拖不动——这正是想要的。
+   */
+  function clampOffsets(): void {
+    const box = stage.getBoundingClientRect();
+    const maxX = Math.max(0, (image.offsetWidth * scale - box.width) / 2);
+    const maxY = Math.max(0, (image.offsetHeight * scale - box.height) / 2);
+    offsetX = Math.min(maxX, Math.max(-maxX, offsetX));
+    offsetY = Math.min(maxY, Math.max(-maxY, offsetY));
+  }
+
   function applyTransform(): void {
+    clampOffsets();
     image.style.transform = `translate(${offsetX}px, ${offsetY + pullDistance}px) scale(${scale})`;
     image.style.cursor = scale > 1 ? "grab" : "default";
     stage.style.opacity = pullDistance > 0 ? String(1 - pullDistance / 400) : "1";
+    zoomBadge.textContent = `${Math.round(scale * 100)}%`;
+    zoomBadge.hidden = Math.abs(scale - 1) < 0.01;
+  }
+
+  /** 以某个视口坐标为锚点缩放：缩放前后，指针下的那一点停在原地。 */
+  function zoomAt(nextScale: number, clientX: number, clientY: number): void {
+    const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, nextScale));
+    if (Math.abs(next - scale) < 0.0001) return;
+    const box = stage.getBoundingClientRect();
+    // 相对图片中心的坐标（transform-origin 默认是中心）
+    const cx = clientX - box.left - box.width / 2;
+    const cy = clientY - box.top - box.height / 2;
+    const ratio = next / scale;
+    offsetX = cx - (cx - offsetX) * ratio;
+    offsetY = cy - (cy - offsetY) * ratio;
+    scale = next;
+    if (scale === MIN_SCALE) {
+      offsetX = 0;
+      offsetY = 0;
+    }
+    applyTransform();
   }
 
   function step(delta: number): void {
@@ -119,7 +155,6 @@ export function openLightbox(
     title.textContent = item.title ?? item.original_name ?? item.short_hash;
     counter.textContent = `${index + 1} / ${items.length}`;
 
-    // 优先用缩略图当骨架，再换成原图；这样切换时不会整片空白
     image.src = item.url;
     image.alt = item.title ?? item.short_hash;
 
@@ -170,25 +205,24 @@ export function openLightbox(
   }
 
   function thumbnailFor(item: ImageItem): HTMLElement {
-    const img = h("img", {
+    // `draggable: false`：长按再拖时浏览器会给缩略图起一个原生拖拽幽灵，
+    // 手指/光标明明在放大图上，飘起来的却是这张小图——浮层里所有图都不能拖
+    return h("img", {
       src: item.thumb_url ?? item.url,
       alt: "",
       loading: "lazy",
       decoding: "async",
+      draggable: false,
     });
-    return img;
   }
 
+  /**
+   * 复制直链与下载。
+   *
+   * 未登录也能用：直链本身按「有没有公开引用」判权限（私有图只对本人放行），
+   * 不需要浏览器替他再挡一道——真正要节流的是服务端的下载频率限制。
+   */
   function actions(item: ImageItem): HTMLElement {
-    if (options.anonymous) {
-      // 未登录：这两个按钮换成提示，而不是让用户点了才发现没权限
-      return h(
-        "div",
-        { style: { marginTop: "12px", display: "flex", gap: "6px" } },
-        h("button.btn.sm", { type: "button", text: "登录后可用", disabled: true, style: { flex: "1" } }),
-        h("button.btn.sm", { type: "button", text: "登录后可用", disabled: true, style: { flex: "1" } }),
-      );
-    }
     const copy = h("button.btn.sm.pri", {
       type: "button",
       text: "复制直链",
@@ -229,6 +263,7 @@ export function openLightbox(
     root.remove();
     document.body.style.overflow = "";
     document.removeEventListener("keydown", onKey);
+    window.removeEventListener("hashchange", onHashChange);
     options.onClose?.();
   }
 
@@ -243,19 +278,24 @@ export function openLightbox(
     }
   }
 
-  // 滚轮缩放：以指针位置为锚点，缩放时手指下的那一点不动
+  // 页面换了地方（点了导航、地址栏变了）就把浮层收掉：它是 `position: fixed`
+  // 挂在 body 上的，不跟着路由走，留着就会盖住下一个页面
+  function onHashChange(): void {
+    close();
+  }
+
+  // 原图是异步加载的：加载完再校正一次，否则「按布局尺寸算的拖动范围」
+  // 用的还是空图的 0×0
+  image.addEventListener("load", () => applyTransform());
+
+  // 滚轮缩放以指针为锚点：不锚的话放大后指针下那块内容会跑掉，
+  // 接着拖的时候手感就是「拖的不是我看到的那一块」
   stage.addEventListener(
     "wheel",
     (event) => {
       const wheel = event as WheelEvent;
       wheel.preventDefault();
-      const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * (wheel.deltaY < 0 ? 1.12 : 0.89)));
-      if (next === MIN_SCALE) {
-        offsetX = 0;
-        offsetY = 0;
-      }
-      scale = next;
-      applyTransform();
+      zoomAt(scale * (wheel.deltaY < 0 ? 1.12 : 0.89), wheel.clientX, wheel.clientY);
     },
     { passive: false },
   );
@@ -340,8 +380,8 @@ export function openLightbox(
     if (event.touches.length === 2 && pinchStart) {
       event.preventDefault();
       const ratio = touchDistance(event.touches) / pinchStart.distance;
-      scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, pinchStart.scale * ratio));
-      applyTransform();
+      const [a, b] = [event.touches[0], event.touches[1]];
+      zoomAt(pinchStart.scale * ratio, (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2);
     }
   });
   stage.addEventListener(
@@ -353,18 +393,20 @@ export function openLightbox(
   );
 
   // 双击放大/还原，桌面上也好用
-  stage.addEventListener("dblclick", () => {
+  stage.addEventListener("dblclick", (event) => {
+    const mouse = event as MouseEvent;
     if (scale > 1) {
       scale = 1;
       offsetX = 0;
       offsetY = 0;
-    } else {
-      scale = 2.5;
+      applyTransform();
+      return;
     }
-    applyTransform();
+    zoomAt(2.5, mouse.clientX, mouse.clientY);
   });
 
   document.addEventListener("keydown", onKey);
+  window.addEventListener("hashchange", onHashChange);
   document.body.style.overflow = "hidden";
   document.body.appendChild(root);
   paint();
@@ -377,9 +419,6 @@ export function openLightbox(
       prefetch.src = neighbour.url;
     }
   }
-
-  void directUrl; // 保持与 state 模块的引用关系，便于将来在此处补签名 URL
-  void middleEllipsis;
 
   return { close };
 }

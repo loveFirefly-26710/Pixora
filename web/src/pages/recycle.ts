@@ -454,7 +454,7 @@ function gridView(
         checkbox: true,
         selected: state.selected.has(item.id),
         // 回收站里的图仍然能看大图：确认「是不是这张」才能放心恢复
-        onOpen: (clicked) => openLightbox(state.items, clicked, { anonymous: false }),
+        onOpen: (clicked) => openLightbox(state.items, clicked),
         onSelect: (clicked, event) => toggle(clicked, event),
       }),
     );

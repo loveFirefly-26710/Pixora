@@ -61,6 +61,20 @@ pub mod keys {
     pub const CAPACITY_MANUAL_TOTAL: &str = "capacity.manual_total";
     pub const QUOTA_DEFAULT: &str = "quota.default_bytes";
     pub const QUOTA_PER_USER_MAX: &str = "quota.per_user_max";
+    /// 未登录访客的下载限额（带 `?download=1` 的直链请求）。登录用户的那两格
+    /// 在限流策略里（`rate_limit_policies.download_*`），游客没有账号，只能放这儿。
+    /// `0` = 不限。
+    pub const DOWNLOAD_ANON_PER_MINUTE: &str = "download.anon_per_minute";
+    pub const DOWNLOAD_ANON_PER_DAY: &str = "download.anon_per_day";
+    /// 第三方登录的开关与客户端凭据。`client_secret` 加密存储，界面只显示
+    /// 「已配置」。每家一套：`login.github.enabled` / `.client_id` / `.client_secret`
+    pub const LOGIN_PHONE_ENABLED: &str = "login.phone.enabled";
+    /// 短信服务（阿里云短信）：AccessKey、签名与模板编号
+    pub const SMS_ENABLED: &str = "sms.enabled";
+    pub const SMS_ACCESS_KEY_ID: &str = "sms.access_key_id";
+    pub const SMS_ACCESS_KEY_SECRET: &str = "sms.access_key_secret";
+    pub const SMS_SIGN_NAME: &str = "sms.sign_name";
+    pub const SMS_TEMPLATE_CODE: &str = "sms.template_code";
     pub const RATELIMIT_ON_BREACH: &str = "ratelimit.on_breach";
     pub const RATELIMIT_BAN_THRESHOLD: &str = "ratelimit.ban_threshold";
     pub const RATELIMIT_BAN_MINUTES: &str = "ratelimit.ban_minutes";
@@ -143,6 +157,10 @@ pub mod defaults {
     /// 长宽是给「不想让人传 20000×200 这种怪图」的场景留的
     pub const MAX_WIDTH: i64 = 0;
     pub const MAX_HEIGHT: i64 = 0;
+    /// 未登录访客的下载：每分钟 60 次、每天 1000 次。按 IP 计数，
+    /// 这个量级够正常看图/存图，挡不住的是成规模的抓取（那种要靠 IP 规则）。
+    pub const DOWNLOAD_ANON_PER_MINUTE: i64 = 60;
+    pub const DOWNLOAD_ANON_PER_DAY: i64 = 1000;
     /// 队列深度阈值，超过就返回 429
     pub const QUEUE_DEPTH: i64 = 500;
     /// 会话闲置超时：两小时没动就要求重新登录（与云控制台的默认口径一致）
@@ -280,6 +298,18 @@ pub struct UploadSettings {
     pub formats: Vec<String>,
     pub thumb_client: bool,
     pub thumb_server_fallback: bool,
+}
+
+/**
+ * 未登录访客的下载限额。
+ *
+ * 登录用户走限流策略（可按用户覆盖），游客没有账号可挂，只能读系统设置。
+ * `0` 表示不限。
+ */
+#[derive(Debug, Clone, Copy)]
+pub struct DownloadSettings {
+    pub anon_per_minute: i64,
+    pub anon_per_day: i64,
 }
 
 /// 会话有效期。
@@ -452,6 +482,24 @@ impl Settings {
         Ok(Some(key.decrypt_str(&value)?))
     }
 
+    /// 用主密钥签一段载荷（OAuth 的 state、注册补全邮箱的令牌）。
+    ///
+    /// 载荷是明文（别往里塞敏感信息），要的只是「没被改过、不是别人造的」。
+    pub fn sign_payload(&self, payload: &str) -> Result<String> {
+        let key = self.master_key.as_ref().ok_or_else(|| {
+            AppError::Config("缺少主密钥，无法签发登录令牌。请设置 PIXORA_MASTER_KEY".into())
+        })?;
+        Ok(pixora_crypto::sign::sign(key, payload)?)
+    }
+
+    /// 验签并取回载荷。
+    pub fn verify_payload(&self, token: &str) -> Result<String> {
+        let key = self.master_key.as_ref().ok_or_else(|| {
+            AppError::Config("缺少主密钥，无法校验登录令牌。请设置 PIXORA_MASTER_KEY".into())
+        })?;
+        Ok(pixora_crypto::sign::verify(key, token)?)
+    }
+
     /// 判断某个密钥类设置是否已配置（不返回明文，界面只显示「已配置」）。
     pub async fn secret_configured(&self, name: &str) -> Result<bool> {
         Ok(self
@@ -498,6 +546,20 @@ impl Settings {
             email_domains: RegisterDomains::parse(
                 self.raw(keys::REGISTER_EMAIL_DOMAINS).await?.as_deref(),
             ),
+        })
+    }
+
+    /// 访客的下载限额。
+    pub async fn download(&self) -> Result<DownloadSettings> {
+        Ok(DownloadSettings {
+            anon_per_minute: self
+                .integer(keys::DOWNLOAD_ANON_PER_MINUTE, defaults::DOWNLOAD_ANON_PER_MINUTE)
+                .await?
+                .max(0),
+            anon_per_day: self
+                .integer(keys::DOWNLOAD_ANON_PER_DAY, defaults::DOWNLOAD_ANON_PER_DAY)
+                .await?
+                .max(0),
         })
     }
 

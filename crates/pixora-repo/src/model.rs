@@ -820,6 +820,11 @@ pub struct RateLimitPolicy {
     pub max_height: i64,
     /// 逗号分隔的扩展名列表，与 settings 里的 `upload.formats` 同一种写法
     pub formats: Option<String>,
+    /// 下载限额（带 `?download=1` 的直链请求）。与上传那几项同一套语义：
+    /// `0` = 跟随上一层；最上层（全局默认行）为 `0` 就是不限。未登录的游客
+    /// 没有账号，那两格在系统设置里（`download.anon_*`）。
+    pub download_per_minute: i64,
+    pub download_per_day: i64,
     pub unlimited: bool,
     pub note: Option<String>,
     pub updated_at: DateTime<Utc>,
@@ -829,7 +834,7 @@ impl RateLimitPolicy {
     pub const COLUMNS: &'static str = "id, user_id, api_per_minute, api_per_hour, api_read_per_minute, \
          api_burst, upload_per_minute, upload_per_hour, upload_per_day, upload_bytes_per_day, \
          max_concurrent_uploads, max_batch_size, max_file_size, max_pixels, max_width, max_height, \
-         formats, unlimited, note, updated_at";
+         formats, download_per_minute, download_per_day, unlimited, note, updated_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -850,6 +855,8 @@ impl RateLimitPolicy {
             max_width: get_i64(row, "max_width")?,
             max_height: get_i64(row, "max_height")?,
             formats: get_opt_str(row, "formats")?,
+            download_per_minute: get_i64(row, "download_per_minute")?,
+            download_per_day: get_i64(row, "download_per_day")?,
             unlimited: get_bool(row, "unlimited")?,
             note: get_opt_str(row, "note")?,
             updated_at: get_ts(row, "updated_at")?,
@@ -883,6 +890,10 @@ impl RateLimitPolicy {
             max_width: 0,
             max_height: 0,
             formats: None,
+            // 默认就要限：下载是外链最容易被拿去当带宽的地方，
+            // 「默认不限、要限自己配」等于默认把那扇门敞着
+            download_per_minute: 120,
+            download_per_day: 5000,
             unlimited: false,
             note: None,
             updated_at: now(),
