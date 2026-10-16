@@ -33,6 +33,9 @@ pub mod kind {
     pub const UPLOAD_HOUR: &str = "upload_hour";
     pub const UPLOAD_DAY: &str = "upload_day";
     pub const UPLOAD_BYTES_DAY: &str = "upload_bytes_day";
+    /// 下载（带 `?download=1` 的直链请求）。登录用户按账号记，游客按 IP 记
+    pub const DOWNLOAD_MINUTE: &str = "download_minute";
+    pub const DOWNLOAD_DAY: &str = "download_day";
 }
 
 pub mod scope {
@@ -46,6 +49,48 @@ pub mod scope {
 struct Bucket {
     tokens: f64,
     last_refill: Instant,
+}
+
+/**
+ * 一次下载请求的主体：登录了就是账号，没登录就是那个 IP。
+ *
+ * 两类的额度分开配（游客在系统设置里，登录用户按限流策略、可单用户覆盖），
+ * 但判定与计数是同一套机制：分钟级用进程内令牌桶，天级落 `rate_counters`。
+ */
+#[derive(Debug, Clone)]
+pub enum DownloadActor {
+    User(i64),
+    Ip(String),
+}
+
+impl DownloadActor {
+    fn scope(&self) -> &'static str {
+        match self {
+            Self::User(_) => scope::USER,
+            Self::Ip(_) => scope::IP,
+        }
+    }
+
+    fn subject(&self) -> String {
+        match self {
+            Self::User(id) => id.to_string(),
+            Self::Ip(ip) => ip.clone(),
+        }
+    }
+
+    fn bucket_key(&self) -> String {
+        match self {
+            Self::User(id) => format!("download:user:{id}"),
+            Self::Ip(ip) => format!("download:ip:{ip}"),
+        }
+    }
+}
+
+/// 下载限额。`0` = 不限：游客那两格来自系统设置，登录用户来自限流策略。
+#[derive(Debug, Clone, Copy)]
+pub struct DownloadLimits {
+    pub per_minute: i64,
+    pub per_day: i64,
 }
 
 pub struct RateLimits {
@@ -253,6 +298,98 @@ impl RateLimits {
     /// 清掉过期的计数行。后台任务定期调。
     pub async fn purge(&self, older_than: DateTime<Utc>) -> Result<u64> {
         Ok(self.repo.purge_counters_before(older_than).await?)
+    }
+}
+
+impl RateLimits {
+    /// 下载准入：分钟级过令牌桶，天级查库。
+    ///
+    /// 分钟级用令牌桶是刻意的：直链下载常常一串并发过来，查库计数拦不住同一秒
+    /// 里的爆发；天级必须落库，否则重启一次额度就回满了。
+    pub async fn check_download(&self, actor: &DownloadActor, limits: DownloadLimits) -> Result<()> {
+        let now = Utc::now();
+        if limits.per_minute > 0 {
+            let wait = self.take_bucket(&actor.bucket_key(), limits.per_minute as f64, 1.0);
+            if wait > 0 {
+                return Err(AppError::RateLimited {
+                    retry_after: wait,
+                    detail: format!("下载过于频繁（{} 次/分钟）", limits.per_minute),
+                });
+            }
+        }
+        if limits.per_day > 0 {
+            let used = self
+                .read_count(
+                    actor.scope(),
+                    &actor.subject(),
+                    kind::DOWNLOAD_DAY,
+                    day_window(now),
+                )
+                .await?;
+            if used + 1 > limits.per_day {
+                return Err(AppError::RateLimited {
+                    retry_after: seconds_to_next_day(now),
+                    detail: format!("今天的下载次数已用完（{} 次/天）", limits.per_day),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// 记一次下载。放在真的把文件发出去之前——限的是「被取走多少」，
+    /// 而不是「被请求多少」。
+    pub async fn record_download(&self, actor: &DownloadActor) -> Result<()> {
+        self.repo
+            .bump_counter(
+                actor.scope(),
+                &actor.subject(),
+                kind::DOWNLOAD_DAY,
+                parse_window(&day_window(Utc::now()))?,
+                1,
+                0,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn read_count(
+        &self,
+        scope_name: &str,
+        subject: &str,
+        kind_name: &str,
+        window: String,
+    ) -> Result<i64> {
+        self.repo
+            .read_counter(scope_name, subject, kind_name, parse_window(&window)?)
+            .await
+            .map_err(AppError::from)
+    }
+
+    /// 取一个令牌。返回 0 表示放行，其余是要等的秒数。
+    ///
+    /// `per_minute` 既是桶容量（允许一次性用掉一整分钟的额度）也是补充速率，
+    /// 这样「60 次/分钟」在用户感知里就是「一分钟六十次，别一直连着刷」。
+    fn take_bucket(&self, key: &str, per_minute: f64, cost: f64) -> u64 {
+        let capacity = per_minute.max(1.0);
+        let rate = per_minute / 60.0;
+        let now = Instant::now();
+        let mut buckets = match self.buckets.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let bucket = buckets.entry(key.to_string()).or_insert(Bucket {
+            tokens: capacity,
+            last_refill: now,
+        });
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * rate).min(capacity);
+        bucket.last_refill = now;
+        if bucket.tokens >= cost {
+            bucket.tokens -= cost;
+            return 0;
+        }
+        let missing = cost - bucket.tokens;
+        (missing / rate).ceil().max(1.0) as u64
     }
 }
 

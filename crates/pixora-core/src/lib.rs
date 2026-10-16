@@ -13,6 +13,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod guest;
+pub mod identities;
 pub mod images;
 pub mod install;
 pub mod ipguard;

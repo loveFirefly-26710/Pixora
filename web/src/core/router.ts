@@ -33,7 +33,6 @@ interface Route {
 
 const routes: Route[] = [];
 let outlet: HTMLElement | null = null;
-let notFound: PageHandler | null = null;
 let onNavigate: (() => void) | null = null;
 
 export function route(
@@ -48,10 +47,6 @@ export function route(
     auth: options.auth ?? false,
     admin: options.admin ?? false,
   });
-}
-
-export function setNotFound(handler: PageHandler): void {
-  notFound = handler;
 }
 
 export function setOutlet(element: HTMLElement): void {
@@ -72,6 +67,13 @@ export function currentPath(): string {
 }
 
 export function navigate(to: string, options: { replace?: boolean } = {}): void {
+  // 首页的规范地址是站点根：`/`，不带 `#/`。带查询串时不剥（广场的搜索条件
+  // 就写在 hash 里，剥掉 hash 等于把条件一起丢了）
+  if (to === "/") {
+    homeUrl();
+    void dispatch();
+    return;
+  }
   const target = to.startsWith("#") ? to : `#${to}`;
   if (options.replace) {
     history.replaceState(null, "", target);
@@ -79,6 +81,13 @@ export function navigate(to: string, options: { replace?: boolean } = {}): void 
     return;
   }
   location.hash = target;
+}
+
+/** 把地址栏收敛成首页的规范形态：`http://host/`。 */
+function homeUrl(): void {
+  if (location.pathname !== "/" || location.search || location.hash) {
+    history.replaceState(null, "", "/");
+  }
 }
 
 /** 就地替换查询参数，不刷新页面。 */
@@ -121,15 +130,18 @@ async function dispatch(): Promise<void> {
   const query = new URLSearchParams(queryString ?? "");
   const segments = (path ?? "/").split("/").filter(Boolean);
 
-  const matched = match(segments);
+  // 认不出来的地址（`/images131231` 这类不带 # 的路径、打错的 hash 段）
+  // 一律当首页：地址栏收敛成站点根，页面上就是广场。不做 404 页——
+  // 用户多半是从别处跟过来或手抄错了一段，把他扔在错误页上没有任何帮助
+  const matched = match(segments) ?? match([]);
+  const unknown = !match(segments);
+  if (unknown || (segments.length === 0 && !queryString)) {
+    homeUrl();
+  }
   outlet.replaceChildren();
   onNavigate?.();
 
   if (!matched) {
-    if (notFound) {
-      await notFound({ params: {}, query, outlet, path: path ?? "/" });
-      return;
-    }
     outlet.textContent = "页面不存在";
     return;
   }

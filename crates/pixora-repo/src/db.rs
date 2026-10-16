@@ -6,7 +6,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use sqlx::any::{install_default_drivers, AnyPoolOptions, AnyRow};
+pub use sqlx::any::AnyRow;
+use sqlx::any::{install_default_drivers, AnyPoolOptions};
 use sqlx::AnyPool;
 
 use crate::args::Args;

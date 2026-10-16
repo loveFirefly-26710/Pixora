@@ -101,6 +101,10 @@ expect "下发会话有效期" '"idle_minutes"' "$out"
 say "收件域名校验：MX 查到就拒（null MX 的域名收不到信）"
 # 这一关默认开着。冒烟里的地址都是假域名，先单独验一次它的判定，
 # 后面统一关掉——跑冒烟不该依赖外网 DNS 通不通
+# 这台机器的磁盘常年九成满，注册入口会被容量阈值自动关掉；这一节要验的是
+# 收件域名那一关，先把容量自动关闭关掉，免得它先拦下来（顺带也验了这条开关）
+out=$(req PUT /admin/quota '{"auto_close_enabled":false}')
+expect "关掉容量触顶自动关闭（保存回传整页生效值）" '"capacity"' "$out"
 out=$(req POST /auth/register/code '{"email":"someone@example.com"}')
 if printf '%s' "$out" | grep -q '不收邮件\|判断不了\|解析'; then
   ok "null MX / 查不出来的域名被拦在发信之前"
@@ -1104,6 +1108,71 @@ out=$(req GET "/admin/logs?action=login_success")
 expect "登录记录也在账号历史里" 'login_success' "$out"
 out=$(req GET "/admin/logs?action=account_email_change")
 expect "按动作筛得动" '更换邮箱' "$out"
+
+say "下载：给的是真图片文件，匿名也能下"
+python "$ROOT/scripts/make-test-png.py" "$DIR/dl.png" 96
+out=$(req POST /albums '{"name":"dl-album","visibility":"public"}')
+DL_ALBUM=$(printf '%s' "$out" | jq_get "['id']")
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" \
+  -F "file=@$DIR/dl.png" -F "album_id=$DL_ALBUM" -F "visibility=public" -F "original_name=下载测试.png")
+DL_URL=$(printf '%s' "$out" | jq_get "['url']")
+[ -n "$DL_URL" ] && ok "下载测试图已上传" || bad "图该传得上去" "$out"
+
+# 响应头：附件名要是 .png 这种真扩展名，不再是 .img
+HEADERS=$(curl -s -D - -o /dev/null "$DL_URL?download=1")
+expect "下载带附件头" 'attachment;' "$HEADERS"
+expect "附件名是真图片扩展名" '.png' "$HEADERS"
+if printf '%s' "$HEADERS" | grep -qi 'filename=.*\.img'; then
+  bad "不该再出现 .img" "$(printf '%s' "$HEADERS" | grep -i content-disposition)"
+else
+  ok "附件名不是 .img"
+fi
+if printf '%s' "$HEADERS" | grep -qi 'cache-control'; then
+  ok "下载响应带缓存策略"
+else
+  bad "下载响应该带缓存策略" "$HEADERS"
+fi
+
+say "下载限频：匿名的额度单独设，超了给 429"
+out=$(req PUT /admin/ratelimit '{"download_anon_per_minute":2,"download_anon_per_day":100}')
+expect "把匿名下载限到 2 次/分钟" '"ok":true' "$out"
+code1=$(curl -s -o /dev/null -w '%{http_code}' "$DL_URL?download=1&retry=1")
+code2=$(curl -s -o /dev/null -w '%{http_code}' "$DL_URL?download=1&retry=2")
+code3=$(curl -s -o /dev/null -w '%{http_code}' "$DL_URL?download=1&retry=3")
+[ "$code1" = "200" ] && [ "$code2" = "200" ] && ok "前两次放行" || bad "前两次该放行" "$code1/$code2"
+[ "$code3" = "429" ] && ok "第三次被限流（429）" || bad "第三次该 429" "$code3"
+out=$(curl -s -b "$JAR" -o /dev/null -w '%{http_code}' "$DL_URL?download=1&asuser=1")
+[ "$out" = "200" ] && ok "登录用户的额度分开算（管理员不受限）" || bad "登录用户该能下" "$out"
+
+say "单张图片最大大小：可以按用户单独设"
+# 用户详情按自增 id 取，限流覆盖按 uid 写：两个接口的路径口径本来就不一样
+ID_1000=$(req GET "/admin/users?query=1000" | jq_get "[0]['id']")
+UID_1000=$(req GET "/admin/users?query=1000" | jq_get "[0]['uid']")
+POLICY=$(req GET "/admin/users/$ID_1000")
+expect "详情里带登录方式字段" '"identities"' "$POLICY"
+out=$(req PUT "/admin/ratelimit/users/$UID_1000" '{"max_file_size":1048576}')
+expect "写入单用户单张上限" '"ok":true' "$out"
+out=$(req GET /me)
+expect "生效值跟着变（1 MiB）" '"max_file_size":1048576' "$out"
+
+say "登录方式：默认只有邮箱；没配好的第三方不摆按钮"
+out=$(curl -s "$BASE/site")
+expect "下发 login_methods" '"login_methods"' "$out"
+expect "默认不开 GitHub" '"github":false' "$out"
+out=$(req GET /me/identities)
+expect "邮箱必需" '"email"' "$out"
+expect "没有绑定第三方" '"identities":[]' "$out"
+out=$(req DELETE /me/identities/email)
+expect "解绑邮箱被拒" '邮箱是账号本身' "$out"
+out=$(req POST /me/identities '{"provider":"phone","phone":"13800138000","code":"123456"}')
+expect "短信没配时绑手机号给出原因" '短信' "$out"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/oauth/github/start?next=/")
+[ "$code" != "200" ] && ok "没配凭据的第三方入口不可用（$code）" || bad "该拒绝未配置的入口" "$code"
+
+say "配额保存：回传保存后的整页生效值"
+out=$(req PUT /admin/quota '{"auto_close_enabled":true}')
+expect "保存返回生效值（与 GET 同形状）" '"per_user_max"' "$out"
+expect "带上容量口径" '"capacity"' "$out"
 
 say "退出登录"
 out=$(req POST /auth/logout '{}')

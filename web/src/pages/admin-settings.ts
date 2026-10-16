@@ -17,6 +17,7 @@ import { h, mount } from "../core/dom";
 import { formatBytes, formatNumber, parseSize } from "../core/format";
 import { confirmDialog, promptDialog } from "../core/modal";
 import { openMailTemplates } from "./mail-templates";
+import { loginMethodsCard } from "./login-methods-card";
 import type { PageContext } from "../core/router";
 import { toastError, toastOk } from "../core/toast";
 import { currentUser, loadMe, loadSite } from "../core/state";
@@ -24,6 +25,7 @@ import { BUILTIN_AVATAR, refreshNav } from "../ui/shell";
 import type { AdminSettings, RateLimitAdmin } from "../core/types";
 import {
   apiRateCard,
+  downloadRateCard,
   breachCard,
   rateLimitDraft,
   rateLogsButton,
@@ -326,6 +328,9 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     moderationFailOpen: data.moderation?.fail_open ?? true,
   };
   const rateDraft = rateLimitDraft(rate);
+  // 登录方式那张卡自己拉配置：整页草稿里塞不下密钥这类东西
+  const loginMethodsHost = h("div");
+  void loginMethodsCard().then((node) => loginMethodsHost.replaceChildren(node));
 
   return [
     pageHead(
@@ -342,6 +347,7 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       uploadCard(draft, data, rate, rateDraft),
       apiRateCard(rateDraft),
       uploadRateCard(rateDraft),
+      downloadRateCard(rateDraft),
       breachCard(rateDraft),
       usersCard(reload, rate, data.upload.format_options?.length ? data.upload.format_options : FALLBACK_FORMATS),
       thumbCard(draft),
@@ -349,6 +355,9 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       securityCard(draft),
       moderationCard(draft),
       mailCard(draft),
+      // 登录方式自己拉一次配置、自己提交（与 SMTP 那张卡不同：它不需要
+      // 跟着整页草稿走，改了立刻生效更顺手）
+      loginMethodsHost,
       appearanceCard(reload, draft, data),
     ),
     h(

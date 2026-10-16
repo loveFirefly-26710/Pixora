@@ -98,18 +98,18 @@ impl Repo {
             "INSERT INTO rate_limit_policies (user_id, api_per_minute, api_per_hour, \
                  api_read_per_minute, api_burst, upload_per_minute, upload_per_hour, upload_per_day, \
                  upload_bytes_per_day, max_concurrent_uploads, max_batch_size, \
-                 max_file_size, max_pixels, max_width, max_height, formats, unlimited, note, updated_at) \
-             VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 max_file_size, max_pixels, max_width, max_height, formats, download_per_minute, download_per_day, unlimited, note, updated_at) \
+             VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT ((user_id IS NULL)) WHERE user_id IS NULL DO UPDATE SET \
                  api_per_minute = ?, api_per_hour = ?, api_read_per_minute = ?, api_burst = ?, \
                  upload_per_minute = ?, upload_per_hour = ?, upload_per_day = ?, \
                  upload_bytes_per_day = ?, max_concurrent_uploads = ?, max_batch_size = ?, \
-                 max_file_size = ?, max_pixels = ?, max_width = ?, max_height = ?, formats = ?, unlimited = ?, note = ?, updated_at = ?",
+                 max_file_size = ?, max_pixels = ?, max_width = ?, max_height = ?, formats = ?, download_per_minute = ?, download_per_day = ?, unlimited = ?, note = ?, updated_at = ?",
             "INSERT INTO rate_limit_policies (user_id, api_per_minute, api_per_hour, \
                  api_read_per_minute, api_burst, upload_per_minute, upload_per_hour, upload_per_day, \
                  upload_bytes_per_day, max_concurrent_uploads, max_batch_size, \
-                 max_file_size, max_pixels, max_width, max_height, formats, unlimited, note, updated_at) \
-             VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 max_file_size, max_pixels, max_width, max_height, formats, download_per_minute, download_per_day, unlimited, note, updated_at) \
+             VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON DUPLICATE KEY UPDATE api_per_minute = VALUES(api_per_minute), \
                  api_per_hour = VALUES(api_per_hour), \
                  api_read_per_minute = VALUES(api_read_per_minute), api_burst = VALUES(api_burst), \
@@ -121,18 +121,20 @@ impl Repo {
                  max_batch_size = VALUES(max_batch_size), \
                  max_file_size = VALUES(max_file_size), max_pixels = VALUES(max_pixels), \
                  max_width = VALUES(max_width), max_height = VALUES(max_height), \
+                 download_per_minute = VALUES(download_per_minute), \
+                 download_per_day = VALUES(download_per_day), \
                  unlimited = VALUES(unlimited), \
                  note = VALUES(note), updated_at = VALUES(updated_at)",
             "INSERT INTO rate_limit_policies (user_id, api_per_minute, api_per_hour, \
                  api_read_per_minute, api_burst, upload_per_minute, upload_per_hour, upload_per_day, \
                  upload_bytes_per_day, max_concurrent_uploads, max_batch_size, \
-                 max_file_size, max_pixels, max_width, max_height, formats, unlimited, note, updated_at) \
-             VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 max_file_size, max_pixels, max_width, max_height, formats, download_per_minute, download_per_day, unlimited, note, updated_at) \
+             VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT ((user_id IS NULL)) WHERE user_id IS NULL DO UPDATE SET \
                  api_per_minute = ?, api_per_hour = ?, api_read_per_minute = ?, api_burst = ?, \
                  upload_per_minute = ?, upload_per_hour = ?, upload_per_day = ?, \
                  upload_bytes_per_day = ?, max_concurrent_uploads = ?, max_batch_size = ?, \
-                 max_file_size = ?, max_pixels = ?, max_width = ?, max_height = ?, formats = ?, unlimited = ?, note = ?, updated_at = ?",
+                 max_file_size = ?, max_pixels = ?, max_width = ?, max_height = ?, formats = ?, download_per_minute = ?, download_per_day = ?, unlimited = ?, note = ?, updated_at = ?",
         );
         let stamp = now_ts();
         let args = rate_policy_args(
@@ -151,18 +153,18 @@ impl Repo {
             "INSERT INTO rate_limit_policies (user_id, api_per_minute, api_per_hour, \
                  api_read_per_minute, api_burst, upload_per_minute, upload_per_hour, upload_per_day, \
                  upload_bytes_per_day, max_concurrent_uploads, max_batch_size, \
-                 max_file_size, max_pixels, max_width, max_height, formats, unlimited, note, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 max_file_size, max_pixels, max_width, max_height, formats, download_per_minute, download_per_day, unlimited, note, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (user_id) WHERE user_id IS NOT NULL DO UPDATE SET \
                  api_per_minute = ?, api_per_hour = ?, api_read_per_minute = ?, api_burst = ?, \
                  upload_per_minute = ?, upload_per_hour = ?, upload_per_day = ?, \
                  upload_bytes_per_day = ?, max_concurrent_uploads = ?, max_batch_size = ?, \
-                 max_file_size = ?, max_pixels = ?, max_width = ?, max_height = ?, formats = ?, unlimited = ?, note = ?, updated_at = ?",
+                 max_file_size = ?, max_pixels = ?, max_width = ?, max_height = ?, formats = ?, download_per_minute = ?, download_per_day = ?, unlimited = ?, note = ?, updated_at = ?",
             "INSERT INTO rate_limit_policies (user_id, api_per_minute, api_per_hour, \
                  api_read_per_minute, api_burst, upload_per_minute, upload_per_hour, upload_per_day, \
                  upload_bytes_per_day, max_concurrent_uploads, max_batch_size, \
-                 max_file_size, max_pixels, max_width, max_height, formats, unlimited, note, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 max_file_size, max_pixels, max_width, max_height, formats, download_per_minute, download_per_day, unlimited, note, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON DUPLICATE KEY UPDATE api_per_minute = VALUES(api_per_minute), \
                  api_per_hour = VALUES(api_per_hour), \
                  api_read_per_minute = VALUES(api_read_per_minute), api_burst = VALUES(api_burst), \
@@ -174,18 +176,20 @@ impl Repo {
                  max_batch_size = VALUES(max_batch_size), \
                  max_file_size = VALUES(max_file_size), max_pixels = VALUES(max_pixels), \
                  max_width = VALUES(max_width), max_height = VALUES(max_height), \
+                 download_per_minute = VALUES(download_per_minute), \
+                 download_per_day = VALUES(download_per_day), \
                  unlimited = VALUES(unlimited), \
                  note = VALUES(note), updated_at = VALUES(updated_at)",
             "INSERT INTO rate_limit_policies (user_id, api_per_minute, api_per_hour, \
                  api_read_per_minute, api_burst, upload_per_minute, upload_per_hour, upload_per_day, \
                  upload_bytes_per_day, max_concurrent_uploads, max_batch_size, \
-                 max_file_size, max_pixels, max_width, max_height, formats, unlimited, note, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 max_file_size, max_pixels, max_width, max_height, formats, download_per_minute, download_per_day, unlimited, note, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (user_id) WHERE user_id IS NOT NULL DO UPDATE SET \
                  api_per_minute = ?, api_per_hour = ?, api_read_per_minute = ?, api_burst = ?, \
                  upload_per_minute = ?, upload_per_hour = ?, upload_per_day = ?, \
                  upload_bytes_per_day = ?, max_concurrent_uploads = ?, max_batch_size = ?, \
-                 max_file_size = ?, max_pixels = ?, max_width = ?, max_height = ?, formats = ?, unlimited = ?, note = ?, updated_at = ?",
+                 max_file_size = ?, max_pixels = ?, max_width = ?, max_height = ?, formats = ?, download_per_minute = ?, download_per_day = ?, unlimited = ?, note = ?, updated_at = ?",
         );
         let stamp = now_ts();
         let args = rate_policy_args(
@@ -456,6 +460,8 @@ fn rate_policy_args(initial: Args, policy: &RateLimitPolicy, stamp: &str, passes
             .int(policy.max_width)
             .int(policy.max_height)
             .opt_text(policy.formats.clone())
+            .int(policy.download_per_minute)
+            .int(policy.download_per_day)
             .bool(policy.unlimited)
             .opt_text(policy.note.clone())
             .text(stamp);

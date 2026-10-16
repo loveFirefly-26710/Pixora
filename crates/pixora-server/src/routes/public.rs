@@ -124,6 +124,9 @@ pub async fn site(
         "background": background,
         // 站点默认头像：账号自己没设头像时前端回落到它，再没有就回落到首字母方块
         "default_avatar": default_avatar,
+        // 本站支持哪些登录方式：登录页/注册页照着它渲染按钮，
+        // 没启用的（或凭据没配全的）不出现——摆一个点了报错的按钮最糟
+        "login_methods": state.login_methods().await.unwrap_or_default(),
         // 会话有效期：界面上要写清楚「多久不动会掉线」，这不是秘密
         "session": {
             "idle_minutes": state.settings.session().await.map(|s| s.idle_minutes).unwrap_or(0),

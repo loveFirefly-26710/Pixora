@@ -85,11 +85,21 @@ function active(items: NavItem[]): boolean {
   return best !== null && items.some((item) => (item.match ?? [item.path]).includes(best));
 }
 
+/**
+ * 导航链接的地址。
+ *
+ * 广场（首页）写站点根 `/`：`#/` 与 `/` 是同一个页面，但地址栏里多一段
+ * `#/` 既不好看也不好转述；其余页面仍是 hash 路由（单二进制部署不用配 rewrite）。
+ */
+function navHref(path: string): string {
+  return path === "/" ? "/" : `#${path}`;
+}
+
 function navLink(item: NavItem): HTMLElement {
   const best = bestMatch();
   const isActive = best !== null && (item.match ?? [item.path]).includes(best);
   return h("a", {
-    href: `#${item.path}`,
+    href: navHref(item.path),
     class: isActive ? "on" : "",
     "data-nav": item.path,
   }, h("span", { text: item.icon }), h("span", { text: item.label }));
@@ -104,7 +114,19 @@ export function renderNavbar(): HTMLElement {
   // 品牌文字跟着站点名走：`data-brand` 是给 state.applySiteIdentity 改文字用的。
   // 站名还是默认的 Pixora 时保留原来的双色写法——那是 Logo，不是文字
   const name = (getState().site?.name ?? "").trim() || "Pixora";
-  const logo = h("a.logo", { href: "#/", "aria-label": "回到广场首页" });
+  const logo = h("a.logo", {
+    href: "/",
+    "aria-label": "回到广场首页",
+    // 点品牌回广场：就地收敛地址栏为 `/`，不整页刷新（href 保留 `/`，
+    // 中键、新标签页打开时同样落到广场）
+    on: {
+      click: (event: Event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        navigate("/");
+      },
+    },
+  });
   if (name === "Pixora") {
     logo.innerHTML = `Pi<em>x</em>ora`;
   } else {
@@ -243,7 +265,7 @@ export function renderTabbar(): HTMLElement {
     tabbar.append(
       h(
         "a.it",
-        { href: `#${item.path}`, class: isActive ? "on" : "", "aria-current": isActive ? "page" : null },
+        { href: navHref(item.path), class: isActive ? "on" : "", "aria-current": isActive ? "page" : null },
         h("span.ic", { text: item.icon }),
         h("span", { text: item.label }),
       ),
@@ -318,6 +340,22 @@ export async function logoutNow(): Promise<void> {
 document.addEventListener("click", (event) => {
   const target = event.target as HTMLElement | null;
   if (target?.closest('[data-act="logout"]')) void logoutNow();
+});
+
+/**
+ * 指向站点根的站内链接（品牌图标、导航里的广场、底栏）也走客户端路由。
+ *
+ * 不拦的话浏览器会整页重新加载一遍——回广场是最常用的动作之一，不值得
+ * 一次白屏。只认本站的 `/`；外链与带修饰键的点击（新标签页打开）一律放行。
+ */
+document.addEventListener("click", (event) => {
+  if (event.defaultPrevented) return;
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (event.button !== 0) return;
+  const link = (event.target as HTMLElement | null)?.closest("a");
+  if (link?.getAttribute("href") !== "/") return;
+  event.preventDefault();
+  navigate("/");
 });
 
 /**

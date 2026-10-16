@@ -60,9 +60,7 @@ function sizeOf(input: HTMLInputElement, unit: string): number {
   return parseSize(/[a-z]$/i.test(text) ? text : `${text} ${unit}`) ?? 0;
 }
 
-function toMegabytes(bytes: number): string {
-  return `${Math.round(bytes / 1024 / 1024)} MB`;
-}
+
 
 /** 带单位后缀的数值输入。 */
 function unitInput(input: HTMLInputElement, unit: string): HTMLElement {
@@ -120,6 +118,11 @@ export interface RateLimitDraft {
   uploadBytesPerDay: HTMLInputElement;
   /** 单用户并发上传数：界面上摆在「上传策略」那张卡里，值属于全局策略 */
   maxConcurrent: HTMLInputElement;
+  /** 下载限额：登录用户的两格在策略里，游客的两格在系统设置里，一起提交 */
+  downloadPerMinute: HTMLInputElement;
+  downloadPerDay: HTMLInputElement;
+  downloadAnonPerMinute: HTMLInputElement;
+  downloadAnonPerDay: HTMLInputElement;
   onBreach: { respond: boolean; audit: boolean; tempBan: boolean };
   breachThreshold: HTMLInputElement;
   breachWindow: HTMLInputElement;
@@ -138,6 +141,18 @@ export function rateLimitDraft(data: RateLimitAdmin): RateLimitDraft {
     uploadPerDay: textInput({ value: String(global.upload_per_day), type: "number", mono: true }),
     uploadBytesPerDay: textInput({ value: `${toGigabytes(global.upload_bytes_per_day)} GB`, mono: true }),
     maxConcurrent: textInput({ value: String(global.max_concurrent_uploads), type: "number", mono: true }),
+    downloadPerMinute: textInput({ value: String(global.download_per_minute), type: "number", mono: true }),
+    downloadPerDay: textInput({ value: String(global.download_per_day), type: "number", mono: true }),
+    downloadAnonPerMinute: textInput({
+      value: String(data.download_policy.anon_per_minute),
+      type: "number",
+      mono: true,
+    }),
+    downloadAnonPerDay: textInput({
+      value: String(data.download_policy.anon_per_day),
+      type: "number",
+      mono: true,
+    }),
     onBreach: {
       respond: data.on_breach.respond,
       audit: data.on_breach.audit,
@@ -186,6 +201,36 @@ export function uploadRateCard(draft: RateLimitDraft): HTMLElement {
       field("单日上传流量", draft.uploadBytesPerDay, "不带单位按 GB 计算，也可以写 500 MB"),
     ),
     h("div.tip", { text: "上传限额按「实际落盘的新文件」计数，被去重跳过的文件不占额度。" }),
+  );
+}
+
+/**
+ * 下载频率。
+ *
+ * 两类分开配：登录用户走限流策略（可单用户覆盖），游客没有账号可挂，
+ * 那两格落在系统设置里。`0` 都表示不限。计的是带 `?download=1` 的直链请求，
+ * 页面里的 <img> 不算——否则打开一次广场就把额度耗光了。
+ */
+export function downloadRateCard(draft: RateLimitDraft): HTMLElement {
+  return cardNode(
+    cardHead("下载频率", badge("全局默认", "mute")),
+    h(
+      "div.row",
+      null,
+      field("登录用户 · 次 / 分钟", draft.downloadPerMinute, "0 = 不限"),
+      field("登录用户 · 次 / 天", draft.downloadPerDay, "0 = 不限"),
+    ),
+    h(
+      "div.row",
+      null,
+      field("游客（未登录）· 次 / 分钟", draft.downloadAnonPerMinute, "按来源 IP 计数；0 = 不限"),
+      field("游客（未登录）· 次 / 天", draft.downloadAnonPerDay, "按来源 IP 计数；0 = 不限"),
+    ),
+    h("div.tip", {
+      text:
+        "「下载」指的是点了下载按钮、带 download=1 的直链请求；页面里直接显示的图片不计入。" +
+        "管理员不受限。某一类限额填 0 就是该类不限制。",
+    }),
   );
 }
 
@@ -243,6 +288,10 @@ export async function saveRateLimit(draft: RateLimitDraft): Promise<void> {
       upload_per_day: intOf(draft.uploadPerDay),
       upload_bytes_per_day: sizeOf(draft.uploadBytesPerDay, "GB"),
       max_concurrent_uploads: intOf(draft.maxConcurrent),
+      download_per_minute: intOf(draft.downloadPerMinute),
+      download_per_day: intOf(draft.downloadPerDay),
+      download_anon_per_minute: intOf(draft.downloadAnonPerMinute),
+      download_anon_per_day: intOf(draft.downloadAnonPerDay),
     },
   });
   await request("/admin/ratelimit/on_breach", {
@@ -850,4 +899,8 @@ function describeDetail(row: RateLogRow): string {
     return parts.length > 0 ? parts.join(" · ") : row.target ?? "—";
   }
   return String(detail);
+}
+
+export function toMegabytes(bytes: number): string {
+  return `${Math.round(bytes / 1024 / 1024)} MB`;
 }

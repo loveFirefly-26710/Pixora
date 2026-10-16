@@ -111,7 +111,7 @@ API 客户端：
 ```json
 { "data": {
   "name": "Pixora", "base_url": "https://img.example.com",
-  "upload_prefix": "images",
+  "upload_prefix": "images", "login_methods": { "github": false, "google": false, "qq": false, "wechat": false, "phone": false },
   "registration_open": true, "registration_closed_reason": null,
   "register_email_domains": ["example.com"],
   // 站点允许未登录上传时才有这一段：客户端队列按访客账号那套额度限流
@@ -706,6 +706,9 @@ API 客户端：
   上限压低，全拦的话管理员就回不到合规状态了。
 - 自动关闭注册的占用率按 `host_used / total` 判定（`host_used` 为 `null` 时退回 `used / total`），
   关闭原因里会写明口径（「宿主机磁盘占用」或「本项目占用」）。
+- `PUT` 成功时**回传与 `GET` 同一个形状**（保存后的整页生效值）：界面拿它就地重画，
+  不必再拉一次，也不会出现「保存成功但页面还是旧数字」。容量与自动关闭那几项要看
+  服务端重算后的结果，返回体里就是那份结果。
 
 ### 8.4 频率限制
 
@@ -734,9 +737,19 @@ API 客户端：
   "realtime": [ { "uid": "2044", "email": "design@studio.io", "status": "active",
                   "api_minute": 258, "api_minute_limit": 300,
                   "upload_minute": 12, "upload_minute_limit": 60,
-                  "upload_day": 348, "upload_day_limit": 2000, "hits_24h": 3 } ]
+                  "upload_day": 348, "upload_day_limit": 2000, "hits_24h": 3 } ],
+  "download_policy": { "anon_per_minute": 60, "anon_per_day": 1000 }
 } }
 ```
+
+- 下载限额分两套：**登录用户**在策略里（`download_per_minute` / `download_per_day`，可按用户覆盖，
+  `0` = 不限），**未登录的游客**没有账号可挂，那两格在站点设置里（按来源 IP 计数）。
+  `PUT /admin/ratelimit` 一并接受：`{"download_per_minute": 120, "download_per_day": 5000,
+  "download_anon_per_minute": 60, "download_anon_per_day": 1000}`。计的是带 `?download=1` 的直链
+  请求（页面上显示的图片不计）；管理员不受限。
+- 上传策略里的 `max_file_size` 支持**按用户单独设**：`PUT /admin/ratelimit/users/{uid}` 给
+  `max_file_size`（字节，`0` = 跟随全局），生效值出现在 `GET /me` 的 `limits.max_file_size`；
+  上传时既拦在收流那一步，也通过 `/me` 让客户端队列提前拒绝。
 
 - `PUT /api/v1/admin/ratelimit/global` ← `global` 对象
 - `PUT /api/v1/admin/ratelimit/users/{uid}` ← `{ "unlimited": false, "api_per_minute": 300, "upload_per_minute": 60,
@@ -885,9 +898,53 @@ GET /{upload_prefix}/{sha256}.{ext}?download=1 # 强制下载（Content-Disposit
 - SVG 额外带 `Content-Security-Policy: sandbox`；不可信来源（非本人且非公开）强制 `attachment`
 - 一级目录可在后台改（`/api/v1/admin/storage/prefix`），改完旧链依然有效
 - 本地驱动可直接由 Caddy 走 `X-Accel-Redirect` 交给内核发送，此时响应头由本站在前一步设置
+- **下载（`?download=1`）匿名也能用**：拿到的是一份真正的图片文件，文件名带真实扩展名
+  （`545f214a58b00fd8.jpg`）。本人与管理员还能拿到上传时的原始文件名，并同时带上
+  `filename*=UTF-8…` 那份编码——中文名不会变成问号。以前这里发的是 `{哈希}.img`，
+  文件管理器不认、双击打不开
+- 下载按「匿名的额度 / 登录用户的额度」分别限频（见 8.4），超限返回 429 并带 `Retry-After`；
+  页面上直接显示的图片（不带 `download=1`）不计数——否则打开一次广场就把额度耗光了
+
+## 10.5 登录方式（第三方与手机号）
+
+邮箱 + 密码始终可用，邮箱是账号本身（必需、不可解绑）。其余方式都是可选的加法：
+
+```
+GET  /auth/oauth/{provider}/start?mode=login|bind&next=/…   # 302 去对方站点授权
+GET  /auth/oauth/{provider}/callback?code=…&state=…         # 对方回来（302 回前端路由）
+POST /auth/oauth/complete        # 对方没给邮箱时：{ ticket, email, code } 补一个再建号
+POST /auth/phone/code            # { phone } 发短信验证码
+POST /auth/phone/login           # { phone, code, remember? } 手机号登录
+GET  /me/identities              # 我挂了哪些方式（含 email 与 password_set）
+POST /me/identities              # 绑手机号：{ provider: "phone", phone, code }
+POST /me/identities/phone/code   # 绑手机号前要验证码：{ phone }
+DELETE /me/identities/{provider} # 解绑（email 拒绝；最后一根稻草也拒绝）
+```
+
+- `provider` ∈ `github` / `google` / `qq` / `wechat` / `phone`。支持哪些由管理员在
+  「系统设置 → 登录方式」里配（`PUT /admin/login-methods`，密钥加密存储），`GET /site`
+  用 `login_methods` 把它们下发给前台：没启用、或凭据没配全的按钮不出现。
+- `state` 是用主密钥签名的短令牌（15 分钟）：里面带 `mode`、`next`、随机数与发起绑定的人，
+  外面验签就能读，不查库。`next` 只接受站内相对路径（`//evil.com` 这类会被改写成 `/`）。
+- 登录：`(provider, subject)` 已绑定就直接发会话；没绑过但对方给了**已验证的邮箱**就建号并绑定；
+  没邮箱（QQ、微信从来不给）则回一张签名令牌，前端跳到 `#/complete-signup` 让用户填邮箱、
+  走一次注册验证码，再调 `POST /auth/oauth/complete`——邮箱是账号本身，不能凭一句话当成他的。
+- 绑定：`mode=bind` 必须在已登录状态发起，回调里再核一次身份；一个第三方身份只能挂一个账号，
+  重复挂在别人身上返回 `CONFLICT`。
+- 解绑：邮箱不可解绑；解绑任何方式前都会检查「还剩别的方式能进得来」（有可用口令，或还有别的
+  身份），否则 `BAD_REQUEST` 并说明原因。第三方建号的账号一开始没有口令，页面会引导先设密码。
+- 手机号登录只对**已绑定**的号码有效（没绑过时提示先用邮箱注册再绑定）；`POST /me/identities`
+  只处理手机号——第三方方式的绑定必须走授权页，那一步的意义就是「本人到对方站点确认一次」。
+- 管理员侧：`GET/PUT /api/v1/admin/login-methods` 读写配置（响应里带回调地址，界面直接给出来
+  让人复制）；`DELETE /api/v1/admin/users/{id}/identities/{provider}` 可以替用户摘掉某个方式
+  （同样受「别把人锁在门外」的约束）。用户详情返回里带 `identities` 数组。
+- 短信走阿里云短信（AccessKey、签名、模板编号，模板变量名要叫 `code`）；没配好时发码接口
+  直接返回 `INTERNAL` 并说明缺哪一项，不假装发出去了。发码有 60 秒重发间隔。
 
 ## 11. 其它
 
 - `GET /healthz` → `{ "status": "ok", "db": "ok", "uptime_seconds": 1234 }`
 - 静态资源：`/`、`/login`、`/albums` 等前端路由全部回落到 `index.html`（SPA 路由）
+- 前端的地址栏规则：首页的规范地址是站点根 `/`（不带 `#/`）；认不出来的地址——`/images131231`
+  这类陌生路径、打错的 hash 段——一律当首页处理，地址栏收敛成 `/` 并显示广场，不给 404 页
 - 所有写操作返回的 `data` 里都应带上 `csrf_token`（会话续期时前端就地更新）

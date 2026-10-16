@@ -2300,10 +2300,90 @@ tr.pick {
     display: none;
   }
 }
+
+/* 缩放百分比：跟着图像一起走的角标，1× 时由 JS 加上 hidden 藏起来。
+   摆在舞台右下角——不挡画面中心，也离「光标在缩放」的位置近 */
+.lb .lb-zoom {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #e2e8f0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.lb .lb-zoom[hidden] {
+  display: none;
+}
+
+/* 浮层里的图都不许走原生拖拽：长按再拖时浏览器会拖出一张「图片幽灵」，
+   手感上就像在拖那张小图 */
+.lb img,
+.lb .ph {
+  -webkit-user-drag: none;
+  user-select: none;
+}
 /* 视图切换（网格/列表）这类短标签按钮不换行：
    窄屏下工具栏是横向滚动的，「网 格」被拆成两行会显得很挤 */
 .toolbar .chip,
 .toolbar .btn {
   white-space: nowrap;
   flex: 0 0 auto;
+}
+
+/* ---------- 第三方登录 ---------- */
+
+/* 或用 xxx 登录：一条带文字的细分隔线，两侧不留白但有呼吸 */
+.oauth-box {
+  margin: 18px 0 4px;
+}
+
+.oauth-sep {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--faint);
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.oauth-sep::before,
+.oauth-sep::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* 一行一个按钮：第三方登录按钮的文字长度差得多（GitHub / 微信），并排会参差 */
+.oauth-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.oauth-btn {
+  justify-content: center;
+}
+
+/* 登录方式一览：每行一块，窄屏自动折行 */
+.idrow {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: #fff;
+}
+
+.idrow .idmain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.idrow .tip {
+  margin: 4px 0 0;
 }

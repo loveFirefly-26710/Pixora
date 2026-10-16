@@ -1,5 +1,30 @@
 /** 后端返回结构的前端类型定义。字段与 `docs/api-contract.md` 一一对应。 */
 
+/** 本站开了哪些登录方式（`/site` 下发，登录页照着画按钮）。 */
+export interface LoginMethods {
+  github: boolean;
+  google: boolean;
+  qq: boolean;
+  wechat: boolean;
+  phone: boolean;
+}
+
+/** 账号挂着的一个登录方式。 */
+export interface IdentityView {
+  provider: string;
+  label: string;
+  display: string | null;
+  created_at: string;
+}
+
+export interface IdentitiesPayload {
+  email: string;
+  /** 有没有设过密码：第三方建号的账号一开始没有 */
+  password_set: boolean;
+  identities: IdentityView[];
+  available: LoginMethods;
+}
+
 export interface SiteInfo {
   name: string;
   base_url: string;
@@ -24,6 +49,8 @@ export interface SiteInfo {
   background: string | null;
   /** 站点默认头像：账号自己没设头像时用它，没配过是 null */
   default_avatar?: string | null;
+  /** 支持的登录方式：登录页、注册页与账号安全页都读它 */
+  login_methods?: LoginMethods;
   installed: boolean;
   terms: { required: boolean; version: string | null; articles: number };
   /** 广场网格列数，管理员可配 */
@@ -292,6 +319,9 @@ export interface PolicyFields {
   max_width: number;
   max_height: number;
   formats: string[];
+  /** 下载限额（带 `?download=1` 的直链请求）。0 = 跟随上一层，最上层 0 = 不限 */
+  download_per_minute: number;
+  download_per_day: number;
   unlimited: boolean;
   note?: string | null;
 }
@@ -399,6 +429,11 @@ export interface QuotaAdmin {
 
 export interface RateLimitAdmin {
   global: PolicyFields;
+  /** 游客的下载限额（游客没有账号，这两格是站点设置） */
+  download_policy: {
+    anon_per_minute: number;
+    anon_per_day: number;
+  };
   /** 站点级上传策略（系统设置里那份）：全局输入改的就是它 */
   upload_policy: {
     max_file_bytes: number;
@@ -429,6 +464,9 @@ export interface RateLimitAdmin {
     upload_per_minute: number;
     upload_per_day: number;
     upload_bytes_per_day: number;
+    /** 生效的下载限额（含全局默认与用户覆盖解析后的值） */
+    download_per_minute: number;
+    download_per_day: number;
     /** 该用户生效的上传策略（三层解析后的结果） */
     upload?: EffectiveUploadLimits | null;
     hits_24h: number;

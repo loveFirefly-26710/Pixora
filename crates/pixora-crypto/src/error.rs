@@ -28,6 +28,10 @@ pub enum CryptoError {
 
     #[error("TOTP 校验失败：{0}")]
     Totp(String),
+
+    /// 签名令牌（OAuth 的 state、一次性载荷）格式不对或验签失败
+    #[error("签名令牌无效：{0}")]
+    InvalidToken(String),
 }
 
 pub type Result<T> = std::result::Result<T, CryptoError>;

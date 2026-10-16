@@ -25,6 +25,7 @@ use pixora_core::{AppError, AppState};
 use pixora_repo::model::storage_kind;
 
 use crate::http::error_response;
+use crate::routes::PeerAddr;
 
 /// 处理 `/{prefix}/{file}`。
 ///
@@ -34,9 +35,10 @@ pub async fn serve_direct(
     State(state): State<Arc<AppState>>,
     Path((prefix, file)): Path<(String, String)>,
     Query(params): Query<std::collections::HashMap<String, String>>,
+    peer: PeerAddr,
     headers: HeaderMap,
 ) -> Response {
-    match direct_inner(state, prefix, file, params, headers).await {
+    match direct_inner(state, prefix, file, params, headers, peer.0).await {
         Ok(response) => response,
         Err(err) => error_response(err),
     }
@@ -48,6 +50,7 @@ async fn direct_inner(
     file: String,
     params: std::collections::HashMap<String, String>,
     headers: HeaderMap,
+    peer: Option<std::net::SocketAddr>,
 ) -> pixora_core::Result<Response> {
     // 一级目录要匹配当前配置；`i`、`images` 这类都行，改完旧链仍能命中数据库映射
     let site = state.settings.site(state.config.base_url.as_deref()).await?;
@@ -107,16 +110,38 @@ async fn direct_inner(
         }
     }
 
+    // 会话只解析一次：隐私判定、下载限流、下载文件名都要用它
+    let viewer = session_user(&state, &headers).await;
+
     // 私有图片：直链本身不可枚举，但拿到链接的人不该因此看到私有内容。
     // 这里按「谁在请求」放行——相册页里那些 <img> 用的正是这条直链，
     // 一律拒绝会让私有相册的缩略图全变成碎图标（实测就是这样）。
     // 放行条件：这个实体还挂着公开引用，或者请求者本人（含管理员）就引用着它。
     let private = !is_publicly_referenced(&state, blob.id).await?;
-    if private && !owner_is_requesting(&state, &headers, blob.id).await? {
+    if private && !references_blob(&state, viewer.as_ref(), blob.id).await? {
         return Err(AppError::not_found("图片"));
     }
 
+    // 下载限流：只算「下载」（带 `?download=1`）。页面里的 <img> 走同一条直链
+    // 但不带这个参数——把它也计进去的话，打开一次广场就把额度耗光了
+    let download_actor = if want_download {
+        let actor = download_actor(&state, &headers, peer, viewer.as_ref()).await;
+        let limits = download_limits(&state, viewer.as_ref()).await?;
+        state.limits.check_download(&actor, limits).await?;
+        Some(actor)
+    } else {
+        None
+    };
+
     let is_svg = blob.mime_type == "image/svg+xml";
+    // 下载时给的文件名：`{短哈希}.jpg` 这样的真图片文件，不再是 `.img`。
+    // 本人与管理员能拿到上传时的原始文件名，其他人只给哈希——原始名常带
+    // 「IMG_20240312_身份证」这类信息，不该顺手递给广场上的人
+    let download_name = if want_download {
+        download_file_name(&state, &blob, &original, viewer.as_ref()).await
+    } else {
+        None
+    };
 
     // 条件请求：内容寻址下 ETag 永远稳定
     if let Some(etag) = headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()) {
@@ -148,7 +173,16 @@ async fn direct_inner(
                         .headers_mut()
                         .insert("X-Accel-Redirect", value);
                 }
-                apply_headers(&mut response, &blob.mime_type, &blob.sha256, is_svg, want_download, blob.size, !private);
+                apply_headers(
+                    &mut response,
+                    &blob.mime_type,
+                    &blob.sha256,
+                    is_svg,
+                    want_download,
+                    blob.size,
+                    !private,
+                    download_name.as_deref(),
+                );
                 return Ok(response);
             }
         }
@@ -158,12 +192,28 @@ async fn direct_inner(
         .storage
         .open_object(&blob.storage_driver, blob.backend_id, &blob.storage_key)
         .await?;
+    // 计数放在真的要把文件发出去之前：限的是「被取走多少」，不是「被请求多少」。
+    // 命中条件请求的 304 早在上一步就返回了，那次没传出字节，自然不计数
+    if let Some(actor) = download_actor.as_ref() {
+        if let Err(err) = state.limits.record_download(actor).await {
+            tracing::debug!(error = %err, "下载计数失败");
+        }
+    }
     let stream = pixora_storage::local::into_stream(reader);
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .body(Body::from_stream(stream))
         .map_err(|err| AppError::internal(err.to_string()))?;
-    apply_headers(&mut response, &blob.mime_type, &blob.sha256, is_svg, want_download, blob.size, !private);
+    apply_headers(
+        &mut response,
+        &blob.mime_type,
+        &blob.sha256,
+        is_svg,
+        want_download,
+        blob.size,
+        !private,
+        download_name.as_deref(),
+    );
     let _ = is_thumb;
     Ok(response)
 }
@@ -314,23 +364,29 @@ async fn is_publicly_referenced(state: &AppState, blob_id: i64) -> pixora_core::
     Ok(false)
 }
 
-/// 请求者本人是否引用着这个实体（管理员一并放行）。
+/// 直链请求者是谁（只看会话 Cookie）。
 ///
-/// 只看会话 Cookie：`<img>` 标签带不了 Authorization 头，所以这里是浏览器会话的
-/// 判断。Token 访问图片走的是带鉴权的详情接口，不经过直链。
+/// `<img>` 标签带不了 Authorization 头，所以这里是浏览器会话的判断。Token 访问
+/// 图片走的是带鉴权的详情接口，不经过直链。会话无效、没登录都返回 `None`。
+async fn session_user(state: &AppState, headers: &HeaderMap) -> Option<pixora_repo::model::User> {
+    let token = crate::http::session_cookie(headers)?;
+    match state.authenticate_session(&token, None).await {
+        Ok((user, _)) => Some(user),
+        Err(_) => None,
+    }
+}
+
+/// 这个请求者是不是「引用着这个实体的人」（管理员一并放行）。
 ///
 /// 回收站里的引用也算数：那里的图片是软删的行，本人当然还「有权限」，
 /// 而回收站页面上的预览图用的正是这条直链——把它们排除掉，本人打开回收站
 /// 看到的就是一排碎图标。
-async fn owner_is_requesting(
+async fn references_blob(
     state: &AppState,
-    headers: &HeaderMap,
+    viewer: Option<&pixora_repo::model::User>,
     blob_id: i64,
 ) -> pixora_core::Result<bool> {
-    let Some(token) = crate::http::session_cookie(headers) else {
-        return Ok(false);
-    };
-    let Ok((user, _)) = state.authenticate_session(&token, None).await else {
+    let Some(user) = viewer else {
         return Ok(false);
     };
     if user.is_admin() {
@@ -347,6 +403,107 @@ async fn owner_is_requesting(
     Ok(hit.is_some())
 }
 
+/// 一次下载算在谁头上：登录了算账号，没登录算那个 IP。
+///
+/// 解析不出 IP（比如 Unix 域套接字上的请求）时统一记成一个占位主体：
+/// 好过放行——额度是按主体分开的，占位主体只会让这些请求共用一份额度。
+async fn download_actor(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+    viewer: Option<&pixora_repo::model::User>,
+) -> pixora_core::ratelimit::DownloadActor {
+    if let Some(user) = viewer {
+        return pixora_core::ratelimit::DownloadActor::User(user.id);
+    }
+    let ip = crate::http::request_context(state, headers, peer).await.ip;
+    pixora_core::ratelimit::DownloadActor::Ip(ip.unwrap_or_else(|| "unknown".to_string()))
+}
+
+/// 这个请求者的下载额度：游客读系统设置，登录用户读他生效的那份限流策略。
+async fn download_limits(
+    state: &AppState,
+    viewer: Option<&pixora_repo::model::User>,
+) -> pixora_core::Result<pixora_core::ratelimit::DownloadLimits> {
+    let Some(user) = viewer else {
+        let settings = state.settings.download().await?;
+        return Ok(pixora_core::ratelimit::DownloadLimits {
+            per_minute: settings.anon_per_minute,
+            per_day: settings.anon_per_day,
+        });
+    };
+    let policy = state.repo.effective_policy(user).await?;
+    // 管理员不受限：他们是站点的主人，配额度的人把自己锁在门外没有意义
+    if policy.unlimited || user.is_admin() {
+        return Ok(pixora_core::ratelimit::DownloadLimits {
+            per_minute: 0,
+            per_day: 0,
+        });
+    }
+    Ok(pixora_core::ratelimit::DownloadLimits {
+        per_minute: policy.download_per_minute,
+        per_day: policy.download_per_day,
+    })
+}
+
+/// 下载时的文件名。
+///
+/// 扩展名取原图那一份（URL 里的 ext 也是它的），保证落盘的是一个真正的图片文件：
+/// 以前这里发的是 `{哈希}.img`，文件管理器不认、双击打不开。本人与管理员另外
+/// 拿到上传时的原始文件名；原始名可能带个人信息，对外只给哈希。
+async fn download_file_name(
+    state: &AppState,
+    blob: &pixora_repo::model::Blob,
+    original: &Option<pixora_repo::model::Blob>,
+    viewer: Option<&pixora_repo::model::User>,
+) -> Option<String> {
+    let ext = original
+        .as_ref()
+        .map(|item| item.ext.as_str())
+        .unwrap_or(blob.ext.as_str());
+    let ext = if ext.is_empty() { "img" } else { ext };
+    let short = &blob.sha256[..16.min(blob.sha256.len())];
+
+    if let Some(user) = viewer {
+        let source = original.as_ref().unwrap_or(blob);
+        let found = state
+            .repo
+            .find_live_image_for_download(source.id, Some(user.id))
+            .await
+            .ok()
+            .flatten();
+        if let Some(image) = found {
+            if let Some(name) = sanitize_file_name(&image.original_name, ext) {
+                return Some(name);
+            }
+        }
+    }
+    Some(format!("{short}.{ext}"))
+}
+
+/// 原始文件名要能安全地放进 `Content-Disposition`：去掉路径分隔符、控制字符
+/// 与引号，只留文件名本身；结果不像个名字就返回 `None`（调用方回落到哈希）。
+fn sanitize_file_name(raw: &str, ext: &str) -> Option<String> {
+    let name = raw
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control() && !"\"\\".contains(*ch))
+        .collect::<String>();
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    // 名字太长截断、没带扩展名就补上（下载下来要能认出来是什么）
+    let mut name: String = name.chars().take(120).collect();
+    let lower = name.to_ascii_lowercase();
+    if !lower.ends_with(&format!(".{}", ext.to_ascii_lowercase())) {
+        name = format!("{name}.{ext}");
+    }
+    Some(name)
+}
+
 fn apply_headers(
     response: &mut Response,
     mime: &str,
@@ -355,6 +512,7 @@ fn apply_headers(
     download: bool,
     size: i64,
     public: bool,
+    file_name: Option<&str>,
 ) {
     let headers = response.headers_mut();
     if let Ok(value) = HeaderValue::from_str(mime) {
@@ -389,14 +547,34 @@ fn apply_headers(
         );
     }
     if download {
-        if let Ok(value) = HeaderValue::from_str(&format!(
-            "attachment; filename=\"{}.{}\"",
-            &sha256[..16.min(sha256.len())],
-            if is_svg { "svg" } else { "img" }
-        )) {
+        if let Some(value) = content_disposition(
+            file_name,
+            &format!("{}.svg", &sha256[..16.min(sha256.len())]),
+        ) {
             headers.insert(header::CONTENT_DISPOSITION, value);
         }
     }
+}
+
+/// 下载响应头里的文件名。
+///
+/// 名字可能带中文或空格，所以两种写法都给：`filename=` 是给老客户端的兜底
+/// （非 ASCII 会被剥掉），`filename*=UTF-8''…` 才是规范那份（RFC 5987）。
+/// 少了后者，中文文件名下载下来会变成一串问号。
+fn content_disposition(file_name: Option<&str>, fallback: &str) -> Option<HeaderValue> {
+    let raw = file_name.unwrap_or(fallback).trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let ascii: String = raw
+        .chars()
+        .map(|ch| if ch.is_ascii() && ch != '"' && ch != '\\' { ch } else { '_' })
+        .collect();
+    let encoded = percent_encoding::utf8_percent_encode(raw, percent_encoding::NON_ALPHANUMERIC);
+    HeaderValue::from_str(&format!(
+        "attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}"
+    ))
+    .ok()
 }
 
 fn etag_header(sha256: &str) -> HeaderValue {

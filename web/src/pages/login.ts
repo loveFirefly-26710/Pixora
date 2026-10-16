@@ -17,6 +17,7 @@ import { navigate, type PageContext } from "../core/router";
 import { getState, loadMe } from "../core/state";
 import { toastError } from "../core/toast";
 import { field, qtip, textInput } from "../ui/widgets";
+import { oauthButtons, oauthErrorTip, phoneForm } from "../ui/login-methods";
 
 export async function render(ctx: PageContext): Promise<void> {
   const next = ctx.query.get("next") ?? "/";
@@ -148,6 +149,16 @@ export async function render(ctx: PageContext): Promise<void> {
     "div",
     null,
     registerRow,
+    oauthErrorTip(ctx.query.get("oauth_error")),
+    oauthButtons(site?.login_methods, "login", next),
+    phoneForm({
+      mode: "login",
+      onError: (message) => showError(step1Error, message),
+      onDone: async () => {
+        await loadMe();
+        navigate(next.startsWith("/") ? next : "/", { replace: true });
+      },
+    }),
     site && !site.registration_open
       ? qtip(
           "warn",

@@ -220,6 +220,36 @@ impl Repo {
         row.as_ref().map(Image::from_row).transpose()
     }
 
+    /// 找一条还活着的图片行，用来给「下载」取原始文件名。
+    ///
+    /// 同一个实体可能被多人引用（内容去重）：优先给请求者自己那条，
+    /// 他传的名字才是他认得的那个；没有就随便给一条活着的。
+    pub async fn find_live_image_for_download(
+        &self,
+        blob_id: i64,
+        prefer_owner: Option<i64>,
+    ) -> Result<Option<Image>> {
+        let sql = format!(
+            "SELECT {} FROM images WHERE blob_id = ? AND deleted_at IS NULL ORDER BY id LIMIT 1",
+            Image::COLUMNS
+        );
+        if let Some(owner_id) = prefer_owner {
+            let own = format!(
+                "SELECT {} FROM images WHERE blob_id = ? AND owner_id = ? AND deleted_at IS NULL ORDER BY id LIMIT 1",
+                Image::COLUMNS
+            );
+            if let Some(row) = self
+                .db
+                .fetch_optional(&own, Args::new().int(blob_id).int(owner_id))
+                .await?
+            {
+                return Ok(Some(Image::from_row(&row)?));
+            }
+        }
+        let row = self.db.fetch_optional(&sql, Args::new().int(blob_id)).await?;
+        row.as_ref().map(Image::from_row).transpose()
+    }
+
     /// 单张图的完整视图（含物理属性、相册名与标签）。
     /// 换掉一张图的缩略图实体：新的一份引用加一，旧的一份减一。
     ///

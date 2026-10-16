@@ -249,7 +249,7 @@ export async function render(ctx: PageContext): Promise<void> {
               // 只给时间：卡片上不再暴露上传者 UID（见 widgets.imageTile 的说明）
               subtitle: relativeTime(item.upload_time),
               // 预览浮层拿累加后的整份列表：翻到哪就能在浮层里前后翻到哪
-              onOpen: (clicked) => openLightbox(items, clicked, { anonymous: !user }),
+              onOpen: (clicked) => openLightbox(items, clicked),
             }),
           );
         }

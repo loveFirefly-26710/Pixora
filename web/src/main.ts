@@ -13,7 +13,6 @@ import {
   navigate,
   route,
   setNavigateHook,
-  setNotFound,
   setOutlet,
   startRouter,
 } from "./core/router";
@@ -26,9 +25,9 @@ import { toast, toastError } from "./core/toast";
 import { render as plazaPage } from "./pages/plaza";
 import { render as loginPage } from "./pages/login";
 import { render as registerPage } from "./pages/register";
+import { render as completeSignupPage } from "./pages/complete-signup";
 import { render as resetPage } from "./pages/reset-password";
 import { render as suspendedPage } from "./pages/suspended";
-import { render as notFoundPage } from "./pages/not-found";
 import { render as albumsPage } from "./pages/albums";
 import { render as albumsManagePage } from "./pages/albums-manage";
 import { render as uploadPage } from "./pages/upload";
@@ -59,6 +58,8 @@ function registerRoutes(): void {
   route("/register", registerPage);
   route("/reset-password", resetPage);
   route("/suspended", suspendedPage);
+  // 第三方登录回来时缺邮箱：补一个再建号（凭据背在 ?ticket= 上）
+  route("/complete-signup", completeSignupPage);
   route("/install", installPage);
 
   route("/albums", albumsPage, { auth: true });
@@ -91,7 +92,6 @@ function registerRoutes(): void {
   route("/admin/settings", adminSettingsPage, { auth: true, admin: true });
   route("/admin/terms", adminTermsPage, { auth: true, admin: true });
 
-  setNotFound(notFoundPage);
   setNavigateHook(() => {
     refreshNav();
     window.scrollTo({ top: 0 });

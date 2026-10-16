@@ -15,6 +15,7 @@ import { navigate, type PageContext } from "../core/router";
 import { getState, loadMe } from "../core/state";
 import { toastError } from "../core/toast";
 import { field, qtip, textInput } from "../ui/widgets";
+import { oauthButtons } from "../ui/login-methods";
 
 export async function render(ctx: PageContext): Promise<void> {
   const site = getState().site;
@@ -202,6 +203,10 @@ export async function render(ctx: PageContext): Promise<void> {
     errorBox.replaceChildren(qtip("err", null, message));
     errorBox.style.display = "";
   }
+
+  // 第三方注册：点下去走的是同一套授权，回调里没有账号就直接建一个
+  const oauth = oauthButtons(site?.login_methods, "login", "/");
+  if (oauth) form.append(oauth);
 
   ctx.outlet.append(form);
   emailInput.focus();
