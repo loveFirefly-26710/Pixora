@@ -27,7 +27,7 @@ param(
     # 服务监听端口
     [int]$Port = 18080,
     # 服务二进制路径（默认用 debug 构建产物）
-    [string]$ServerExe = "target\debug\pixora-server.exe",
+    [string]$ServerExe = "target\debug\pixora.exe",
     # 测试结束后保留临时目录，便于排查失败原因
     [switch]$KeepTemp
 )
