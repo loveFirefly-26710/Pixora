@@ -65,31 +65,21 @@ async function load(
       h("div.idmain", null, h("b", { text: "邮箱" }), badge("必需", "ok")),
       h("div.tip", { text: data.email }),
       h("div.tip", {
-        text: "邮箱是账号本身：找回密码、接收通知都靠它。可以换，但不能解绑——换邮箱在「账号信息」里。",
+        text: "邮箱 + 密码是本站的常规登录方式。邮箱是账号本身：找回密码、接收通知都靠它，可以换但不能解绑——换邮箱在「账号信息」里。",
       }),
-    ),
-    // 密码：第三方建号的账号一开始没有口令，想解绑就得先设一个
-    h(
-      "div.idrow",
-      null,
-      h(
-        "div.idmain",
-        null,
-        h("b", { text: "密码" }),
-        data.password_set ? badge("已设置", "mute") : badge("未设置", "warn"),
-      ),
-      h("div.tip", {
-        text: data.password_set
-          ? "已设置。想换密码在「密码」那张卡里改。"
-          : "这个账号是用第三方登录建的，还没设过密码。设一个之后，解绑第三方方式也进得来。",
-      }),
+      // 第三方登录建的账号一开始没有口令：想解绑第三方方式，得先能靠邮箱进来
       data.password_set
         ? null
-        : h("button.btn.sm", {
-            type: "button",
-            text: "去设置密码",
-            on: { click: () => onPasswordNeeded() },
-          }),
+        : h(
+            "div.flexline",
+            { style: { marginTop: "8px" } },
+            badge("还没设密码", "warn"),
+            h("button.btn.sm", {
+              type: "button",
+              text: "去设置密码",
+              on: { click: () => onPasswordNeeded() },
+            }),
+          ),
     ),
   ];
 
@@ -151,7 +141,9 @@ async function load(
     rows.push(h("div.idrow", null, title, detail, actions));
   }
 
-  body.replaceChildren(...rows);
+  // 等高网格：每格宽度自适应，同一行的盒子拉到一样高。「邮箱」那一格的说明
+  // 比别家长，不拉齐的话一行里高高低低，看着像没做完
+  body.replaceChildren(h("div.idgrid", null, ...rows));
 }
 
 async function unbind(provider: string, reload: () => void): Promise<void> {

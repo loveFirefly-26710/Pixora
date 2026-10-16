@@ -59,6 +59,11 @@ pub struct AutoCloseView {
     pub off: i64,
     pub register_open: bool,
     pub closed_reason: Option<String>,
+    /// 管理员手动开过注册（覆盖生效中）：占用率还挂在阈值之上，但这一层不插手。
+    /// 界面上要能说清「已超阈值、是管理员手动开的」，而不是含混地说「未超阈值」
+    pub manual_override: bool,
+    /// 占用率（百分比，一位小数）。`None` 表示算不出（总额未知或为 0）
+    pub percent: Option<f64>,
 }
 
 /// 分配明细里的一行。形状对齐 `UserRow`（契约 8.1），管理端表格复用同一渲染。
@@ -110,6 +115,9 @@ impl AppState {
         let closed_reason = self.auto_close_reason().await?;
 
         let total = capacity.total;
+        // 占用率口径与服务端的自动关闭判定一致（宿主机整盘已用 / 总额）：
+        // 界面上要能把「已超阈值」这句话说准
+        let percent = self.occupancy_percent_now().await;
         let ceiling = allocatable_ceiling(total, capacity.host_used);
         let (allocatable, allocated_percent, remaining, note) = match ceiling {
             Some(ceiling) if ceiling > 0 => (
@@ -165,6 +173,12 @@ impl AppState {
                 off: policy.off,
                 register_open,
                 closed_reason,
+                manual_override: self
+                    .settings
+                    .bool(crate::stats::KEY_AUTO_CLOSE_OVERRIDE, false)
+                    .await
+                    .unwrap_or(false),
+                percent,
             },
             top_users,
         })

@@ -168,9 +168,10 @@ export function renderNavbar(): HTMLElement {
 /**
  * 顶栏的账号区：头像 + 悬停下拉。
  *
- * 点头像直接进「账号信息」；鼠标停在头像上（或键盘 Tab 进来）展开一串去处：
- * 账号信息、我的相册、管理后台（管理员）、退出登录。退出登录从侧边栏挪到
- * 这里——它是账号级动作，和侧边栏那些「去哪一页」不是一类。
+ * 点头像直接进「我的相册」——那是日常用得最多的一页（上去就是看图的）；
+ * 鼠标停在头像上（或键盘 Tab 进来）展开一串去处：账号信息、我的相册、
+ * 管理后台（管理员）、退出登录。退出登录从侧边栏挪到这里——它是账号级动作，
+ * 和侧边栏那些「去哪一页」不是一类。
  */
 function userMenu(user: NonNullable<ReturnType<typeof getState>["user"]>): HTMLElement {
   const menu = h(
@@ -188,9 +189,9 @@ function userMenu(user: NonNullable<ReturnType<typeof getState>["user"]>): HTMLE
     h(
       "a.avatar",
       {
-        href: "#/account",
+        href: "#/albums",
         class: user.role === "admin" ? "admin" : "",
-        "aria-label": "账号",
+        "aria-label": "我的相册",
       },
       avatarNode("md"),
     ),
@@ -204,25 +205,71 @@ function userMenu(user: NonNullable<ReturnType<typeof getState>["user"]>): HTMLE
  * 上传的图是站内相对路径（或本站资产的带版本地址），外链是完整地址，
  * 两种情况 `src` 都能直接用。
  */
+/**
+ * 头像图挂了以后提过一次的地址。顶栏每次导航都会重画，不记着就会一直弹。
+ */
+const warnedAvatars = new Set<string>();
+
+/** 首字母方块：现在只剩「站点默认头像也挂了」这一档会用到。 */
+function avatarLetterNode(size: "md" | "sm"): HTMLElement {
+  const user = getState().user;
+  return h("span", {
+    class: size === "sm" ? "sm" : "",
+    text: (user?.email[0] ?? "U").toUpperCase(),
+  });
+}
+
+/**
+ * 头像加载失败时的落点：**默认头像**，而不是首字母。
+ *
+ * 顺序是「站点默认 → 内置那张」。内置那张是随前端打包的 data URI，不会再失败，
+ * 所以首字母几乎走不到——它只留给「站点把默认头像配成了一个坏地址」这种情形。
+ */
+function avatarFallbackNode(size: "md" | "sm"): HTMLElement {
+  const site = (getState().site?.default_avatar ?? "").trim();
+  // 站点没配默认头像就用内置那张：它是个 data URI，不会再失败
+  if (!site) {
+    return h("img.avatar-img", { class: size === "sm" ? "sm" : "", src: BUILTIN_AVATAR, alt: "" });
+  }
+  return h("img.avatar-img", {
+    class: size === "sm" ? "sm" : "",
+    src: site,
+    alt: "",
+    on: {
+      // 站点把默认头像也配成了坏地址：这里没有再退的余地，用首字母收尾
+      error: (event: Event) => {
+        (event.target as HTMLImageElement).replaceWith(avatarLetterNode(size));
+      },
+    },
+  });
+}
+
 export function avatarNode(size: "md" | "sm"): HTMLElement {
   const user = getState().user;
   const url = user ? avatarUrl(user) : "";
   if (user && url) {
-    return h("img.avatar-img", {
+    const node = h("img.avatar-img", {
       class: size === "sm" ? "sm" : "",
       src: url,
       alt: "",
-      // 图挂了（外链失效、路径过期）时别留一个破图标：退回首字母。
-      // 用 `on: {}` 挂监听——写成普通属性会被 setAttribute 成一段字符串
+      // 图挂了（外链失效、路径过期、对方不允许外链）时别留一个破图标：
+      // 换成默认头像，并提示一次「是哪儿出了问题」。用 `on: {}` 挂监听——
+      // 写成普通属性会被 setAttribute 成一段字符串
       on: {
         error: (event: Event) => {
           const img = event.target as HTMLImageElement;
-          img.replaceWith(h("span", { text: (user.email[0] ?? "U").toUpperCase() }));
+          // 换成默认头像（它自己再挂的话由 avatarFallbackNode 兜到首字母）
+          img.replaceWith(avatarFallbackNode(size));
+          if (!warnedAvatars.has(url)) {
+            warnedAvatars.add(url);
+            toast("头像加载失败，已改用默认头像");
+          }
         },
       },
     });
+    return node;
   }
-  return h("span", { text: (user?.email[0] ?? "U").toUpperCase() });
+  return avatarLetterNode(size);
 }
 
 /**

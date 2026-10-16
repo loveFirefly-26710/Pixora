@@ -318,7 +318,29 @@ function autoCloseCard(draft: QuotaDraft, data: QuotaAdmin): HTMLElement {
       );
       return;
     }
+    // 占用率与阈值的比较用服务端给的那个数（口径与服务端判定一致），
+    // 界面自己按 capacity 再算一遍迟早会和判定对不上
+    const percent = data.auto_close.percent;
+    const overThreshold = percent != null && percent >= Number(draft.autoOn.value);
     if (data.auto_close.register_open) {
+      if (overThreshold || data.auto_close.manual_override) {
+        // 「已超阈值但注册是开的」只有一种情形：管理员手动开过，这一层让位
+        mount(
+          state,
+          qtip(
+            "warn",
+            "当前状态：注册开放（你手动开启的）",
+            h(
+              "span",
+              null,
+              `${usedText}，已超过 ${draft.autoOn.value}% 触发阈值，但注册是你手动打开的，自动关闭不会把它按回去。`,
+              h("br"),
+              `占用降到 ${draft.autoOff.value}% 以下、之后再涨过 ${draft.autoOn.value}% 时，才会重新触发自动关闭。`,
+            ),
+          ),
+        );
+        return;
+      }
       mount(
         state,
         qtip(
