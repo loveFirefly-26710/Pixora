@@ -54,6 +54,11 @@ pub async fn oauth_start(
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_else(|| "login".to_string());
     let next = query.get("next").cloned().unwrap_or_else(|| "/".to_string());
+    // 扫码登录用：授权页嵌在 iframe 里，回调时改带走顶层窗口
+    let embed = query
+        .get("embed")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     let Some(client) = (match state.get_oauth_client(&provider_name).await {
         Ok(client) => client,
@@ -87,7 +92,7 @@ pub async fn oauth_start(
         bind_user_id = Some(auth.user.id);
     }
 
-    let oauth_state = match state.new_state(&provider_name, &mode, &next, bind_user_id) {
+    let oauth_state = match state.new_state(&provider_name, &mode, &next, bind_user_id, embed) {
         Ok(value) => value,
         Err(err) => return error_response(err),
     };
@@ -188,13 +193,26 @@ pub async fn oauth_callback(
             } else {
                 oauth_state.next
             };
-            with_cookies(redirect(&target), cookies)
+            let response = if oauth_state.embed {
+                // 扫码走的 iframe：它自己停在对方页面上，把顶层窗口带去目标地址
+                html_redirect(&target)
+            } else {
+                redirect(&target)
+            };
+            with_cookies(response, cookies)
         }
         // 没拿到邮箱：回前端补一个，令牌背着「哪个平台的哪个身份」
-        Ok(OAuthOutcome::NeedEmail(ticket)) => redirect(&format!(
-            "/#/complete-signup?ticket={}&provider={provider_name}",
-            urlencode(&ticket)
-        )),
+        Ok(OAuthOutcome::NeedEmail(ticket)) => {
+            let target = format!(
+                "/#/complete-signup?ticket={}&provider={provider_name}",
+                urlencode(&ticket)
+            );
+            if oauth_state.embed {
+                html_redirect(&target)
+            } else {
+                redirect(&target)
+            }
+        }
         Err(err) => fail_redirect(err.message().as_str()),
     }
 }
@@ -473,6 +491,36 @@ fn redirect(target: &str) -> Response {
             response
         }
     }
+}
+
+/// 在 iframe 里完成的登录：返回一小段 HTML，把**顶层窗口**带去目标地址。
+///
+/// 直接 302 的话，跳转只会发生在 iframe 里——用户看到的是一张站内页面被塞进
+/// 一小块框里。扫码登录（微信/QQ）必须走这条路。
+fn html_redirect(target: &str) -> Response {
+    // 目标地址来自签名 state（只允许站内相对路径），这里仍然按 JS 字符串与
+    // HTML 属性两套规则各转义一次：少一处就是一个能塞脚本的洞
+    let js = serde_json::to_string(target).unwrap_or_else(|_| "\"/\"".to_string());
+    let attr = target
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    let body: String = [
+        "<!doctype html><meta charset=\"utf-8\"><title>登录完成</title>",
+        "<script>window.top.location.replace({js});</script>",
+        "<p style=\"font-family:system-ui;padding:24px\">",
+        "登录完成，如果没有自动跳转，请<a href=\"{attr}\">点这里</a>。</p>",
+    ]
+    .join("")
+    .replace("{js}", &js)
+    .replace("{attr}", &attr);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// 回调出错：跳回登录页并带上原因，让人看得见发生了什么。

@@ -342,7 +342,7 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     h(
       "div.cardflow",
       null,
-      siteCard(draft),
+      siteCard(draft, data),
       sessionCard(draft),
       uploadCard(draft, data, rate, rateDraft),
       apiRateCard(rateDraft),
@@ -381,7 +381,7 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
 }
 
 /** 站点：基础 URL、名称与三个开关。 */
-function siteCard(draft: SettingsDraft): HTMLElement {
+function siteCard(draft: SettingsDraft, data: AdminSettings): HTMLElement {
   return cardNode(
     cardHead("站点"),
     field("基础 URL", draft.baseUrl, "直链与邮件里的链接都以它为前缀，末尾不要带斜杠"),
@@ -402,9 +402,32 @@ function siteCard(draft: SettingsDraft): HTMLElement {
     switchRow("拒绝游客上传", "上传必须登录", draft.requireLogin, (next) => {
       draft.requireLogin = next;
     }),
-    switchRow("允许用户注册", "关闭后只能由管理员创建账号", draft.registerEnabled, (next) => {
-      draft.registerEnabled = next;
-    }),
+    switchRow(
+      "允许用户注册",
+      data.site.register_auto_closed
+        ? "关闭后只能由管理员创建账号（当前由容量阈值自动关闭）"
+        : "关闭后只能由管理员创建账号",
+      draft.registerEnabled,
+      (next) => {
+        draft.registerEnabled = next;
+      },
+    ),
+    // 开关被自动关闭替管理员翻过时，把原因写在旁边：
+    // 不解释一句，管理员只会看到「开关自己关了」而不知道怎么恢复
+    data.site.register_auto_closed
+      ? qtip(
+          "warn",
+          "注册已被容量自动关闭",
+          (data.site.register_closed_reason ?? "占用率超过了触发阈值") +
+            "。把上面的开关重新打开即可恢复注册——你的手开会优先，容量恢复到恢复阈值以下之前不会再被自动关闭。",
+        )
+      : data.site.register_auto_close_override
+        ? qtip(
+            "info",
+            "容量自动关闭暂时不生效",
+            "你手动打开过注册，占用率回到恢复阈值以下之前，这项策略不会再自动关它。",
+          )
+        : null,
     field(
       "允许注册的邮箱域名",
       draft.emailDomains,

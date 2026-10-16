@@ -48,6 +48,10 @@ pub struct OAuthState {
     pub nonce: String,
     /// 发起绑定的人（`mode = bind` 时必须对上当前会话）
     pub user_id: Option<i64>,
+    /// 是不是在页面里的 iframe 里走的（扫码登录）：回调时要把**顶层窗口**
+    /// 带走，而不是让 iframe 自己跳到站内页面上
+    #[serde(default)]
+    pub embed: bool,
     pub expires_at: String,
 }
 
@@ -249,13 +253,21 @@ impl AppState {
     }
 
     /// 新的 `state`：带随机数、带过期时间，模式只有两种。
-    pub fn new_state(&self, provider: &str, mode: &str, next: &str, user_id: Option<i64>) -> Result<OAuthState> {
+    pub fn new_state(
+        &self,
+        provider: &str,
+        mode: &str,
+        next: &str,
+        user_id: Option<i64>,
+        embed: bool,
+    ) -> Result<OAuthState> {
         Ok(OAuthState {
             provider: provider.to_string(),
             mode: mode.to_string(),
             next: sanitize_next(next),
             nonce: pixora_crypto::token::new_session_token()?,
             user_id,
+            embed,
             expires_at: (Utc::now() + Duration::minutes(STATE_TTL_MINUTES)).to_rfc3339(),
         })
     }

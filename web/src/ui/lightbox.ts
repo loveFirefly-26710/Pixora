@@ -29,6 +29,12 @@ const MIN_SCALE = 1;
 const MAX_SCALE = 5;
 /** 下拉关闭的距离阈值（像素） */
 const PULL_THRESHOLD = 90;
+/**
+ * 拖到边时至少留多少像素的图像还在舞台里。
+ *
+ * 只防「拖没了」：再往里拖就到头了，不会出现一张图被拖出视野、只剩黑底的情况。
+ */
+const KEEP_VISIBLE = 140;
 
 /**
  * 打开浮层。`items` 是当前筛选结果，`current` 是点开的那一张。
@@ -98,16 +104,19 @@ export function openLightbox(
   }
 
   /**
-   * 把偏移夹在「图片还能盖住舞台」的范围内。
+   * 夹住偏移：只要保证「还有一块图像留在舞台里」，别把它拖没了。
+   *
+   * 早先按「内容是否超出舞台」逐轴夹紧，结果是竖图放大后宽度仍小于舞台宽度，
+   * 横向完全拖不动——用户看到的就是「只能上下拖」。现在两个方向一律可拖，
+   * 边界只用来防止拖到什么都看不见。
    *
    * 用布局尺寸（`offsetWidth`，不受 transform 影响）而不是 `getBoundingClientRect`：
-   * 后者已经把缩放算进去了，拿它来算范围会把边界算错。1× 时最大偏移是 0，
-   * 也就是没放大就拖不动——这正是想要的。
+   * 后者已经把缩放算进去了，拿它算边界会算错。
    */
   function clampOffsets(): void {
     const box = stage.getBoundingClientRect();
-    const maxX = Math.max(0, (image.offsetWidth * scale - box.width) / 2);
-    const maxY = Math.max(0, (image.offsetHeight * scale - box.height) / 2);
+    const maxX = Math.max(0, (image.offsetWidth * scale + box.width) / 2 - KEEP_VISIBLE);
+    const maxY = Math.max(0, (image.offsetHeight * scale + box.height) / 2 - KEEP_VISIBLE);
     offsetX = Math.min(maxX, Math.max(-maxX, offsetX));
     offsetY = Math.min(maxY, Math.max(-maxY, offsetY));
   }

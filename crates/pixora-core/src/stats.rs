@@ -31,6 +31,21 @@ pub const KEY_AUTO_CLOSE_ENABLED: &str = "register.auto_close_enabled";
 
 /// 自动关闭的闩锁：「上一步已经因为触顶关掉了」。只在翻转时写。
 pub const KEY_AUTO_CLOSED: &str = "register.auto_closed";
+/// 管理员手动重开过注册：容量恢复到恢复阈值以下之前，自动关闭不再插手。
+/// 与 `auto_closed`（闩锁）成对：闩锁记「现在是不是我们关的」，这一项记
+/// 「我们关过、但管理员又开回来了，别跟他抢」。
+pub const KEY_AUTO_CLOSE_OVERRIDE: &str = "register.auto_close_override";
+
+/// 「此刻的关闭是我们替他关的」。
+///
+/// 与闩锁成对存在：闩锁说明「现在是关闭态」，这一项说明「所以开关是我们翻的」。
+/// 只有它立着时，容量恢复后才会把系统设置里的注册开关还回去——管理员自己关的
+/// 不算，那是他的意思，容量恢复了也不该自动替他打开。
+pub const KEY_AUTO_CLOSE_OWNED: &str = "register.auto_close_owned";
+
+/// 注册关闭时面向访客的那句话。具体口径（占用多少、阈值多少、什么时候恢复）
+/// 只在管理端出现，不上面向公众的页面。
+pub const PUBLIC_CLOSED_REASON: &str = "注册入口已暂停，重新开放时间待定";
 
 /// 自动关闭注册的配置：总开关 + 触发/恢复阈值。
 #[derive(Debug, Clone, Copy)]
@@ -423,11 +438,19 @@ impl AppState {
     /// 返回原因而不是布尔，是因为注册页要整页替换成说明文案：
     /// 「已注册用户不受影响、什么时候可能恢复」这两句必须由服务端给准话。
     pub async fn register_open(&self) -> Result<(bool, Option<String>)> {
-        if !self.settings.bool(keys::REGISTER_ENABLED, true).await? {
-            return Ok((false, Some("管理员已关闭注册入口".into())));
+        let enabled = self.settings.bool(keys::REGISTER_ENABLED, true).await?;
+        let latched = self.settings.bool(KEY_AUTO_CLOSED, false).await?;
+        // 开关关着、闩锁也没立：管理员自己关的，不用跑容量判定。
+        // 闩锁立着时即便开关是关的也要跑一次——那种关闭是我们替他关的，
+        // 占用恢复后要自动还回去
+        if !enabled && !latched {
+            return Ok((false, Some(PUBLIC_CLOSED_REASON.to_string())));
         }
         match self.auto_close_reason().await? {
-            Some(reason) => Ok((false, Some(reason))),
+            // 对外只说「暂停了」，不说为什么、也不承诺什么时候恢复：占用率、阈值
+            // 这些是运维口径，摆在注册页上对访客没有任何用处，还会天天变。
+            // 管理员要看的是详细那句，走 `auto_close_reason`（配额页）
+            Some(_) => Ok((false, Some(PUBLIC_CLOSED_REASON.to_string()))),
             None => Ok((true, None)),
         }
     }
@@ -452,10 +475,38 @@ impl AppState {
         let (basis, scope) = occupancy_basis(&capacity);
         let percent = occupancy_percent(basis, total);
         let latched = self.settings.bool(KEY_AUTO_CLOSED, false).await?;
+        let overridden = self.settings.bool(KEY_AUTO_CLOSE_OVERRIDE, false).await?;
+        let owned = self.settings.bool(KEY_AUTO_CLOSE_OWNED, false).await?;
+
+        // 管理员手动动过注册开关：容量回到恢复阈值以下之前，这一层不插手。
+        // 优先级最高的始终是管理员——自动关闭是他自己开的策略，不能反过来
+        // 跟他抢开关
+        if overridden {
+            if percent > policy.off as f64 {
+                return Ok(None);
+            }
+            // 占用恢复，覆盖功成身退。开关保持管理员当下的样子，我们不再碰它
+            self.settings.set_bool(KEY_AUTO_CLOSE_OVERRIDE, false).await?;
+            self.settings.set_bool(KEY_AUTO_CLOSED, false).await?;
+            self.settings.set_bool(KEY_AUTO_CLOSE_OWNED, false).await?;
+            return Ok(None);
+        }
+
         let closed = auto_close_decision(percent, policy.on, policy.off, latched);
         if closed != latched {
             // 每次注册与每次打开管理页都会走到这里，只在翻转时落库
             self.settings.set_bool(KEY_AUTO_CLOSED, closed).await?;
+            if closed {
+                // 关：系统设置里那个注册开关跟着翻成关闭——管理员在设置页看到的
+                // 必须与真实状态一致，否则「开关是开的、注册却关了」会让人以为
+                // 前端坏了。记一笔「是我们关的」，恢复时才还回去
+                self.settings.set_bool(keys::REGISTER_ENABLED, false).await?;
+                self.settings.set_bool(KEY_AUTO_CLOSE_OWNED, true).await?;
+            } else if owned {
+                // 开：只还我们自己关过的那一次；管理员自己关的不算
+                self.settings.set_bool(keys::REGISTER_ENABLED, true).await?;
+                self.settings.set_bool(KEY_AUTO_CLOSE_OWNED, false).await?;
+            }
             tracing::info!(
                 percent,
                 scope,
@@ -674,7 +725,9 @@ mod tests {
         let (open, reason) = state.register_open().await.expect("注册状态");
         assert!(!open);
         let reason = reason.expect("关闭必须带原因");
-        assert!(reason.contains("管理员"), "{reason}");
+        // 对外只说「暂停 + 时间待定」：是管理员关的还是容量关的，不告诉访客
+        assert!(reason.contains("暂停"), "{reason}");
+        assert!(reason.contains("时间待定"), "{reason}");
     }
 
     #[tokio::test]
@@ -690,9 +743,25 @@ mod tests {
         let (open, reason) = state.register_open().await.expect("注册状态");
         assert!(!open, "占用 90% 应该自动关闭注册");
         let reason = reason.expect("自动关闭要带原因");
-        assert!(reason.contains("90"), "{reason}");
-        assert!(reason.contains("本项目"), "手填总额时占用口径是本项目：{reason}");
-        assert!(reason.contains("不受影响"), "说明要讲清已注册用户不受影响：{reason}");
+        // 对外那句话不带口径；详细口径只在管理端（配额页）出现
+        assert!(reason.contains("时间待定"), "{reason}");
+        let detail = state
+            .auto_close_reason()
+            .await
+            .expect("详细原因")
+            .expect("自动关闭时应当有详细原因");
+        assert!(detail.contains("90"), "{detail}");
+        assert!(detail.contains("本项目"), "手填总额时占用口径是本项目：{detail}");
+        assert!(detail.contains("不受影响"), "说明要讲清已注册用户不受影响：{detail}");
+        // 系统设置里的注册开关跟着翻成关闭：管理员在设置页看到的必须与真实状态一致
+        assert!(
+            !state
+                .settings
+                .bool(keys::REGISTER_ENABLED, true)
+                .await
+                .expect("读注册开关"),
+            "自动关闭要顺手把系统设置里的注册开关关掉"
+        );
 
         // 950 / 1000 = 95%：占用继续涨，仍然是关闭态
         let second = add_blob(&state, "a2", 50).await;
@@ -715,6 +784,72 @@ mod tests {
         let (open, reason) = state.register_open().await.expect("注册状态");
         assert!(open, "跌破恢复阈值要自动重开");
         assert!(reason.is_none());
+        // 自动恢复时把开关还回去（当初是我们替他关的）
+        assert!(
+            state
+                .settings
+                .bool(keys::REGISTER_ENABLED, true)
+                .await
+                .expect("读注册开关"),
+            "自动重开要把注册开关还原成打开"
+        );
+    }
+
+    /// 管理员手开优先：自动关闭关掉注册之后，管理员重新打开注册，占用率
+    /// 还挂在阈值以上也不该再被自动关回去；等他手开之后，那句「开关为什么
+    /// 自己关了」的解释也就换成「策略暂时不生效」。
+    #[tokio::test]
+    async fn manual_reopen_beats_auto_close_until_capacity_recovers() {
+        let (state, _dir) = test_state().await;
+        use_manual_capacity(&state, 1000).await;
+        let c1 = add_blob(&state, "c1", 950).await;
+
+        // 占用 95%：自动关闭接管，开关被翻成关闭
+        assert!(!state.register_open().await.expect("注册状态").0);
+        assert!(!state
+            .settings
+            .bool(keys::REGISTER_ENABLED, true)
+            .await
+            .expect("读注册开关"));
+
+        // 管理员手动打开：开关开了、注册也开了
+        state
+            .settings
+            .set_bool(keys::REGISTER_ENABLED, true)
+            .await
+            .expect("手动打开注册");
+        state
+            .settings
+            .set_bool(KEY_AUTO_CLOSE_OVERRIDE, true)
+            .await
+            .expect("立起覆盖标记");
+        let (open, _) = state.register_open().await.expect("注册状态");
+        assert!(open, "管理员手开之后注册要开着");
+        assert!(
+            state.auto_close_reason().await.expect("自动关闭判定").is_none(),
+            "管理员手开期间，自动关闭不再插手"
+        );
+
+        // 占用继续涨到 98%：仍然不抢开关
+        let c2 = add_blob(&state, "c2", 30).await;
+        assert!(
+            state.register_open().await.expect("注册状态").0,
+            "管理员手开优先：占用再高也不自动关回去"
+        );
+
+        // 占用回到 50%：覆盖标记功成身退，之后的判定重新生效
+        state.repo.delete_blob(c2).await.expect("删 blob");
+        state.repo.delete_blob(c1).await.expect("删 blob");
+        add_blob(&state, "c4", 500).await;
+        assert!(state.register_open().await.expect("注册状态").0);
+        assert!(
+            !state
+                .settings
+                .bool(KEY_AUTO_CLOSE_OVERRIDE, false)
+                .await
+                .expect("读覆盖标记"),
+            "容量恢复之后覆盖标记要清掉"
+        );
     }
 
     #[tokio::test]
