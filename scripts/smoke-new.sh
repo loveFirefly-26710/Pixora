@@ -130,11 +130,26 @@ else
 fi
 
 say "管理员手动打开注册：自动关闭不再抢开关"
+# 这一节验的是「占用超阈值时管理员手开，自动关闭不再插手」。开发机磁盘常年
+# 九成满，阈值默认就超；CI 的机器往往没满，所以先把阈值压到「此刻必然超出」：
+# 触发阈值 1%、恢复阈值 0%——占用一旦高于 0 就不满足「恢复到阈值以下」，
+# 覆盖标记不会被清理，断言与机器无关
+out=$(req PUT /admin/quota '{"auto_close_enabled":true,"auto_close_on":1,"auto_close_off":0}')
+# 配额保存回的是整页生效值（与 GET 同形状），不是 {"ok":true}
+expect "把阈值压到此刻必然超出" '"off":0' "$out"
 out=$(req PUT /admin/settings '{"site":{"register_enabled":true}}')
 expect "手动打开注册" '"ok":true' "$out"
 out=$(req GET /admin/settings)
 expect "注册开关已是打开" '"register_enabled":true' "$out"
-expect "覆盖标记立起来了" '"register_auto_close_override":true' "$out"
+# 覆盖标记只在「占用高于恢复阈值」时需要立着：它的作用是压住自动关闭，
+# 占用本来就是 0 时按设计会立刻清掉（没有什么要压的）。所以这里如实分两路断言，
+# 免得把机器磁盘占用写进断言里
+PERCENT=$(printf '%s' "$out" | jq_get "['site']['register_auto_close']['percent']")
+if awk "BEGIN{exit !(${PERCENT:-0} > 0)}"; then
+  expect "覆盖标记立起来了（当前占用 ${PERCENT}%）" '"register_auto_close_override":true' "$out"
+else
+  ok "当前占用 0%，覆盖标记按设计即刻清掉"
+fi
 if printf '%s' "$out" | grep -q '"register_auto_closed":true'; then
   bad "手动打开后不该还被闩锁关着" "$out"
 else
@@ -145,7 +160,7 @@ expect "站点信息里注册已开放" '"registration_open":true' "$out"
 
 # 这台机器的磁盘常年九成满，注册入口会被容量阈值自动关掉；这一节要验的是
 # 收件域名那一关，先把容量自动关闭关掉，免得它先拦下来（顺带也验了这条开关）
-out=$(req PUT /admin/quota '{"auto_close_enabled":false}')
+out=$(req PUT /admin/quota '{"auto_close_enabled":false,"auto_close_on":90,"auto_close_off":80}')
 expect "关掉容量触顶自动关闭（保存回传整页生效值）" '"capacity"' "$out"
 out=$(req POST /auth/register/code '{"email":"someone@example.com"}')
 if printf '%s' "$out" | grep -q '不收邮件\|判断不了\|解析'; then

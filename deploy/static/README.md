@@ -50,12 +50,28 @@ PIXORA_CORS_ORIGINS=https://pixora.vercel.app,https://pixora.pages.dev
 window.__PIXORA__ = { api_base: "https://img-api.example.com" };
 ```
 
+## GitHub Pages 与 Cloudflare Pages 的回落差别
+
+两者的 SPA 回落机制正好相反，混起来会踩坑：
+
+- **Cloudflare Pages**：产物里没有 `404.html` 时，没命中静态文件的路径会**自动**回
+  `index.html`（200）。所以什么都别做；一旦放了 `404.html`，它就按真 404 处理。
+- **GitHub Pages**：没有自动回落，靠 `404.html`。做法是把它做成 `index.html` 的副本——
+  陌生路径会命中这个 404 页面，但页面内容还是前端本体，哈希路由照常接管。
+  仓库里的工作流只在发 Pages 时才做这一步。
+- **EdgeOne Makers**：`edgeone.json` 里 `{"source":"/*","destination":"/index.html"}`
+  这条 rewrite 就是回落，静态资源优先命中，不用额外文件。
+- **Vercel**：`vercel.json` 的 `rewrites` 里那条排除 `/api/` 的规则负责回落。
+
+另外 GitHub Pages 的项目站点挂在 `/<仓库名>/` 子路径下，而前端产物引用的是绝对路径
+（`/main.js`、`/config.js`），子路径会 404——要么绑自定义域名，要么把仓库命名为
+`<用户名>.github.io` 发到根路径。
+
 ## 别忘了
 
 - **产物里带上 `config.js`**：它默认是空对象（同源），跨域部署时没有它前端会去静态托管
   那边找接口。仓库里的 GitHub Actions（`.github/workflows/frontend.yml`）会自动写好。
-- **`main.js` 这类文件名没有内容哈希**，所以要 `no-cache`（`_headers` 与 `vercel.json`
-  里都配好了）。给它们长缓存会让用户一直拿到旧 bundle。
-- **SPA 回落**：`/#/albums` 这种带哈希的地址本来就不需要服务端配合；不带哈希的深链
-  （比如 `/images131231` 这种陌生路径，会被前端接住并跳去广场）需要服务端把未知路径
-  回落到 `index.html`——三个平台的配置里都已经写好了。
+- **`main.js` 这类文件名没有内容哈希**，所以要 `no-cache`（`_headers`、`vercel.json`
+  与 `edgeone.json` 里都配好了）。给它们长缓存会让用户一直拿到旧 bundle。
+- **别忘了配域名**：绑定自定义域名之后，跨域模式要把它加进后端的 `PIXORA_CORS_ORIGINS`，
+  否则浏览器拿不到会话。

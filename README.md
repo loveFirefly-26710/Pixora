@@ -2,6 +2,7 @@
 
 自托管的图片托管服务。浏览器算哈希、生成缩略图、排队上传，服务端只管存与发；
 PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，一台 1C1G 的小机器就能跑。
+可以整栈放一台机器，也可以前端上 CDN、后端留在小机器上——[部署](#部署)一节把四条路都写全了。
 
 ![广场](docs/screenshots/plaza.webp)
 
@@ -64,15 +65,17 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 
 ## 部署
 
-先选两条路里的一条：
+三条路，看你手上有什么：
 
-| 你想要的 | 走哪条 | 数据放哪 |
-|---|---|---|
-| 一个域名、一台机器、最省心 | [Docker Compose](#docker-compose推荐) 或 [单二进制](#单二进制) | 本地目录 + SQLite |
-| 前端交给 CDN、数据库和图片放云上 | [前后端分开部署](#前后端分开部署) | 云数据库 + 对象存储 |
+| 场景 | 走哪条 | 前端在哪 | 数据在哪 |
+|---|---|---|---|
+| 一台机器、一个域名，最省心 | [Docker Compose](#docker-compose推荐) | 同一台机器（嵌在二进制里） | 本地目录 + SQLite |
+| 已经有一台服务器，不想装 Docker | [单二进制 + systemd](#单二进制与-systemd) | 同上 | 本地目录 + 数据库 |
+| 前端想上 CDN、数据想放云上 | [前后端分开部署](#前后端分开部署) | Vercel / Cloudflare / EdgeOne / GitHub Pages | 云数据库 + 对象存储 |
 
-不管你选哪条，第一次打开都会进安装向导：环境检查 → 数据库 → 管理员 → 站点与邮件。
-向导结束前没有任何账号能登录，所以先装后配是安全的。
+三条路的后端是同一个二进制，配置也同一套。第一次打开都会进安装向导
+（环境检查 → 数据库 → 管理员 → 站点与邮件）：向导结束前没有任何账号能登录，
+所以「先起服务、再慢慢配」是安全的。
 
 ### 环境要求
 
@@ -83,14 +86,107 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 
 ### Docker Compose（推荐）
 
-`deploy/` 里是一套完整编排：应用 + PostgreSQL + Caddy（自动申请证书）。
+`deploy/` 里是一套完整编排：应用 + PostgreSQL + Caddy（自动申请证书、自动续期）。
+下面这份与仓库里的 `deploy/docker-compose.yml` 一致，可以直接抄：
 
-```bash
-git clone <本仓库> pixora && cd pixora/deploy
-cp .env.example .env
+```yaml
+services:
+  pixora:
+    # 本地构建（默认）。用 CI 推上来的镜像就删掉 build 两行，改成：
+    #   image: ghcr.io/<你的 GitHub 用户名>/pixora:latest
+    image: pixora:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      # 想让这份镜像里的前端指向别的后端时给这个参数：
+      # args: { PIXORA_API_BASE: "https://img-api.example.com" }
+    restart: unless-stopped
+    environment:
+      PIXORA_DB_DRIVER: ${PIXORA_DB_DRIVER:-postgres}
+      PIXORA_DB_DSN: ${PIXORA_DB_DSN:-postgres://pixora:${POSTGRES_PASSWORD}@db:5432/pixora}
+      PIXORA_DATA_DIR: /data
+      # 主密钥：用于加密存储后端凭据与 SMTP 密码。生产环境必须显式注入，
+      # 换掉它等于让已加密的凭据全部失效（要重新填一遍）。
+      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?必须设置 PIXORA_MASTER_KEY}
+      # 反向代理后面必须显式设置，否则直链地址会变成容器内网地址
+      PIXORA_BASE_URL: ${PIXORA_BASE_URL:-}
+      # 只信最靠近服务端的一层代理，防止客户端伪造 X-Forwarded-For 绕过 IP 黑名单
+      PIXORA_TRUST_PROXY: "1"
+      # 想让反向代理直接发文件（零拷贝）时打开，并同步配置 Caddyfile 的
+      # 内部路径与来源限制；默认关闭是因为 Caddy 没有 nginx internal 的等价物，
+      # 直接把 CAS 目录暴露成公开路径会绕过私有图片的访问判断。
+      # PIXORA_ACCEL_PREFIX: /data-files
+      PIXORA_WORKERS: ${PIXORA_WORKERS:-4}
+      # 前后端分开部署（前端在 Vercel / Cloudflare Pages / EdgeOne）时填前端来源，
+      # 逗号分隔；留空即前后端同源，一个跨域头都不发。见 README 的部署一节
+      PIXORA_CORS_ORIGINS: ${PIXORA_CORS_ORIGINS:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./data:/data
+    expose:
+      - "8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { memory: 128M }
+        reservations: { memory: 64M }
+    healthcheck:
+      test: ["CMD", "/pixora", "--health-probe"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command: >
+      postgres -c shared_buffers=64MB -c work_mem=4MB
+               -c max_connections=50 -c effective_cache_size=128MB
+    environment:
+      POSTGRES_DB: pixora
+      POSTGRES_USER: pixora
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pixora -d pixora"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits: { memory: 200M }
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?必须设置域名，Caddy 用它申请证书}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 只读挂载数据目录：Caddy 靠 X-Accel-Redirect 直接发文件
+      - ./data:/srv/data:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - pixora
+    deploy:
+      resources:
+        limits: { memory: 48M }
+
+volumes:
+  caddy_data:
+  caddy_config:
 ```
 
-至少要改这三行：
+配套的 `.env`（`cp .env.example .env` 之后至少改这三行）：
 
 ```dotenv
 PIXORA_DOMAIN=img.example.com          # 你的域名，Caddy 用它申请证书
@@ -106,29 +202,79 @@ docker compose up -d
 docker compose logs -f pixora    # 看到「Pixora 已启动」就可以打开域名了
 ```
 
+三个服务的内存上限加起来 376M，给系统留了余量，整栈压在 500MB 预算之内。
 镜像可以自己构建（构建阶段要编一整套 musl 静态二进制，第一次会慢一些，之后有层缓存），
-也可以直接用 CI 推上来的：
-
-```yaml
-# docker-compose.yml
-services:
-  pixora:
-    image: ghcr.io/<你的用户名>/pixora:latest   # 删掉原来的 build 两行
-```
-
-省内存的两种改法（都写进了 `deploy/docker-compose.yml` 的注释）：
-
-- **换 SQLite**：删掉 `db` 服务与 `depends_on`，`PIXORA_DB_DRIVER=sqlite`、`PIXORA_DB_DSN=/data/pixora.db`，整栈 80MB 以内。
-- **换托管数据库**：同样删掉 `db`，把 `PIXORA_DB_DRIVER` 与 `PIXORA_DB_DSN` 指向那台实例（连接串要带 SSL 参数）。
-
-不带 Caddy 也可以：把 `caddy` 服务删掉，加上 `ports: ["8080:8080"]`，自己用 Nginx 或 Cloudflare 隧道接。
-
-### 单二进制
-
-`deploy/` 目录之外，从 [Releases](../../releases) 下载对应平台的文件解压即用，没有运行时依赖。
+也可以直接用 CI 推上来的那份：
 
 ```bash
-# Linux（静态链接，任何发行版都能跑）
+docker pull ghcr.io/lovefirefly-26710/pixora:latest   # 换成你自己的用户名
+```
+
+#### 只跑 SQLite 的最小编排
+
+一台小机器、不想另起数据库进程时用这份（整栈 80MB 以内）。它把 Caddy 也省了，
+直接开 8080 端口，前后端都由这一个容器发。
+
+```yaml
+# docker-compose.yml（放在一个空目录里，旁边建 ./data）
+services:
+  pixora:
+    image: ghcr.io/lovefirefly-26710/pixora:latest
+    restart: unless-stopped
+    environment:
+      PIXORA_DB_DRIVER: sqlite
+      PIXORA_DB_DSN: /data/pixora.db
+      PIXORA_DATA_DIR: /data
+      PIXORA_BASE_URL: https://img.example.com   # 有反代就填域名，没有就填 http://机器IP:8080
+      PIXORA_BIND: 0.0.0.0:8080
+      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?必须设置}
+      RUST_LOG: info
+    volumes:
+      - ./data:/data
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        limits: { memory: 96M }
+```
+
+```bash
+mkdir -p data
+printf 'PIXORA_MASTER_KEY=%s\n' "$(openssl rand -hex 32)" > .env
+docker compose up -d
+```
+
+想换成托管数据库（Neon / Supabase / RDS / 云厂商 MySQL）时，只改这两行，不碰编排结构：
+
+```dotenv
+PIXORA_DB_DRIVER=postgres
+PIXORA_DB_DSN=postgres://user:pass@ep-xxx-pooler.region.aws.neon.tech/pixora?sslmode=require
+```
+
+#### 不用 Caddy 的几种接法
+
+- **直接开端口**：把 `caddy` 服务删掉，给 `pixora` 加 `ports: ["8080:8080"]`，
+  `PIXORA_BASE_URL` 填 `http://你的IP:8080`。适合内网或先跑通再说。
+  注意此时 `PIXORA_SECURE_COOKIES` 默认是关的（没有 https），别在公网上这么裸奔。
+- **Nginx / 宝塔 / 其它反代**：见下面的 [Nginx 例子](#单二进制与-systemd)，
+  照抄那段 `location /` 即可，注意 `client_max_body_size` 要略大于单文件上限。
+- **Cloudflare Tunnel**（没有公网 IP 也能上 https）：
+
+  ```bash
+  # 在 Cloudflare Zero Trust 里建一个隧道，拿到 token 后：
+  docker run -d --name cf-tunnel --network host --restart unless-stopped \
+    cloudflare/cloudflared:latest tunnel --no-autoupdate run --token <你的隧道TOKEN>
+  ```
+
+  隧道的 Public Hostname 指到 `http://127.0.0.1:8080`，`PIXORA_BASE_URL` 填隧道绑的域名。
+
+### 单二进制与 systemd
+
+从 [Releases](../../releases) 下载对应平台的文件解压即用，没有运行时依赖。
+Linux 那份是静态链接（musl），Alpine、群晖、老 CentOS 上都能跑。
+
+```bash
+# Linux
 tar -xzf pixora-v0.1.0-linux-x86_64.tar.gz && cd pixora
 PIXORA_BASE_URL=http://你的域名或IP:8080 ./pixora
 ```
@@ -169,7 +315,12 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-前面挂一个 Nginx 反代（Caddy 的配置见 `deploy/Caddyfile`）：
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now pixora
+journalctl -u pixora -f          # 看日志
+```
+
+前面挂一个 Nginx 反代（Caddy 的配置见 `deploy/Caddyfile`，比这段更短）：
 
 ```nginx
 server {
@@ -191,47 +342,242 @@ server {
 它表示「只信最靠近服务端的一层代理」，设成更大的值等于让客户端伪造
 `X-Forwarded-For` 绕过 IP 黑名单。
 
-### 前后端分开部署
+Windows 上想开机自启，用 `sc.exe` 或 [NSSM](https://nssm.cc/) 把它注册成服务，
+环境变量写进服务配置里即可；数据目录记得给足权限。
 
-前端其实是一堆静态文件（`web/dist`），后端才是那个 Rust 进程。两者可以分开：
-前端交给 Vercel / Cloudflare Pages / EdgeOne Makers 这类静态托管，后端放在任何能跑
-容器或二进制的地方。有两种接法。
+### 从源码构建
 
-**接法一：边缘反代（推荐）**。让平台把 `/api/*` 和直链转发给后端，浏览器眼里只有一个源，
-于是不用配跨域、会话也是第一方 Cookie。
+需要 Rust stable 与 Node 20+。**前端要先构建**：它的产物会被 `rust-embed` 嵌进二进制，
+仓库里提交了一份（所以全新克隆可以直接 `cargo build`），改了前端就得重新构建再编 Rust。
 
-- Vercel：在 `vercel.json` 的 `rewrites` 里加一条（把 `deploy/static/vercel.json` 一起用）：
-  ```json
-  { "source": "/api/:path*", "destination": "https://img-api.example.com/api/:path*" }
-  ```
-- Cloudflare：用 `deploy/static/worker-proxy.js`（Workers + 静态资源绑定，文件头有部署命令）。
-- EdgeOne Makers：`deploy/static/edgeone.json` 里的 `rewrites` 加同样的规则。
+```bash
+# 1. 前端
+cd web
+npm ci                # 或 npm install
+PIXORA_API_BASE=https://img-api.example.com npm run build   # 同源部署就不给这个变量
+cd ..
 
-**接法二：跨域直连**。前端直接调后端域名，需要在后端放行来源：
-
-```dotenv
-PIXORA_CORS_ORIGINS=https://pixora.vercel.app,https://pixora.pages.dev
+# 2. 后端（默认带 embed-web，前端就在二进制里）
+cargo build --release -p pixora-server
+./target/release/pixora --health-probe && echo ok
 ```
 
-配了这一项之后，应用只对名单里的来源回 `Access-Control-*` 头，会话 Cookie 自动切到
-`SameSite=None; Secure`（跨站要用，浏览器还要求必须走 https），OAuth 授权完也会跳回名单里的
-前端站点。要显式控制就设 `PIXORA_COOKIE_SAMESITE=lax|strict|none`。
-前端的接口地址在 `dist/config.js` 里：
+产物是 `target/release/pixora`（Windows 上是 `pixora.exe`），单文件，数据目录和数据库
+按环境变量来。开发时的热加载做法（`PIXORA_WEB_DIR` 读盘）见[开发](#开发)一节。
+
+本地出镜像：
+
+```bash
+# 只出当前架构
+docker build -f deploy/Dockerfile -t pixora:dev .
+
+# 多架构（本地要有 buildx；先装 QEMU 才能编 arm64）
+docker run --privileged --rm tonistiigi/binfmt --install arm64,amd64
+docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Dockerfile -t pixora:multi .
+```
+
+想交叉编一个静态二进制（在 x86 机器上出 arm64 的 Linux 可执行文件）也行：
+
+```bash
+rustup target add aarch64-unknown-linux-musl
+# 需要一份 musl 交叉工具链（Debian/Ubuntu 上是 gcc-aarch64-linux-musl，
+# 或者用 cargo-zigbuild：cargo install cargo-zigbuild && cargo zigbuild --target aarch64-unknown-linux-musl）
+cargo build --release --target aarch64-unknown-linux-musl -p pixora-server
+```
+
+CI 里怎么构建、出了哪些产物，见下面的 [CI 与发布](#ci-与发布)。
+
+### 前后端分开部署
+
+前端其实只是一堆静态文件，后端才是那个 Rust 进程。把前端交给静态托管、后端留在任何能跑
+容器或二进制的地方，有两个好处：静态资源走 CDN 边缘、后端只需要一台小机器。
+只有一件事要摆平——**浏览器得知道接口在哪个域名上**。
+
+#### 两种接法
+
+| | 边缘反代（推荐） | 跨域直连 |
+|---|---|---|
+| 怎么做 | 平台把 `/api/*` 与 `/{直链前缀}/*` 转发给后端 | 前端直接调后端域名 |
+| 后端要配 | `PIXORA_BASE_URL` | `PIXORA_BASE_URL` + `PIXORA_CORS_ORIGINS` |
+| 前端要配 | 不动 | `config.js` 里写 `api_base` |
+| Cookie | 第一方，`SameSite=Lax` 就行 | 跨站，自动切 `SameSite=None; Secure`（两边都得 https） |
+| 适合 | 大多数情况，尤其想省心 | 平台不支持反代到外部源时 |
+
+`config.js` 就在产物根目录，和 `index.html` 放一起：
 
 ```js
+// 同源（边缘反代）时留空即可
 window.__PIXORA__ = { api_base: "https://img-api.example.com" };
 ```
 
-这个文件是构建产物的一部分，部署之后直接改它即可（刷新页面生效）；也可以在构建时用
-`PIXORA_API_BASE` 环境变量写进去。仓库根目录的 GitHub Actions 里有个
-[前端静态站点](.github/workflows/frontend.yml) 工作流把这两件事串好了：设好仓库变量
-`PIXORA_DEPLOY_FRONTEND=true` 与 `PIXORA_API_BASE`，再按用到的平台配好密钥
-（`CLOUDFLARE_API_TOKEN` / `VERCEL_TOKEN` / `EDGEONE_API_TOKEN`），推一次就自动发布；
-没配密钥的平台会被跳过。
+它是运行时读的，部署之后直接改这个文件、刷新页面就生效；构建时也可以用环境变量
+`PIXORA_API_BASE` 写进去（见 `deploy/static/README.md`）。
 
-`deploy/static/` 里放着各平台的配置样例（`vercel.json`、`edgeone.json`、`wrangler.toml`、
-`_headers`、`config.js`、`worker-proxy.js`），[那个目录的 README](deploy/static/README.md)
-写了每个文件怎么用。
+部署完的自查清单，三条都过就算通：
+
+1. 打开前端域名，广场能出图（说明直链地址对、后端可达）；
+2. 登录后刷新一下，还是登录状态（说明 Cookie 域与 SameSite 都对）；
+3. 传一张图，能在相册里看到（说明写接口与上传通道都通）。
+
+#### Vercel
+
+后端先起来（Compose 或二进制），记下它的地址，比如 `https://img-api.example.com`。
+
+**发前端**，两种方式：
+
+- 控制台：Add New → Project → 导入这个仓库。仓库根目录的 `vercel.json` 已经写好了
+  安装与构建命令（`npm --prefix web ci` / `npm --prefix web run build`）和输出目录
+  （`web/dist`），Dashboard 里不用再填。
+- 命令行：`npx vercel login`，然后在仓库根目录 `npx vercel --prod`；
+  只想发已经构建好的产物就 `npx vercel deploy web/dist --prod --yes`。
+
+**让接口通**，把 `vercel.json` 换成这份（反代：浏览器眼里只有一个源，最省事）：
+
+```json
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm --prefix web ci",
+  "buildCommand": "npm --prefix web run build",
+  "outputDirectory": "web/dist",
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    }
+  ],
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "https://img-api.example.com/api/:path*" },
+    { "source": "/images/:path*", "destination": "https://img-api.example.com/images/:path*" },
+    { "source": "/((?!api/|images/).*)", "destination": "/index.html" }
+  ]
+}
+```
+
+把两处 `https://img-api.example.com` 换掉、`/images/` 换成你在后台设的直链前缀即可
+（默认就是 `images`）。最后一条是 SPA 回落：让 `/images131231` 这种陌生路径也进前端。
+
+跨域直连的话删掉前两条 rewrites，改成：后端 `PIXORA_CORS_ORIGINS=https://你的项目.vercel.app`，
+前端 `config.js` 里写 `api_base`。
+
+**注意**：Vercel 只能托管前端。它的 Serverless/Edge Function 是 JS 运行时，
+跑不了这个需要常驻进程与文件系统的二进制；后端始终要放在别处。
+
+#### Cloudflare
+
+Cloudflare 这边可以只用它的静态托管，也可以把后端一起放上去。分开说。
+
+**A. Pages 托管前端**
+
+控制台：Workers & Pages → Create → Pages → Connect to Git → 选仓库，
+构建命令 `npm --prefix web ci && npm --prefix web run build`，输出目录 `web/dist`，
+要跨域就再加环境变量 `PIXORA_API_BASE`。命令行等价：
+
+```bash
+npx wrangler pages deploy web/dist --project-name pixora
+```
+
+- **SPA 回落不用配**：产物里没有 `404.html` 时，Pages 会把没命中静态文件的路径回
+  `index.html`（200），前端的路由正好接住。⚠️ 也**别**往产物里放 `404.html`——
+  一旦存在，Pages 就按真 404 处理，陌生路径会拿到 404 页面。
+- 缓存头由产物里的 `_headers` 决定（`deploy/static/_headers`，工作流会自动带上）。
+- 自定义域名在 Pages 项目里加，然后在后端 `PIXORA_CORS_ORIGINS` 里写上它（跨域模式）。
+
+**B. Worker 反代（想走同源就加这一步）**
+
+`deploy/static/worker-proxy.js` 是一个现成的 Worker：`/api/*`、`/healthz` 与直链转发给后端，
+其余交给静态产物。配 `wrangler.toml`：
+
+```toml
+name = "pixora"
+main = "worker-proxy.js"
+compatibility_date = "2026-01-01"
+
+[assets]
+directory = "./web/dist"
+
+[vars]
+BACKEND = "https://img-api.example.com"
+```
+
+```bash
+npx wrangler deploy
+```
+
+这样浏览器只跟 Worker 的域名打交道，会话是第一方 Cookie，不用配 CORS。
+
+**C. 后端也放 Cloudflare（Containers）**
+
+想把整栈都放在 Cloudflare 上，用 Containers 跑这个镜像 + R2 存图 + 托管 Postgres 存数据。
+三条硬约束先知道：
+
+- 容器只跑 **x86_64**，镜像得是 `linux/amd64`；
+- 容器磁盘每次冷启动都是全新的，所以**图片必须放 R2、数据必须放托管数据库**，
+  本地目录只能当缓存；
+- 镜像要推到 Cloudflare 自己的 registry（GHCR 不直接支持拉取）：
+  本地 `docker pull` 之后再 `npx wrangler containers push`，然后用一个 Worker 把请求转给容器。
+
+这条路要自己拼，官方文档里的 Containers 一节讲得比这里细；配好后记得
+`PIXORA_DB_DRIVER=postgres` + 托管库连接串，图片在后台存储页切到 R2。
+
+**D. R2 存图**（不管后端在哪都适用）
+
+R2 是 S3 兼容的，Pixora 的 S3 驱动直接能用：
+
+| 后台要填的字段 | 值 |
+|---|---|
+| 驱动 | S3 |
+| Endpoint | `https://<你的账号ID>.r2.cloudflarestorage.com` |
+| Region | `auto` |
+| Bucket | 你建的桶名 |
+| AccessKey / Secret | R2 的 API 令牌（对象读写） |
+
+切过去之后新上传走 R2，**已有图片继续从原来的后端读**，不用搬。
+
+#### EdgeOne Makers
+
+EdgeOne Pages 现在叫 EdgeOne Makers，账号、项目、命令行都还兼容。
+
+控制台：从 Git 导入仓库，构建命令 `npm --prefix web ci && npm --prefix web run build`，
+输出目录 `web/dist`，Node 版本 20。命令行（CI 里用得上，`-t` 是 API Token）：
+
+```bash
+npx edgeone pages deploy ./web/dist -n pixora -t "$EDGEONE_API_TOKEN"
+```
+
+仓库根的 `edgeone.json` 里已经写好三件事：构建与输出目录、SPA 回落
+（`{"source":"/*","destination":"/index.html"}`，静态资源优先命中）、产物缓存头。
+
+接口怎么通：EdgeOne 的 `rewrites` 是站内路径改写，指向外部域名的反代要看当前版本支持不支持；
+稳妥做法是**跨域直连**——后端配 `PIXORA_CORS_ORIGINS=https://你的EdgeOne域名`，
+前端 `config.js` 写 `api_base`。域名在 EdgeOne 控制台绑定，绑完 https 是自动的。
+
+#### GitHub Pages
+
+纯静态、免费，适合「仓库就是站点」的场景。仓库里已经带了工作流，三步：
+
+1. Settings → Pages → Source 选 **GitHub Actions**；
+2. Settings → Variables 加两个：`PIXORA_DEPLOY_FRONTEND=true`、`PIXORA_API_BASE=https://img-api.example.com`；
+3. Actions → 「前端静态站点」→ Run workflow，target 选 `github-pages`。
+
+工作流会把 `index.html` 复制成 `404.html` 一起发上去——Pages 没有 SPA 回落，
+陌生路径会命中这个 404 页面，但页面内容还是前端本体，路由（哈希）照常接管。
+
+**一条限制要先知道**：Pages 的项目站点挂在 `https://<用户名>.github.io/<仓库名>/` 这个
+子路径下，而前端产物引用的是绝对路径（`/main.js`、`/config.js`）。子路径会 404。
+要么绑一个自定义域名（站点就在根路径了），要么把仓库命名为 `<用户名>.github.io` 直接发到根。
+后端照样要在别处，配法和上面一样。
+
+#### 各平台对照
+
+| 平台 | 发前端 | SPA 回落 | 能反代到后端 | 需要的密钥/变量 |
+|---|---|---|---|---|
+| Vercel | Git 集成 / `npx vercel --prod` | `vercel.json` 里的 rewrite | 能（rewrites 指向外部域名） | `VERCEL_TOKEN`（CI 用） |
+| Cloudflare Pages | Git 集成 / `wrangler pages deploy` | 自动（别放 404.html） | 用 Worker（见 B） | `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` |
+| EdgeOne Makers | Git 集成 / `edgeone pages deploy` | `edgeone.json` 的 rewrites | 看版本支持，稳妥走跨域 | `EDGEONE_API_TOKEN` |
+| GitHub Pages | 仓库里的工作流 | 靠 `404.html` | 不能 | 变量 `PIXORA_DEPLOY_FRONTEND`、`PIXORA_API_BASE` |
 
 ### 数据库
 
@@ -249,7 +595,8 @@ PIXORA_DB_DSN=postgres://user:pass@ep-xxx-pooler.region.aws.neon.tech/pixora?ssl
 ```
 
 三种方言各自的建表脚本在 `migrations/{sqlite,postgres,mysql}/`，启动时自动跑，
-升级版本也是启动时自动迁移。
+升级版本也是启动时自动迁移。托管库在边缘网络里连不稳时，Cloudflare 侧可以加一层
+Hyperdrive 做连接池，连接串换成 Hyperdrive 给的那个即可。
 
 ### 图片存哪儿
 
@@ -266,17 +613,6 @@ PIXORA_DB_DSN=postgres://user:pass@ep-xxx-pooler.region.aws.neon.tech/pixora?ssl
 | GitHub 仓库 | Token、owner/repo、分支 | 用 Contents API 推文件；调 API 有频率限制 |
 | Telegram | Bot Token、频道 ID | 图片存到频道里；存储键里带 message id，删得掉 |
 
-用 R2 的一个完整例子（配完之后图片直链仍然走你自己的域名，由 Pixora 流式回传）：
-
-| 字段 | 值 |
-|---|---|
-| 驱动 | S3 |
-| Endpoint | `https://<accountid>.r2.cloudflarestorage.com` |
-| Region | `auto` |
-| Bucket | `pixora` |
-| 路径前缀 | 可选，如 `images/` |
-| AccessKey / Secret | R2 的 API 令牌（对象读写权限） |
-
 ### 环境变量
 
 全部变量与默认值见 [`deploy/.env.example`](deploy/.env.example)，常用的这些：
@@ -290,6 +626,7 @@ PIXORA_DB_DSN=postgres://user:pass@ep-xxx-pooler.region.aws.neon.tech/pixora?ssl
 | `PIXORA_BIND` | `0.0.0.0:8080` | 监听地址 |
 | `PIXORA_TRUST_PROXY` | `1` | 信任几层代理的转发头 |
 | `PIXORA_CORS_ORIGINS` | 空 | 放行的前端来源（前后端分开部署时填） |
+| `PIXORA_COOKIE_SAMESITE` | 配了 CORS 就 `none`，否则 `lax` | 会话 Cookie 的跨站策略 |
 | `PIXORA_WORKERS` | CPU 核数 | 后台任务并发（邮件重试、Blob GC、对账） |
 | `PIXORA_DB_MAX_CONNECTIONS` | SQLite 4 / 其它 10 | 连接池上限 |
 | `PIXORA_ACCEL_PREFIX` | 空 | 让 Nginx 直接发文件的 `X-Accel-Redirect` 前缀 |
@@ -321,6 +658,8 @@ docker compose pull && docker compose up -d     # 镜像方式
 | 直链地址是 `http://172.x.x.x/...` 或容器内网地址 | 没设 `PIXORA_BASE_URL` |
 | 登录成功，一刷新又变未登录 | 站点是 https，但 Cookie 没带 `Secure`（`PIXORA_SECURE_COOKIES`），或前后端跨站却没配 `PIXORA_CORS_ORIGINS` |
 | 前端页面上写着「服务暂时不可用」 | 后端没起来，或浏览器到后端被拦（跨域没配、域名写错） |
+| 跨域请求报 `failed to fetch`，服务端日志里有「跨域预检被拒」 | 前端域名没写进 `PIXORA_CORS_ORIGINS`（要带 `https://`，端口也要写全） |
+| 静态托管上页面能开、图片全裂 | 直链还是相对地址：后端没设 `PIXORA_BASE_URL`，或 `config.js` 里没写 `api_base` |
 | 注册页说「注册入口已暂停」 | 管理员关了注册；或磁盘占用触发「容量触顶自动关闭」，去「配额与容量」看 |
 | 验证码收不到 | SMTP 没配好（服务端日志会写原因）；本地开发时验证码也会写进日志 |
 | 上传报「域名收不到邮件」 | 收件域名查不到 MX 记录，注册类发信被拦下（`antispam.mx_check` 可关） |
@@ -491,7 +830,7 @@ PIXORA_TEST_DB_DSN="mysql://root:pass@127.0.0.1/pixora" \
 | 工作流 | 什么时候跑 | 干什么 |
 |---|---|---|
 | [CI](.github/workflows/ci.yml) | 推主干、开 PR、手动 | 前端类型检查与构建；后端全量测试 + 端到端冒烟；Windows 上 `cargo check` 证明能编过 |
-| [Docker 镜像](.github/workflows/docker.yml) | 推主干、打标签、手动 | 构建 amd64/arm64 镜像推到 GHCR（`ghcr.io/<owner>/pixora`），配了 Docker Hub 密钥就一起推 |
+| [Docker 镜像](.github/workflows/docker.yml) | 推主干、打标签、手动 | 构建 amd64/arm64 镜像推到 GHCR（`ghcr.io/<owner>/pixora`），配了 Docker Hub 密钥就一起推；手动跑时可以把架构改成只出 amd64，省掉 arm64 那趟 QEMU 模拟 |
 | [发行版二进制](.github/workflows/release.yml) | 推 `v*` 标签 | 出 Linux（musl 静态）与 Windows 可执行文件，附 SHA-256 校验和，挂到 Release |
 | [前端静态站点](.github/workflows/frontend.yml) | 手动，或仓库变量开了开关 | 把前端产物发到 Vercel / Cloudflare Pages / EdgeOne Makers / GitHub Pages |
 
@@ -503,6 +842,10 @@ git tag v0.1.0 && git push origin v0.1.0
 
 CI 里的冒烟是「起真服务、走真 HTTP」那一套，和本地 `scripts/smoke-new.sh` 是同一个脚本，
 所以本地跑绿了，CI 基本也是绿的。
+
+两个小提醒：GHCR 上的包跟随仓库的可见性，私有仓库拉镜像前先 `docker login ghcr.io`
+（用户名 + 一个带 `read:packages` 的 PAT）；工作流里的 action 目前还是 v4，
+GitHub 会提示「Node.js 20 deprecated」——不影响运行，等这些 action 出 v5 再一起升。
 
 ## 刻意不做的事
 
