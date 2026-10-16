@@ -278,6 +278,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          # 只取两个可执行文件。同一趟运行里还挂着 buildx 的缓存产物
+          # （<owner>~<repo>~<hash>.dockerbuild），它不是普通 zip，不过滤
+          # 就会连它一起拉，下载重试五次后整个 job 失败。
+          pattern: pixora-*
           path: artifacts
           merge-multiple: true
 
