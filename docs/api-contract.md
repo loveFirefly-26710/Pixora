@@ -314,7 +314,7 @@ API 客户端：
   "visibility": "public", "views": 12, "upload_time": "2026-10-14T12:31:00Z",
   "tags": ["风景", "旅行"], "has_thumb": true,
   "url": "https://img.example.com/images/a3f9…f1a2.webp",
-  "thumb_url": "https://img.example.com/images/a3f9…f1a2.webp?thumb=1"
+  "thumb_url": "https://img.example.com/images/a3f9…f1a2.webp?thumb=2"
 }
 ```
 
@@ -490,7 +490,7 @@ API 客户端：
 
 ```json
 { "data": { "id": 88214, "job_id": 991, "url": "https://…/images/a3f9….webp",
-            "thumb_url": "https://…/images/a3f9….webp?thumb=1",
+            "thumb_url": "https://…/images/a3f9….webp?thumb=2",
             "sha256": "a3f9…", "size": 2411724, "dedup": false, "reused": false,
             "storage_type": "local", "fallback_message": null, "tags": ["风景"] } }
 ```
@@ -526,7 +526,7 @@ API 客户端：
 `?format=json` 时返回：
 
 ```json
-{ "data": { "url": "https://…/images/a3f9….webp", "thumb_url": "https://…/images/a3f9….webp?thumb=1",
+{ "data": { "url": "https://…/images/a3f9….webp", "thumb_url": "https://…/images/a3f9….webp?thumb=2",
             "id": 88214, "width": 1600, "height": 900, "size": 2411724,
             "ext": "webp", "tags": ["风景"], "owner_uid": "u_1042" } }
 ```
@@ -844,12 +844,14 @@ API 客户端：
 
 ```
 GET /{upload_prefix}/{sha256}.{ext}            # 原图
-GET /{upload_prefix}/{sha256}.{ext}?thumb=1    # 这张图的缩略图（没有则回落到原图）
+GET /{upload_prefix}/{sha256}.{ext}?thumb=2    # 这张图的缩略图（没有则回落到原图）
 GET /{upload_prefix}/{sha256}.{ext}?download=1 # 强制下载（Content-Disposition: attachment）
 ```
 
-- 路径里那个 `sha256` 是**原图**的：`?thumb=1` 顺着图片行找到它的缩略图实体（另一份 webp），
-  所以列表页拿一条直链就能同时取到原图与缩略图；URL 里的 `ext` 也始终是原图的格式
+- 路径里那个 `sha256` 是**原图**的：带 `thumb` 参数时顺着图片行找到它的缩略图实体，
+  所以列表页拿一条直链就能同时取到原图与缩略图；URL 里的 `ext` 也始终是原图的格式。
+  服务端只认「有没有 `thumb` 这个参数」，值本身是版本号：缩略图的生成方式一变就抬一位
+  （`?thumb=1` → `?thumb=2`），让浏览器里那份 `immutable` 缓存自然失效
 - **还挂着公开引用**的图片可以匿名取，响应头带 `Cache-Control: public, max-age=31536000, immutable`（内容寻址，永不变化）
 - **只被私有内容引用**的图片：直链只对「本人（含管理员）」放行，其余返回 404；拿到链接不等于有权限
   本人取到时带 `Cache-Control: private, max-age=300`，避免私人图片在共享缓存里停留

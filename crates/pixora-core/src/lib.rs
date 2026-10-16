@@ -223,7 +223,11 @@ impl AppState {
         self.config.fallback_base_url()
     }
 
-    /// 拼直链。缩略图走 `?thumb=1`，一级目录可在后台改。
+    /// 拼直链。缩略图走 `?thumb=<版本>`，一级目录可在后台改。
+    ///
+    /// 那个数字是「缩略图怎么生成」的版本号：直链响应带 `immutable` 一年缓存，
+    /// 换了缩略图的尺寸之后，光靠刷新浏览器拿不到新图——版本号一抬，URL 就变了，
+    /// 旧缓存自然让位。服务端只认「有没有 thumb 这个参数」，值本身不重要。
     pub async fn direct_url(&self, sha256: &str, ext: &str, thumb: bool) -> String {
         let base = self.base_url().await;
         let prefix = self
@@ -232,7 +236,7 @@ impl AppState {
             .await
             .map(|site| site.upload_prefix)
             .unwrap_or_else(|_| settings::defaults::UPLOAD_PREFIX.to_string());
-        let suffix = if thumb { "?thumb=1" } else { "" };
+        let suffix = if thumb { "?thumb=2" } else { "" };
         format!("{base}/{prefix}/{sha256}.{ext}{suffix}")
     }
 

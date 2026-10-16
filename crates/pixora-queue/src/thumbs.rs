@@ -26,7 +26,13 @@ const MAX_EDGE: u32 = 1024;
 /// JPEG 质量。80 是体积与观感的常见折中。
 const QUALITY: u8 = 80;
 /// 单张原图最大解码体积（超过就不兜底了，避免把内存吃满）。
-const MAX_SOURCE_BYTES: u64 = 24 * 1024 * 1024;
+///
+/// 给到 64 MB 是有实际例子的：一边是 26 MB 的 3476×6000 PNG，压一压正好能出
+/// 一张清楚的缩略图；一边是几十兆的扫描件，解出来几百兆内存不值当。所以体积
+/// 之外还看一眼像素上限。
+const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+/// 单张原图的最大像素数。6000 万像素按 RGBA 算是 ~240 MB，够用了。
+const MAX_SOURCE_PIXELS: u64 = 60_000_000;
 
 /// 为缺少缩略图的图片补生成一批。返回生成数量。
 pub async fn backfill(state: &Arc<AppState>, limit: i64) -> pixora_core::Result<u64> {
@@ -53,6 +59,36 @@ pub async fn backfill(state: &Arc<AppState>, limit: i64) -> pixora_core::Result<
         }
     }
     Ok(generated)
+}
+
+/// 缩略图「够用」的长边门槛：低于它就算偏小，值得重算。
+///
+/// 目标是最长边 1024px，取 75% 作为门槛——宽屏下列表一格 500–800 CSS px，
+/// 2 倍屏要 1000+ 像素；比这明显小的（比如老的 400px）一眼就是糊的。
+/// 比的是长边：竖图宽度天然小（1024 高的图宽只有 683），拿宽度比会反复重算它们。
+const THUMB_MIN_EDGE: i32 = 768;
+
+/// 自动把偏小的缩略图按新尺寸重算一批。返回处理了几张。
+///
+/// 客户端早期按 400px 生成缩略图，宽屏上放大两三倍就是糊的。这一遍让老图
+/// 自己跟上新尺寸，不需要管理员记得去点「重算缩略图」；重算之后尺寸记在实体
+/// 行上，不会再被捞出来，所以是收敛的。
+pub async fn refresh_small_thumbs(state: &Arc<AppState>, limit: i64) -> pixora_core::Result<u64> {
+    let images = state
+        .repo
+        .list_images_with_small_thumb(THUMB_MIN_EDGE, MAX_SOURCE_BYTES as i64, MAX_SOURCE_PIXELS as i64, limit)
+        .await?;
+    let mut refreshed = 0u64;
+    for image in images {
+        match make_thumb_for(state, image.id, image.blob_id, image.thumb_blob_id).await {
+            // 只数真的换掉了的：跳过（Ok(false)）与失败都不算进展，
+            // 开机那轮靠这个数字决定「还有没有活要干」，不然会一直空转
+            Ok(true) => refreshed += 1,
+            Ok(false) => {}
+            Err(err) => tracing::debug!(image_id = image.id, error = %err, "重算偏小的缩略图跳过"),
+        }
+    }
+    Ok(refreshed)
 }
 
 // ============================================================
@@ -144,6 +180,12 @@ async fn make_thumb_for(
     tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut source)
         .await
         .map_err(|err| AppError::internal(format!("读取原图失败：{err}")))?;
+    // 体积过关了还得看像素：几十兆的小尺寸扫描件解出来也可能是几百兆
+    if let Some((width, height)) = pixora_core::media::dimensions(&source, &blob.mime_type) {
+        if width as u64 * height as u64 > MAX_SOURCE_PIXELS {
+            return Ok(false);
+        }
+    }
 
     let encoded = tokio::task::spawn_blocking(move || encode_thumb(&source))
         .await
@@ -152,6 +194,7 @@ async fn make_thumb_for(
 
     // 已经有了就不用再存一份（同一张图被多人引用时很常见）
     let sha256 = pixora_crypto::hash::sha256_hex(&encoded);
+    let dims = encoded_dimensions(&encoded);
     let thumb_id = match state
         .repo
         .find_blob_by_sha(&sha256, storage_kind::THUMB)
@@ -180,8 +223,8 @@ async fn make_thumb_for(
                     size: encoded.len() as i64,
                     mime_type: "image/jpeg".to_string(),
                     ext: "jpg".to_string(),
-                    width: None,
-                    height: None,
+                    width: dims.0,
+                    height: dims.1,
                     storage_driver: driver_name,
                     storage_key: resolved.key,
                     backend_id,
@@ -216,6 +259,12 @@ async fn generate_for(state: &Arc<AppState>, image_id: i64, blob_id: i64) -> pix
     tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut source)
         .await
         .map_err(|err| AppError::internal(format!("读取原图失败：{err}")))?;
+    // 体积过关了还得看像素：几十兆的小尺寸扫描件解出来也可能是几百兆
+    if let Some((width, height)) = pixora_core::media::dimensions(&source, &blob.mime_type) {
+        if width as u64 * height as u64 > MAX_SOURCE_PIXELS {
+            return Ok(false);
+        }
+    }
 
     // 解码与缩放是 CPU 活，放到阻塞线程池，别占着异步运行时
     let encoded = tokio::task::spawn_blocking(move || encode_thumb(&source))
@@ -224,6 +273,7 @@ async fn generate_for(state: &Arc<AppState>, image_id: i64, blob_id: i64) -> pix
         .map_err(AppError::InvalidImage)?;
 
     let sha256 = pixora_crypto::hash::sha256_hex(&encoded);
+    let dims = encoded_dimensions(&encoded);
     // 同一张图可能被多个用户引用，缩略图同样要走去重
     if let Some(existing) = state
         .repo
@@ -256,8 +306,8 @@ async fn generate_for(state: &Arc<AppState>, image_id: i64, blob_id: i64) -> pix
             size: encoded.len() as i64,
             mime_type: "image/jpeg".to_string(),
             ext: "jpg".to_string(),
-            width: None,
-            height: None,
+            width: dims.0,
+            height: dims.1,
             storage_driver: driver_name,
             storage_key: resolved.key,
             backend_id,
@@ -266,6 +316,13 @@ async fn generate_for(state: &Arc<AppState>, image_id: i64, blob_id: i64) -> pix
 
     state.repo.attach_image_thumb(image_id, thumb.id).await?;
     Ok(true)
+}
+
+/// 从编码好的 JPEG 里读出像素尺寸，写进实体行（判断该不该重算靠它）。
+fn encoded_dimensions(bytes: &[u8]) -> (Option<i32>, Option<i32>) {
+    pixora_core::media::dimensions(bytes, "image/jpeg")
+        .map(|(w, h)| (Some(w as i32).filter(|v| *v > 0), Some(h as i32).filter(|v| *v > 0)))
+        .unwrap_or((None, None))
 }
 
 /// 纯计算部分：解码 → 等比缩放到最长边 1024px → 编码 JPEG。

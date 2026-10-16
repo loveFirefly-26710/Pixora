@@ -90,6 +90,8 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
       mount(preview, h("span", { text: (user.email[0] ?? "U").toUpperCase() }));
     }
   };
+  // 没设过自己的头像时显示的是「站点默认 / 内置默认」那张，
+  // 下方的说明会讲清楚这一张是从哪来的
   // 与外层的头像同一套回落：自己的 → 站点默认 → 首字母方块
   paint(avatarUrl(user));
 
@@ -141,6 +143,10 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
         "div",
         { style: { flex: "1 1 220px", minWidth: "200px" } },
         h("div", { text: "建议使用正方形图片。上传后将存入「默认相册」，并标记 avatar 标签。" }),
+        h("div.tip", {
+          style: { marginTop: "6px" },
+          text: "没设过头像时显示站点默认头像（管理员可在系统设置里换）；站点也没配过，就是默认那张轮廓头像。",
+        }),
         h("div.tip", {
           style: { marginTop: "6px" },
           text: "也可直接填写图片地址（外链或本站直链）。换成别的头像（或移除）时，上一张本地上传的头像图会一并清理。",

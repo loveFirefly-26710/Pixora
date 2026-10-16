@@ -260,6 +260,58 @@ impl Repo {
         Ok(())
     }
 
+    /// 缩略图偏小（或尺寸未知）的图片：原图本身够大、但挂着的缩略图不够用。
+    ///
+    /// 「够不够用」看缩略图实体上记的像素宽度（客户端与服务端都会写）。老数据没记
+    /// 尺寸，`IS NULL` 一并捞出来重算一次，重算之后就记上了，不会反复重来。
+    /// 原图本身就比目标尺寸小的不在此列——给它重算也变不出更多像素。
+    pub async fn list_images_with_small_thumb(
+        &self,
+        min_edge: i32,
+        max_source_bytes: i64,
+        max_source_pixels: i64,
+        limit: i64,
+    ) -> Result<Vec<Image>> {
+        // 三个表都有 id：列表要逐列带上 `i.` 前缀，否则 SQLite 会报列名歧义
+        let columns = Image::COLUMNS
+            .split(',')
+            .map(|name| format!("i.{}", name.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // 「够不够用」看**长边**：竖图的宽度天然比高度小（1024 高的图宽只有 683），
+        // 拿宽度比会把一批竖图反复捞出来重算
+        let long_edge = |alias: &str| {
+            format!("(CASE WHEN {alias}.width >= {alias}.height THEN {alias}.width ELSE {alias}.height END)")
+        };
+        // 体积与像素超标的原图直接不选：那些重算也解不出来，选进来只会被反复跳过
+        let sql = format!(
+            "SELECT {columns} FROM images i \
+               JOIN blobs b ON b.id = i.blob_id \
+               JOIN blobs tb ON tb.id = i.thumb_blob_id \
+              WHERE i.deleted_at IS NULL \
+                AND b.width IS NOT NULL AND b.height IS NOT NULL \
+                AND b.size <= ? AND b.width * b.height <= ? \
+                AND {} >= ? \
+                AND (tb.width IS NULL OR tb.height IS NULL OR {} < ?) \
+              ORDER BY i.id ASC LIMIT ?",
+            long_edge("b"),
+            long_edge("tb")
+        );
+        let rows = self
+            .db
+            .fetch_all(
+                &sql,
+                Args::new()
+                    .int(max_source_bytes)
+                    .int(max_source_pixels)
+                    .int(min_edge as i64)
+                    .int(min_edge as i64)
+                    .int(limit.clamp(1, 500)),
+            )
+            .await?;
+        rows.iter().map(Image::from_row).collect()
+    }
+
     /// 按 id 递增取一批活着的图片（缩略图重算按游标推进）。
     pub async fn list_images_after_id(&self, after_id: i64, limit: i64) -> Result<Vec<Image>> {
         let sql = format!(
