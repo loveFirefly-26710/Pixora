@@ -76,8 +76,6 @@ jobs:
           if [ -n "$API_BASE" ]; then
             printf 'window.__PIXORA__ = {"api_base": "%s"};\n' "${API_BASE%/}" > web/dist/config.js
           fi
-          # GitHub Pages 不认 SPA 回落，它只认 404.html
-          cp web/dist/index.html web/dist/404.html
           ls -la web/dist
 
       - name: 发到 Cloudflare Pages
@@ -101,6 +99,14 @@ jobs:
 
       - name: 准备 GitHub Pages
         if: ${{ env.TARGET == 'all' || env.TARGET == 'github-pages' }}
+        run: |
+          # GitHub Pages 没有 SPA 回落，只认 404.html：把它做成 index.html 的副本，
+          # 陌生路径照样能进前端（路由由哈希接管）。
+          # 反过来，Cloudflare Pages 一旦看见 404.html 就按真 404 处理，
+          # 所以这一步只在发 Pages 时做，不能提前塞进产物
+          cp web/dist/index.html web/dist/404.html
+
+      - if: ${{ env.TARGET == 'all' || env.TARGET == 'github-pages' }}
         uses: actions/configure-pages@v5
 
       - if: ${{ env.TARGET == 'all' || env.TARGET == 'github-pages' }}
