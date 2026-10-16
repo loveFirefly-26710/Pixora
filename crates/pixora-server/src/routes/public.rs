@@ -317,46 +317,6 @@ pub async fn site_background(
     .await
 }
 
-/// `GET /api/v1/plaza/tags` — 公开。广场顶部的标签 chips。
-pub async fn plaza_tags(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    peer: PeerAddr,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-) -> Response {
-    let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await {
-        Ok(auth) => auth,
-        Err(err) => return crate::http::error_response(err),
-    };
-    let site = match state
-        .settings
-        .site(state.config.base_url.as_deref())
-        .await
-    {
-        Ok(site) => site,
-        Err(err) => return crate::http::error_response(err),
-    };
-    if !site.plaza_public && auth.is_none() {
-        return crate::http::error_response(AppError::Forbidden(
-            "站点已关闭广场公开浏览，登录后可以查看".into(),
-        ));
-    }
-
-    let limit = parse_i64(&query, "limit").unwrap_or(50).clamp(1, 200);
-    match state.repo.plaza_tags(limit).await {
-        Ok(tags) => finish(Ok(tag_list(tags))),
-        Err(err) => crate::http::error_response(err.into()),
-    }
-}
-
-/// 标签的统一形状：`{ name, usage }`。
-fn tag_list(tags: Vec<pixora_repo::model::Tag>) -> Vec<serde_json::Value> {
-    tags.into_iter()
-        .map(|tag| serde_json::json!({ "name": tag.name, "usage": tag.usage }))
-        .collect()
-}
-
 /// `GET /api/v1/terms` — 公开（带会话时多回「我同意了没」）。
 pub async fn terms(
     State(state): State<Arc<AppState>>,

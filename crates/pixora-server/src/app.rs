@@ -61,7 +61,6 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/site/background", get(r::public::site_background))
         .route("/site/avatar", get(r::public::site_avatar))
         .route("/plaza", get(r::public::plaza))
-        .route("/plaza/tags", get(r::public::plaza_tags))
         .route("/random", get(r::public::random_image))
         .route("/terms", get(r::public::terms))
         .route("/terms/consent", post(r::public::terms_consent))

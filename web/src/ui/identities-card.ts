@@ -8,7 +8,6 @@
 
 import { ApiError, request } from "../core/api";
 import { h } from "../core/dom";
-import { formatDateTime } from "../core/format";
 import { confirmDialog } from "../core/modal";
 import type { IdentitiesPayload, IdentityView, LoginMethods } from "../core/types";
 import { toastError, toastOk } from "../core/toast";
@@ -57,26 +56,24 @@ async function load(
   const bound = new Map<string, IdentityView>();
   for (const item of data.identities) bound.set(item.provider, item);
 
+  // 一格一行：登录方式 + 状态 + 账号名（没绑就没有这一行）+ 操作。
+  // 说明性的段落一律不摆：卡片本身就是一张「我有哪些门能进来」的清单，
+  // 摆满解释反而看不出重点
   const rows: Node[] = [
-    // 邮箱：必需，不可解绑
     h(
       "div.idrow",
       null,
       h("div.idmain", null, h("b", { text: "邮箱" }), badge("必需", "ok")),
-      h("div.tip", { text: data.email }),
-      h("div.tip", {
-        text: "邮箱 + 密码是本站的常规登录方式。邮箱是账号本身：找回密码、接收通知都靠它，可以换但不能解绑——换邮箱在「账号信息」里。",
-      }),
-      // 第三方登录建的账号一开始没有口令：想解绑第三方方式，得先能靠邮箱进来
+      h("div.idvalue.mono", { text: data.email }),
+      // 第三方登录建的账号一开始没有口令，想解绑第三方方式得先能靠邮箱进来
       data.password_set
         ? null
         : h(
-            "div.flexline",
-            { style: { marginTop: "8px" } },
-            badge("还没设密码", "warn"),
+            "div.idactions",
+            null,
             h("button.btn.sm", {
               type: "button",
-              text: "去设置密码",
+              text: "设置密码",
               on: { click: () => onPasswordNeeded() },
             }),
           ),
@@ -97,20 +94,7 @@ async function load(
     // 已经绑过的一律列出来（哪怕管理员后来关了这个入口，也得能看见与解绑）
     if (!identity && !enabled) continue;
 
-    const title = h(
-      "div.idmain",
-      null,
-      h("b", { text: PROVIDER_LABELS[provider] ?? provider }),
-      identity ? badge("已绑定", "ok") : badge("未绑定", "mute"),
-    );
-
-    const detail = identity
-      ? h("div.tip", {
-          text: `${identity.display ?? identity.provider} · 绑定于 ${formatDateTime(identity.created_at)}`,
-        })
-      : null;
-
-    const actions = h("div.flexline", { style: { marginTop: "8px" } });
+    const actions = h("div.idactions");
     if (identity) {
       actions.append(
         h("button.btn.sm.dgr", {
@@ -138,14 +122,25 @@ async function load(
       );
     }
 
-    rows.push(h("div.idrow", null, title, detail, actions));
+    rows.push(
+      h(
+        "div.idrow",
+        null,
+        h(
+          "div.idmain",
+          null,
+          h("b", { text: PROVIDER_LABELS[provider] ?? provider }),
+          identity ? badge("已绑定", "ok") : badge("未绑定", "mute"),
+        ),
+        // 没绑定就没有账号名可显示
+        identity ? h("div.idvalue.mono", { text: identity.display ?? identity.provider }) : null,
+        actions,
+      ),
+    );
   }
 
-  // 等高网格：每格宽度自适应，同一行的盒子拉到一样高。「邮箱」那一格的说明
-  // 比别家长，不拉齐的话一行里高高低低，看着像没做完
   body.replaceChildren(h("div.idgrid", null, ...rows));
 }
-
 async function unbind(provider: string, reload: () => void): Promise<void> {
   const label = PROVIDER_LABELS[provider] ?? provider;
   const ok = await confirmDialog({

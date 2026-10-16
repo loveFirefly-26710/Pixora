@@ -713,9 +713,7 @@ function identitiesCard(detail: UserDetailPayload, reload: () => void): HTMLElem
     rows.length === 0
       ? h("div.tip", { text: "这个账号只用邮箱 + 密码登录，没有额外的登录方式。" })
       : h("div", { style: { display: "grid", gap: "8px" } }, ...rows),
-    h("div.tip", {
-      text: "邮箱是账号本身，不可摘除；解绑第三方方式走的也是同一套「别把人锁在门外」的规则。",
-    }),
+    h("div.tip", { text: "邮箱是账号本身，不可摘除；摘除前会确认还剩别的方式能登进来。" }),
   );
 }
 

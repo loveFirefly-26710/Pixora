@@ -1979,6 +1979,12 @@ tr.pick {
 @media (max-width: 1023px) {
   .albums-split {
     flex-direction: column;
+    /* 堆叠之后子项要撑满宽度：默认的 flex-start 会让内容区按自己的内容宽度撑开，
+       手机上（内容比屏幕宽）就横着溢出去了 */
+    align-items: stretch;
+  }
+  .albums-body {
+    width: 100%;
   }
   .albumlist {
     position: sticky;
@@ -2183,7 +2189,7 @@ tr.pick {
 .mentry small {
   display: block;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: 11px;
   margin-top: 1px;
 }
 
@@ -2294,6 +2300,18 @@ tr.pick {
   }
 }
 
+/* 触屏上所有小按钮与 chips 给一个最小高度：24px 的按钮手指点不准，
+   而这几类控件在手机上出现得很密（筛选、页签、快捷操作） */
+@media (max-width: 767px) {
+  .btn.sm,
+  .chip,
+  .toolbar .chip {
+    min-height: 30px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+}
+
 /* 键盘提示只在有键盘的宽屏出现，手机上显示它反而误导 */
 @media (max-width: 767px) {
   .lb .lb-hint {
@@ -2397,14 +2415,24 @@ tr.pick {
   gap: 8px;
 }
 
-.idrow .tip {
-  margin: 4px 0 0;
+/* 账号名（邮箱、第三方昵称、掩码手机号）：一格里的第二行 */
+.idrow .idvalue {
+  margin-top: 3px;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.idrow .idvalue.mono {
+  color: var(--muted);
 }
 
 /* 操作按钮沉到格子底部：同行的盒子高度一致时，按钮对齐在同一条线上更整齐 */
-.idrow > .flexline:last-child,
-.idrow > .btn:last-child {
-  margin-top: auto !important;
+.idrow .idactions {
+  margin-top: auto;
+  padding-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* ---------- 登录页的方式切换 ---------- */
