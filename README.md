@@ -1086,37 +1086,45 @@ PIXORA_TEST_DB_DSN="mysql://root:pass@127.0.0.1/pixora" \
 | 工作流 | 什么时候跑 | 干什么 |
 |---|---|---|
 | [CI](.github/workflows/ci.yml) | 推主干、开 PR、手动 | 前端类型检查与构建；后端全量测试 + 端到端冒烟；Windows 上 `cargo check` 证明能编过 |
-| [Docker 镜像](.github/workflows/docker.yml) | 推主干、打标签、手动 | 构建镜像推到 GHCR（`ghcr.io/<你的用户名>/pixora`），配了 Docker Hub 密钥就一起推 |
-| [发行版二进制](.github/workflows/release.yml) | 推 `v*` 标签，或手动填版本号 | 出 Linux（musl 静态）与 Windows 可执行文件，附 SHA-256 校验和，挂到 Release |
+| [发行版与镜像](.github/workflows/release.yml) | 推主干、推 `v*` 标签、手动 | 按 Cargo.toml 里的版本号发 Release（Linux / Windows 可执行文件 + 校验和）并推容器镜像 |
 | [前端静态站点](.github/workflows/frontend.yml) | 手动，或仓库变量开了开关 | 把前端产物发到 Vercel / Cloudflare Pages / EdgeOne Makers / GitHub Pages |
 
-什么都不用配就能用：推一次主干，GHCR 上就有镜像；想要一版发行包，按下面任一方式。
+### 版本号放在哪、怎么发版
 
-**出镜像**（推主干时自动，也可以手动点一次）：
-
-```bash
-docker pull ghcr.io/<你的用户名>/pixora:edge      # 主干最新一次构建
-docker pull ghcr.io/<你的用户名>/pixora:latest    # 最近一次发版
-docker pull ghcr.io/<你的用户名>/pixora:1.2.3     # 指定版本
-```
-
-默认只构建 `linux/amd64`。要 ARM（甲骨文免费实例、树莓派、Apple 芯片的服务器）
-就在 Actions → Docker 镜像 → Run workflow 里把 platforms 填成
-`linux/amd64,linux/arm64`——arm64 那趟靠 QEMU 模拟来编，第一次要等很久，
-之后有缓存。首次推成功后**记得把包的可见性改成公开**（GitHub 左边 Packages →
-这个包 → Package settings → Change visibility → Public），否则别人 `docker pull`
-会提示未授权。
-
-**发一版**（二选一）：
+版本号只有一个来源：`Cargo.toml` 里 `[workspace.package]` 的 `version`。二进制启动日志里那句
+`version="0.1.0"`、发版的标签、容器镜像的标签，全都按它算。
 
 ```bash
-# 方式一：打标签推上去（推荐，版本号留在 git 历史里）
-git tag v0.1.0 && git push origin v0.1.0
+sh scripts/version.sh              # 看当前版本号（0.1.0）
+sh scripts/bump-version.sh 0.2.0   # 改成 0.2.0：Cargo.toml、Cargo.lock、web/package.json 一起改
+git add -A && git commit -m "chore: 版本号 0.2.0"
+git push                           # 推上去 → 自动建 v0.2.0 标签、发 Release、推镜像
 ```
 
-方式二：Actions → 发行版二进制 → Run workflow，版本号填 `0.1.0`
-（不用写 `v`，工作流会自己加，并创建 `v0.1.0` 这个标签）。两种方式出的产物一样：
-Linux 与 Windows 的可执行文件、SHA-256 校验和，都挂在 Releases 页面上。
+**推一次主干会发生什么**：工作流先看 GitHub 上有没有这一版的 Release——
+
+- 没有 → 发一版：标签 `v<版本号>`、Linux 与 Windows 可执行文件、SHA-256 校验和，
+  全挂到 Releases 页面；镜像同时带上 `:<版本号>` 与 `:latest`；
+- 有 → 说明这一版早就发过了（改了代码没改版本号），跳过发版，
+  只把镜像的 `:edge` / `:master` / `:sha-<短哈希>` 更新掉。
+
+所以日常随便推，只有改了版本号那一次才会出 Release，不会一推就多一版。
+想补发一版、或只想要个镜像，去 Actions → 发行版与镜像 → Run workflow：
+version 留空就用文件里的版本号，填别的就按你填的发；platforms 里加上 `linux/arm64`
+会一并出 ARM 镜像（QEMU 模拟，第一次很慢）。
+
+**拉镜像**：
+
+```bash
+docker pull ghcr.io/<你的用户名>/pixora:latest      # 最近发的那一版
+docker pull ghcr.io/<你的用户名>/pixora:0.2.0       # 指定版本
+docker pull ghcr.io/<你的用户名>/pixora:edge        # 主干最新代码，未必发过版
+```
+
+两个小提醒：首次推成功后，**GHCR 上的包默认是私有的**，想让别人不登录就能 `docker pull`，
+去 GitHub 左边 Packages → 这个包 → Package settings → Change visibility → Public；
+想同时推 Docker Hub，把仓库密钥 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN` 配上即可，
+没配就自动跳过 GHCR 照常推。
 
 CI 里的冒烟是「起真服务、走真 HTTP」那一套，和本地 `scripts/smoke-new.sh` 是同一个脚本，
 所以本地跑绿了，CI 基本也是绿的。

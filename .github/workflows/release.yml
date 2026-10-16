@@ -1,55 +1,195 @@
-name: 发行版二进制
+name: 发行版与镜像
 
-# 两种触发方式，随便挑：
+# 版本号的唯一来源是 Cargo.toml 里 [workspace.package] 的 version
+# （改版本号用 `sh scripts/bump-version.sh 0.2.0`，它会连 Cargo.lock 与
+# web/package.json 一起改好；只想看看当前是多少就 `sh scripts/version.sh`）。
 #
-#   1. 打标签推送（推荐，版本号跟着 git 历史走）
-#        git tag v0.1.0 && git push origin v0.1.0
-#   2. 在 Actions 页面手动跑一次，填个版本号（比如 0.1.0）——
-#      工作流会自动创建 v0.1.0 这个标签，并以它为准发版
+# 往主干推一次，这个工作流就按文件里的版本号办事：
 #
-# 产物：Windows 与 Linux 的可执行文件，附 SHA-256 校验和，挂到 GitHub Release 上。
+#   1. 读出版本号，看 GitHub 上有没有这一版的 Release；
+#   2. 没有 → 建标签 v<版本号>、出 Windows 与 Linux 可执行文件、发 Release；
+#   3. 有   → 说明这一版早就发过了（改了代码没改版本号），跳过发版，
+#             不会一推就多出一版；
+#   4. 不论发不发版，都出容器镜像：发版那一趟带 :<版本号> 与 :latest，
+#      平时带 :edge / :master / :sha-<短哈希>，给「想要主干最新代码」的人拉。
 #
-# 为什么是 musl：Linux 那份完全静态链接，不挑发行版、不挑 glibc 版本，
-# Alpine、群晖、老 CentOS 上都能直接跑。代价是体积大一点（约 10MB 上下）。
+# 也可以手动跑（Actions → 发行版与镜像 → Run workflow）：
+#   version 留空 = 用 Cargo.toml 里的；填一个新版本号 = 补发一版；
+#   platforms 里加上 linux/arm64 就多出 ARM 镜像（走 QEMU 模拟，第一次很慢）。
 #
-# ARM Linux 不在这里出：Docker 镜像已经是多架构的，ARM 服务器用镜像更省事；
-# 真要裸二进制，在 arm 机器上 `cargo build --release --target aarch64-unknown-linux-musl`
-# 一条命令就能得到（前端产物已提交在仓库里，不需要先进目录跑 npm）。
+# 首次推成功后，GHCR 上的包默认是私有的：想让别人不登录就能 docker pull，
+# 去 Packages → 这个包 → Package settings → Change visibility → Public。
 
 on:
   push:
+    branches: [main, master]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 版本号，例如 0.1.0（不要写 v，会自己加）
-        required: true
+        description: 版本号（留空则用 Cargo.toml 里的）
+        required: false
+      platforms:
+        description: 镜像架构
+        required: false
+        default: linux/amd64
 
 permissions:
   contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pixora
+  PLATFORMS: ${{ inputs.platforms || 'linux/amd64' }}
 
 jobs:
-  # 先定下这次发版的标签：手动触发按输入算，推标签时用标签本身。
-  # 单独一个 job 是为了让「标签」只有一个来源，后面所有步骤都引用它
+  # 先定版本号与「这一版要不要发」，后面的 job 都引用它
   meta:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.read.outputs.tag }}
+      publish: ${{ steps.read.outputs.publish }}
     steps:
-      - id: tag
+      - uses: actions/checkout@v4
+
+      - id: read
         env:
-          RAW: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          RAW="${RAW#v}"
-          if [ -z "$RAW" ]; then
-            echo "::error::没拿到版本号：手动触发要在 inputs.version 里填，推标签时才会自动带上"
+          set -eu
+          version=$(sh scripts/version.sh)
+          if [ -z "$version" ]; then
+            echo "::error::没从 Cargo.toml 读到版本号（看看 [workspace.package] 那一段）"
             exit 1
           fi
-          echo "tag=v${RAW}" >> "$GITHUB_OUTPUT"
-          echo "本次发版：v${RAW}" >> "$GITHUB_STEP_SUMMARY"
 
-  build:
+          # 手动触发按输入的版本号；推 v 标签时以标签为准，与文件不一致就提醒一句
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="${INPUT_VERSION#v}"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            if [ "v$version" != "$REF_NAME" ]; then
+              echo "::warning::推的是标签 $REF_NAME，而 Cargo.toml 里写着 v$version；这次以标签为准"
+            fi
+            version="${REF_NAME#v}"
+          fi
+          tag="v$version"
+
+          # 发没发过以 Release 为准（标签可能存在但还没发版）
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/releases/tags/$tag")
+          if [ "$code" = "200" ]; then publish=false; else publish=true; fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## 本次运行"
+            echo
+            echo "- 版本号：\`$version\`（标签 \`$tag\`）"
+            if [ "$publish" = "true" ]; then
+              echo "- 发一版：这个版本还没有 Release"
+            else
+              echo "- 这一版已经发过，跳过二进制与 Release，只出镜像"
+            fi
+            echo "- 镜像架构：\`${PLATFORMS}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # 容器镜像：每次推送都出
+  image:
     needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只有要出 arm64 时才装 QEMU（模拟执行，慢）
+      - uses: docker/setup-qemu-action@v3
+        if: ${{ contains(env.PLATFORMS, 'arm64') }}
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GitHub 的校验器不允许在 if 里引用 secrets（写了整份文件就无效），
+      # 所以「配没配密钥」在 run 里判断
+      - name: 登录 Docker Hub（没配密钥就跳过）
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "没配 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，跳过（镜像照常推 GHCR）"
+            exit 0
+          fi
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+
+      - name: 选定镜像名
+        id: targets
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          {
+            echo "list<<PIXORA_EOF"
+            echo "$IMAGE"
+            if [ -n "$DOCKERHUB_USERNAME" ]; then
+              echo "$DOCKERHUB_USERNAME/pixora"
+            fi
+            echo "PIXORA_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 生成标签与标注
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.targets.outputs.list }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+            type=raw,value=${{ needs.meta.outputs.version }},enable=${{ needs.meta.outputs.publish == 'true' }}
+            type=raw,value=latest,enable=${{ needs.meta.outputs.publish == 'true' }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=pixora-image
+          cache-to: type=gha,mode=max,scope=pixora-image
+
+      - name: 镜像摘要
+        run: |
+          {
+            echo "## 容器镜像"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "架构：\`${PLATFORMS}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # 下面两个 job 只在「这一版还没发过」时跑
+  binaries:
+    needs: meta
+    if: needs.meta.outputs.publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -132,7 +272,8 @@ jobs:
           retention-days: 7
 
   release:
-    needs: [meta, build]
+    needs: [meta, binaries]
+    if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -148,7 +289,8 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          # 标签不存在时它会按 target_commitish 创建（手动触发那条路靠这个）
+          # 标签不存在时它会按 target_commitish 创建（这个标签是机器人建的，
+          # 不会反过来再触发一次工作流）
           tag_name: ${{ needs.meta.outputs.tag }}
           name: Pixora ${{ needs.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
@@ -183,7 +325,7 @@ jobs:
             数据库默认用数据目录里的 SQLite；要换成 PostgreSQL / MySQL 就设
             `PIXORA_DB_DRIVER` 与 `PIXORA_DB_DSN`，详见 README 的部署章节。
 
-            同一个提交还会出一个容器镜像（多架构），拉取方式：
+            同一个提交也出了容器镜像（版本号与标签一致）：
 
             ```bash
             docker pull ghcr.io/lovefirefly-26710/pixora:latest
