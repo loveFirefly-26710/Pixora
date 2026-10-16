@@ -164,6 +164,15 @@ API 客户端：
 响应：`{ "data": { "user": {...见 3.1...}, "csrf_token": "…" } }`，同时 `Set-Cookie: pixora_session=…; HttpOnly; SameSite=Lax`。
 错误：`INVALID_CREDENTIALS`、`ACCOUNT_LOCKED`（带 `locked_until`）、`ACCOUNT_PENDING`、`ACCOUNT_SUSPENDED`、`ACCOUNT_BANNED`、`IP_BLOCKED`、`RATE_LIMITED`、`TOTP_REQUIRED`（400，附 `totp_required: true`，表示还差一步动态码）。
 
+### `POST /api/v1/auth/login/email-code` — 公开
+
+登录第二步的备选：验证器不在手边时，用邮箱验证码替代动态码。
+
+请求 `{ "email": "a@b.com" }` → `{ "data": { "ok": true, "message": "验证码已发送（若该邮箱可用）…" } }`。
+账号不存在、或没开二次验证时答话一样（不给「这个邮箱注册过没有」的探针）；发信没配好时
+`CONFIG` 错误说明缺哪一项。拿到码之后回到 `POST /auth/login`，把 6 位数字放在 `totp` 里、
+`code_method: "email"`。
+
 ### `POST /api/v1/auth/logout`
 
 清除服务端会话与 Cookie。响应 `{ "data": { "ok": true } }`。
@@ -457,6 +466,23 @@ API 客户端：
 
 响应：`{ "data": { "affected": 3 } }`。
 
+### 回收站（保留期内可恢复）
+
+图片与相册删除都是先软删；保留天数见 `/site` 的 `recycle_retention_days`（0 = 关闭回收站，
+删除即彻底删除）。回收站里的图片**只有本人（与管理员）取得到直链**（见第 10 节）。
+
+- `GET /api/v1/recycle/images` — 与普通图片列表同形状（分页、`ImageItem`），另带
+  `meta.retention_days`
+- `POST /api/v1/recycle/images/restore` ← `{ "ids": [1,2,3] }` → `{ "data": { "restored": 3 } }`
+- `POST /api/v1/recycle/images/purge` ← `{ "ids": [1,2,3] }` → `{ "data": { "purged": 3 } }`（彻底删除，
+  引用计数归零的物理文件由 GC 回收）
+- `POST /api/v1/recycle/images/empty` → `{ "data": { "purged": 12 } }`（清空回收站）
+- `GET /api/v1/recycle/albums` → `{ "data": { "albums": [ …同 albums 形状… ] } }`，
+  每项带该相册在回收站里的图片数与占用
+- `POST /api/v1/recycle/albums/{id}/restore` → `{ "data": { "restored_images": 12 } }`
+  （相册与当初随它一起进回收站的那批图片整份回来）
+- `DELETE /api/v1/recycle/albums/{id}` → `{ "data": { "purged_images": 12 } }`（彻底删除相册与其中的图片）
+
 ### `GET /api/v1/tags` — read
 
 `?uid=&q=&limit=`，返回 `{ "data": [ { "name": "风景", "usage": 216 } ] }`。
@@ -607,6 +633,10 @@ API 客户端：
   与「直接设密码」是两条路：这条把带链接的邮件发给用户，由他自己设。响应
   `{ "data": { "ok": true, "delivered": false, "detail": "SMTP 未配置，邮件已留在发件箱…",
   "message": "…" } }`——`message` 是可以直接显示给管理员的一句话。
+- `POST /api/v1/admin/users/{id}/impersonate` → 以该账号的身份开一个新会话（响应与登录同形状，
+  另带 `impersonator`），同时下发 `pixora_impersonator` Cookie 记住原来的管理员会话。
+  安装账号不能被切换，访客账号也不能（见第 4 节的游客一节）。
+- `POST /api/v1/admin/impersonate/stop` → 结束切换，恢复成 `pixora_impersonator` 里那位管理员。
 - `POST /api/v1/admin/users/{id}/quota` → `{ "quota_bytes": 53687091200 }`（超额拒绝并说明还差多少）
 - `POST /api/v1/admin/users/{id}/status` → 处置：
 
@@ -665,6 +695,8 @@ API 客户端：
 } }
 ```
 
+- `POST /api/v1/admin/storage/gc` → 立刻扫一遍孤儿文件与过期计数 → `{ "data": { "removed": 3, "pending": 0 } }`
+  （`removed` 是这次删掉的物理文件数，`pending` 是仍在宽限期里、下次再收的）
 - `PUT /api/v1/admin/storage/default` → `{ "driver": "local", "backend_id": 1 }`
 - `PUT /api/v1/admin/storage/prefix` → `{ "upload_prefix": "i" }`（改完旧链依然有效）
 - `PUT /api/v1/admin/storage/capacity` → `{ "mode": "manual", "manual_total": 536870912000 }`
@@ -809,6 +841,15 @@ API 客户端：
 生效范围：单文件上限在收 multipart 流时截断（`FILE_TOO_LARGE`），像素上限
 （`INVALID_IMAGE`）与格式白名单（`UNSUPPORTED_FORMAT`）在上传校验里判；
 单批张数与并发数是客户端队列的上限，服务端按策略值下发。
+
+**站点资产（背景图、默认头像）**：两处都是 multipart 上传，字段名 `file`：
+
+- `POST /api/v1/admin/settings/background` → `{ "data": { "url": "/api/v1/site/background?v=…", "bytes": 91234 } }`
+- `POST /api/v1/admin/settings/avatar` → `{ "data": { "url": "/api/v1/site/avatar?v=…", "bytes": 3210 } }`
+
+上传的字节存进库（`config:background` / `config:default_avatar` 两份资产），`/site` 下发的地址自带
+版本号，管理员换一张就换一个 URL。地址也可以在 `PUT /admin/settings` 的 `appearance` 里直接填
+外链；填 `null` 表示清掉（资产字节一起删）。
 
 ### 8.5 IP 规则
 
