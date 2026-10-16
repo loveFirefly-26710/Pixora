@@ -186,6 +186,23 @@ jobs:
             echo "架构：\`${PLATFORMS}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 推不上去时把原因挑明。最常见的一种：这个包名先前已被别的仓库建过
+      # （仓库改过名，或者删了重建），当前仓库的令牌对那个旧包没有写权限。
+      - name: 镜像没推出去时指出可能原因
+        if: failure()
+        run: |
+          {
+            echo "## 镜像没推出去"
+            echo
+            echo "如果报错里写着 permission_denied / write_package，多半是这个包名先前"
+            echo "已经被别的仓库建过（改过名、删掉重建都算），当前仓库的令牌对它没有写权限。"
+            echo
+            echo "- 想干净重来：到 https://github.com/users/${GITHUB_REPOSITORY_OWNER}/packages"
+            echo "  把这个包删掉，下一次运行会以当前仓库的身份重建；包默认私有，"
+            echo "  想让人不登录就能 docker pull，在包的设置页改可见性。"
+            echo "- 想留着旧包：在包的 Manage Actions access 里给当前仓库加上写权限。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # 下面两个 job 只在「这一版还没发过」时跑
   binaries:
     needs: meta
