@@ -1,0 +1,23 @@
+# 构建镜像时不要把这些塞进构建上下文。
+#
+# 最要紧的是 target/ 与 web/node_modules/：前者几个 G，后者上百兆，
+# 传一遍要好几分钟，而容器里反正会自己编、自己 npm ci。
+# data/ 与 pgdata/ 是你的运行数据，更不该进镜像。
+
+target/
+**/node_modules/
+web/dist/
+data/
+data.bak-*/
+pgdata/
+mysqldata/
+.git/
+.github/
+docs/
+.cache-actionlint/
+*.log
+*.pem
+*.key
+.env
+.env.*
+!.env.example

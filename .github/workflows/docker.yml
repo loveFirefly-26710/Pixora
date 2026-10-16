@@ -3,9 +3,15 @@ name: Docker 镜像
 # 出一份能直接 `docker run` 的镜像，推到 GHCR（公开仓库免费）。
 # 不用另配任何东西：GITHUB_TOKEN 就能推 ghcr.io。
 #
-#   main / master 分支  → ghcr.io/<owner>/pixora:edge、:<分支名> 与 :sha-<短哈希>
-#   打 v1.2.3 这种标签   → ghcr.io/<owner>/pixora:1.2.3、:v1.2.3、:latest
-#   手动点一次          → 同上按当前分支/标签算，可临时改 platforms
+#   main / master 分支  → ghcr.io/<owner>/pixora:master、:edge 与 :sha-<短哈希>
+#   打 v1.2.3 这种标签   → ghcr.io/<owner>/pixora:1.2.3、:1.2 与 :latest
+#   手动点一次          → 同上按当前分支/标签算，并可在输入里指定架构
+#
+# 默认只出 linux/amd64；要 ARM 就手动跑一次，platforms 填 linux/amd64,linux/arm64
+# （arm64 靠 QEMU 模拟，第一次会慢，之后有缓存）。
+#
+# 首次推成功后，GHCR 上的包默认是私有的：想让别人不登录就能 docker pull，
+# 去 Packages → 这个包 → Package settings → Change visibility → Public。
 #
 # 想要 Docker Hub 就加两个仓库密钥（DOCKERHUB_USERNAME / DOCKERHUB_TOKEN），
 # 下面那两步会自动跟上；没配就跳过。
@@ -17,9 +23,11 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: 构建哪些架构（不需要 ARM 就写 linux/amd64，能省一半时间）
+        description: 构建哪些架构
         required: false
-        default: linux/amd64,linux/arm64
+        # 默认只出 amd64：arm64 那趟得靠 QEMU 模拟，编这个工作区要很久（几十分钟起）。
+        # 需要 ARM（甲骨文免费实例、树莓派、Apple 芯片）就手动跑一次，填 linux/amd64,linux/arm64
+        default: linux/amd64
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -37,9 +45,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # arm64 走 QEMU 模拟：首次构建慢（几十分钟），之后靠 GHA 缓存。
-      # 嫌慢就把输入改成 linux/amd64，或把 arm64 换成原生 arm 运行器单独出一个 job
+      # 只有要出 arm64 时才需要 QEMU（模拟执行，很慢但有缓存兜底）；
+      # 想快点出 ARM 镜像，可以把 arm 那趟换成原生 arm 运行器单独开一个 job
       - uses: docker/setup-qemu-action@v3
+        if: ${{ contains(inputs.platforms, 'arm64') }}
       - uses: docker/setup-buildx-action@v3
 
       - name: 登录 GHCR
@@ -49,23 +58,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 登录 Docker Hub（配了密钥才走）
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # GitHub 的校验器不允许在 if 里引用 secrets（会直接判工作流文件无效），
+      # 所以「配没配密钥」在 run 里判断，没配就跳过这一步
+      - name: 登录 Docker Hub（没配密钥就跳过）
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "没配 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，跳过（镜像照常推 GHCR）" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
 
       # 推哪儿：GHCR 恒定，Docker Hub 只在配了密钥时加一份。
       # 空字符串在 metadata-action 里会被当成一个镜像名，所以这里用脚本拼
       - name: 选定镜像名
         id: targets
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           {
             echo "list<<PIXORA_EOF"
             echo "$IMAGE"
-            if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
-              echo "${{ secrets.DOCKERHUB_USERNAME }}/pixora"
+            if [ -n "$DOCKERHUB_USERNAME" ]; then
+              echo "$DOCKERHUB_USERNAME/pixora"
             fi
             echo "PIXORA_EOF"
           } >> "$GITHUB_OUTPUT"
@@ -88,7 +105,7 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile
-          platforms: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+          platforms: ${{ inputs.platforms || 'linux/amd64' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -105,5 +122,5 @@ jobs:
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
             echo
-            echo "架构：${{ inputs.platforms || 'linux/amd64,linux/arm64' }}"
+            echo "架构：${{ inputs.platforms || 'linux/amd64' }}"
           } >> "$GITHUB_STEP_SUMMARY"

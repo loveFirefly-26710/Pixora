@@ -78,24 +78,44 @@ jobs:
           fi
           ls -la web/dist
 
+      # 「配没配密钥」在 run 里判断：GitHub 不允许在 if 里引用 secrets
       - name: 发到 Cloudflare Pages
-        if: ${{ (env.TARGET == 'all' || env.TARGET == 'cloudflare') && secrets.CLOUDFLARE_API_TOKEN != '' }}
+        if: ${{ env.TARGET == 'all' || env.TARGET == 'cloudflare' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx --yes wrangler@latest pages deploy web/dist --project-name="${{ vars.CF_PAGES_PROJECT || 'pixora' }}" --branch="${{ github.ref_name }}"
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "没配 CLOUDFLARE_API_TOKEN，跳过 Cloudflare Pages"
+            exit 0
+          fi
+          npx --yes wrangler@latest pages deploy web/dist \
+            --project-name="${{ vars.CF_PAGES_PROJECT || 'pixora' }}" \
+            --branch="${{ github.ref_name }}"
 
       - name: 发到 Vercel
-        if: ${{ (env.TARGET == 'all' || env.TARGET == 'vercel') && secrets.VERCEL_TOKEN != '' }}
+        if: ${{ env.TARGET == 'all' || env.TARGET == 'vercel' }}
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "没配 VERCEL_TOKEN，跳过 Vercel"
+            exit 0
+          fi
           cp deploy/static/vercel.json web/dist/vercel.json
           npx --yes vercel@latest deploy web/dist --prod --yes --token "$VERCEL_TOKEN"
 
       - name: 发到 EdgeOne Makers
-        if: ${{ (env.TARGET == 'all' || env.TARGET == 'edgeone') && secrets.EDGEONE_API_TOKEN != '' }}
-        run: npx --yes edgeone@latest pages deploy web/dist -n "${{ vars.EDGEONE_PROJECT || 'pixora' }}" -t "${{ secrets.EDGEONE_API_TOKEN }}"
+        if: ${{ env.TARGET == 'all' || env.TARGET == 'edgeone' }}
+        env:
+          EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
+        run: |
+          if [ -z "$EDGEONE_API_TOKEN" ]; then
+            echo "没配 EDGEONE_API_TOKEN，跳过 EdgeOne Makers"
+            exit 0
+          fi
+          npx --yes edgeone@latest pages deploy web/dist \
+            -n "${{ vars.EDGEONE_PROJECT || 'pixora' }}" -t "$EDGEONE_API_TOKEN"
 
       - name: 准备 GitHub Pages
         if: ${{ env.TARGET == 'all' || env.TARGET == 'github-pages' }}
