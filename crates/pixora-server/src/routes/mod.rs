@@ -798,6 +798,88 @@ mod tests {
             .expect("构造请求")
     }
 
+    /// 通用 multipart 上传：额外字段、缩略图、会话 Cookie 都带上。
+    ///
+    /// 上传接口的字段（tags / visibility / reuse_existing / thumb）各自有分支，
+    /// 想验哪一条就往 `fields` 里塞哪一条，不必为每种组合再写一个 helper。
+    fn multipart_form(
+        uri: &str,
+        auth: MultipartAuth<'_>,
+        file: &[u8],
+        name: &str,
+        fields: &[(&str, &str)],
+        thumb: Option<&[u8]>,
+    ) -> Request<Body> {
+        const BOUNDARY: &str = "pixora-test-boundary";
+        let mut body = Vec::new();
+        for (key, value) in fields {
+            body.extend_from_slice(
+                format!(
+                    "--{BOUNDARY}\r\ncontent-disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\ncontent-disposition: form-data; name=\"file\"; \
+                 filename=\"{name}\"\r\ncontent-type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(file);
+        body.extend_from_slice(b"\r\n");
+        if let Some(thumb) = thumb {
+            body.extend_from_slice(
+                format!(
+                    "--{BOUNDARY}\r\ncontent-disposition: form-data; name=\"thumb\"; \
+                     filename=\"thumb.webp\"\r\ncontent-type: image/webp\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(thumb);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            );
+        match auth {
+            MultipartAuth::Token(token) => {
+                builder = builder.header("authorization", format!("Bearer {token}"));
+            }
+            MultipartAuth::Session { cookie, csrf } => {
+                builder = builder
+                    .header("cookie", cookie)
+                    .header("x-csrf-token", csrf);
+            }
+            MultipartAuth::None => {}
+        }
+        builder.body(Body::from(body)).expect("构造请求")
+    }
+
+    /// multipart 请求怎么证明自己：API Token、会话（Cookie + CSRF），或者什么都不带。
+    #[derive(Clone, Copy)]
+    enum MultipartAuth<'a> {
+        Token(&'a str),
+        Session { cookie: &'a str, csrf: &'a str },
+        None,
+    }
+
+    /// 一张最小可用的 WebP（嗅探只看 RIFF/WEBP 魔数）。
+    fn tiny_webp() -> Vec<u8> {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&[0x1a, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(b"WEBP");
+        bytes.extend_from_slice(&[0u8; 14]);
+        bytes
+    }
+
     #[tokio::test]
     async fn upload_needs_a_token() {
         let (state, _dir) = test_state().await;
@@ -1188,5 +1270,287 @@ mod tests {
             restored["error"]["code"], "UNSUPPORTED_FORMAT",
             "恢复默认后要重新跟随站点白名单：{restored}"
         );
+    }
+
+    /// `?thumb=1` 要真的给缩略图。
+    ///
+    /// 它以前拿原图哈希去 `kind = 'thumb'` 里查，永远查不到，于是回落到原图——
+    /// 列表页每张格子都在传几百 KB 到几 MB 的原图（真实数据里 212 KB 对 26 KB），
+    /// 页面迟迟加载不完、请求被中断，表现就是「部分图片预览加载失败」。
+    #[tokio::test]
+    async fn thumbnail_requests_serve_the_thumbnail() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "thumb@example.com", "7701", false).await;
+        let cookie = login_cookie(&state, &user).await;
+        let thumb = tiny_webp();
+
+        let uploaded = app(state.clone())
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Session { cookie: &cookie, csrf: "csrf-7701" },
+                PNG_1X1,
+                "pixel.png",
+                &[],
+                Some(&thumb),
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let body = body_json(uploaded).await;
+        let url = body["data"]["url"].as_str().expect("直链").replace("https://img.example.com", "");
+        let thumb_url = body["data"]["thumb_url"]
+            .as_str()
+            .expect("缩略图直链")
+            .replace("https://img.example.com", "");
+
+        let response = app(state.clone())
+            .oneshot(get(&thumb_url, Some(&cookie)))
+            .await
+            .expect("发请求");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("image/webp"),
+            "带 ?thumb=1 时要发缩略图那一份（webp）"
+        );
+        let bytes = response.into_body().collect().await.expect("读响应体").to_bytes();
+        assert_eq!(bytes.as_ref(), thumb.as_slice(), "返回的应当正是客户端传上来的缩略图");
+
+        // 不带 ?thumb=1：仍是原图
+        let response = app(state)
+            .oneshot(get(&url, Some(&cookie)))
+            .await
+            .expect("发请求");
+        let bytes = response.into_body().collect().await.expect("读响应体").to_bytes();
+        assert_eq!(bytes.as_ref(), PNG_1X1, "原图直链要给原图");
+    }
+
+    /// 访客上传只有公开一种：那个账号登不进来，私有图片传完谁也看不见。
+    #[tokio::test]
+    async fn guest_uploads_are_always_public() {
+        let (state, _dir) = test_state().await;
+        state
+            .settings
+            .set(pixora_core::settings::keys::UPLOAD_REQUIRE_LOGIN, "false")
+            .await
+            .expect("打开游客上传");
+
+        // 访客的 CSRF Cookie 由 /site 下发（没有会话，靠双提交）
+        let site = app(state.clone())
+            .oneshot(get("/api/v1/site", None))
+            .await
+            .expect("发请求");
+        let set_cookie = site
+            .headers()
+            .get("set-cookie")
+            .and_then(|value| value.to_str().ok())
+            .expect("访客该拿到 CSRF Cookie")
+            .to_string();
+        let csrf = set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches("pixora_csrf=")
+            .to_string();
+        let guest_cookie = format!("pixora_csrf={csrf}");
+
+        // 客户端要私有也不行：服务端按账号定，不听传进来的值
+        let uploaded = app(state.clone())
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Session { cookie: &guest_cookie, csrf: &csrf },
+                PNG_1X1,
+                "guest.png",
+                &[("visibility", "private")],
+                None,
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(uploaded.status(), StatusCode::OK, "开着游客上传时该收下");
+        let body = body_json(uploaded).await;
+        let id = body["data"]["id"].as_i64().expect("图片 id");
+
+        let row = state
+            .repo
+            .db()
+            .fetch_optional(
+                "SELECT visibility FROM images WHERE id = ?",
+                pixora_repo::Args::new().int(id),
+            )
+            .await
+            .expect("查图片")
+            .expect("图片行");
+        assert_eq!(
+            pixora_repo::model::get_str(&row, "visibility").unwrap(),
+            "public",
+            "访客上传必须落在公开上"
+        );
+    }
+
+    /// 访客账号不随「关闭游客上传」消失，也不该被管理员删掉。
+    #[tokio::test]
+    async fn guest_account_outlives_the_switch_and_cannot_be_deleted() {
+        let (state, _dir) = test_state().await;
+        let admin = add_user(&state, "root@example.com", "1000", true).await;
+        let cookie = login_cookie(&state, &admin).await;
+        let guest = state.ensure_guest_user().await.expect("访客账号");
+
+        // 开关来回切：账号与它的相册都留着
+        for value in ["true", "false", "true"] {
+            state
+                .settings
+                .set(pixora_core::settings::keys::UPLOAD_REQUIRE_LOGIN, value)
+                .await
+                .expect("切开关");
+            assert!(
+                state.repo.find_user_by_id(guest.id).await.unwrap().is_some(),
+                "关闭游客上传不该动这个账号"
+            );
+            assert!(
+                state
+                    .repo
+                    .find_album_by_slug(guest.id, pixora_repo::repo::albums::DEFAULT_ALBUM_SLUG)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "访客相册也要留着"
+            );
+        }
+
+        // 管理员也删不掉它：删了等于把全站游客的图一次性清空
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/admin/users/{}?confirm={}",
+                        guest.id, guest.email
+                    ))
+                    .header("cookie", &cookie)
+                    .header("x-csrf-token", "csrf-1000")
+                    .body(Body::empty())
+                    .expect("构造请求"),
+            )
+            .await
+            .expect("发请求");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = body_json(response).await;
+        assert_error(&body, "FORBIDDEN");
+        assert!(
+            state.repo.find_user_by_id(guest.id).await.unwrap().is_some(),
+            "被拒之后账号必须还在"
+        );
+    }
+
+    /// `reuse_existing`：同一份内容已经在图库里，就引用那一张，不再多出一条记录。
+    /// 头像就是靠它解决「同一张图设两次头像，相册里并排两张一样的」。
+    #[tokio::test]
+    async fn upload_can_reuse_an_existing_image() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "avatar@example.com", "8801", false).await;
+        let cookie = login_cookie(&state, &user).await;
+        let csrf = "csrf-8801";
+
+        let upload = |fields: Vec<(&'static str, &'static str)>| {
+            multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Session { cookie: &cookie, csrf },
+                PNG_1X1,
+                "avatar.png",
+                &fields,
+                None,
+            )
+        };
+
+        let first = app(state.clone())
+            .oneshot(upload(vec![("tags", "avatar")]))
+            .await
+            .expect("发请求");
+        let first = body_json(first).await;
+        let first_id = first["data"]["id"].as_i64().expect("图片 id");
+
+        let reused = app(state.clone())
+            .oneshot(upload(vec![("tags", "avatar"), ("reuse_existing", "1")]))
+            .await
+            .expect("发请求");
+        let reused = body_json(reused).await;
+        assert_eq!(reused["data"]["id"], first_id, "复用时要指回图库里那一张");
+        assert_eq!(reused["data"]["reused"], true);
+
+        // 不带这个开关时保持原样：同内容再传一次会多一条引用（图库里两张一样的图）
+        let again = app(state.clone())
+            .oneshot(upload(vec![]))
+            .await
+            .expect("发请求");
+        let again = body_json(again).await;
+        assert_ne!(again["data"]["id"], first_id, "普通上传仍是一条新记录");
+
+        let count = state
+            .repo
+            .db()
+            .count(
+                "SELECT COUNT(*) AS total FROM images WHERE owner_id = ? AND deleted_at IS NULL",
+                pixora_repo::Args::new().int(user.id),
+            )
+            .await
+            .expect("数图片");
+        assert_eq!(count, 2, "两次上传加一次复用：图库里应当只有两条记录");
+    }
+
+    /// 账号注销之后，账号历史仍然查得到，并且看得出是管理员做的还是本人做的。
+    #[tokio::test]
+    async fn account_log_survives_account_deletion() {
+        let (state, _dir) = test_state().await;
+        let admin = add_user(&state, "root@example.com", "1000", true).await;
+        let cookie = login_cookie(&state, &admin).await;
+        let target = add_user(&state, "gone@example.com", "9001", false).await;
+
+        let deleted = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/admin/users/{}?confirm=gone@example.com",
+                        target.id
+                    ))
+                    .header("cookie", &cookie)
+                    .header("x-csrf-token", "csrf-1000")
+                    .body(Body::empty())
+                    .expect("构造请求"),
+            )
+            .await
+            .expect("发请求");
+        assert_eq!(deleted.status(), StatusCode::OK);
+        assert!(
+            state.repo.find_user_by_id(target.id).await.unwrap().is_none(),
+            "账号确实删掉了"
+        );
+
+        // 账号没了，历史还在，而且写明是哪个管理员注销的
+        let logs = app(state)
+            .oneshot(get("/api/v1/admin/logs?uid=9001", Some(&cookie)))
+            .await
+            .expect("发请求");
+        assert_eq!(logs.status(), StatusCode::OK);
+        let body = body_json(logs).await;
+        let items = body["data"].as_array().expect("列表");
+        let row = items
+            .iter()
+            .find(|item| item["action"] == "account_delete")
+            .unwrap_or_else(|| panic!("注销记录应当还在：{body}"));
+        assert_eq!(row["target_uid"], "9001");
+        assert_eq!(row["actor_kind"], "admin");
+        assert!(
+            row["actor_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("root@example.com"),
+            "要写清是哪个管理员做的：{}",
+            row["actor_label"]
+        );
+        assert_eq!(row["email"], "gone@example.com", "记录里带着注销时的邮箱");
     }
 }

@@ -328,6 +328,22 @@ impl AppState {
                         Utc::now(),
                     )
                     .await?;
+                // 账号历史里单独记一条「谁把哪个账号的邮箱改成了什么」：
+                // 本人自助走的是同一个动作名，靠 via 区分；操作人邮箱留个快照，
+                // 账号（或操作人）被删之后还读得出来是谁做的
+                self.audit_detail(
+                    actions::ACCOUNT_EMAIL_CHANGE,
+                    Some(admin.id),
+                    &target.uid,
+                    serde_json::json!({
+                        "from": target.email,
+                        "to": email,
+                        "via": "admin",
+                        "actor_email": admin.email,
+                    }),
+                    ip,
+                )
+                .await;
                 // 新旧两个地址各发一封：新地址的收件人确认「这是我」，
                 // 旧地址的收件人才能在「不是我安排的」时第一时间发现
                 mail = Some(self.notify_email_change(&target, &email).await?);
@@ -395,7 +411,10 @@ impl AppState {
     }
 
     /// 邮箱变更通知：新旧地址各发一封，把两次投递的结果合成一句给管理员看。
-    async fn notify_email_change(
+    ///
+    /// 自助换绑与管理端改邮箱共用这一条：两个地址都该收到信——新地址确认
+    /// 「这确实是我在改」，旧地址才能在「不是我干的」时第一时间发现。
+    pub(crate) async fn notify_email_change(
         &self,
         target: &User,
         new_email: &str,
@@ -614,10 +633,12 @@ impl AppState {
         )
         .await;
 
-        // 通知邮件：发件地址取注册发信邮箱，不额外配一个申诉邮箱
+        // 通知邮件：发件地址取注册发信邮箱，不额外配一个申诉邮箱。
+        // 访客账号不发：它的邮箱是保留域（`visitor@pixora.invalid`），发出去只会
+        // 退信，而它本身也登不进来——暂停它就是「按住游客上传」这一个作用
         let mut mail_sent = false;
         let mut mail_error = None;
-        if input.notify && input.action != Disposition::Restore {
+        if input.notify && input.action != Disposition::Restore && !crate::guest::is_guest(&target) {
             match self
                 .send_disposition_mail(&target, &input, reason.as_deref())
                 .await
@@ -719,6 +740,10 @@ impl AppState {
     ///
     /// 这一步不可逆，回收站里的图也一并走。所以要求调用方把账号邮箱原样写进
     /// `confirm`——界面上让管理员照着敲一遍，手滑点不出第二下。
+    ///
+    /// 访客账号不在可删之列：它是游客上传的归属地，删掉就等于把全站游客的图
+    /// 一次性清除（而且下一次游客上传又会把它建回来）。想停止游客上传，
+    /// 关掉「允许游客上传」或者暂停这个账号都行，账留着
     pub async fn admin_delete_user(
         &self,
         admin: &User,
@@ -733,6 +758,11 @@ impl AppState {
             .ok_or_else(|| AppError::not_found("用户"))?;
         if target.id == admin.id {
             return Err(AppError::bad_request("不能删除自己的账号"));
+        }
+        if crate::guest::is_guest(&target) {
+            return Err(AppError::forbidden(
+                "访客账号是系统账号，不能删除；要停止游客上传，关掉「允许游客上传」或暂停这个账号",
+            ));
         }
         self.ensure_not_install_admin(admin, &target).await?;
 

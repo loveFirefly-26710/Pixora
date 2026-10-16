@@ -203,7 +203,97 @@ impl Repo {
         row.as_ref().map(Image::from_row).transpose()
     }
 
+    /// 这个账号名下引用着某份实体的活图片（按 id 最早的那张）。
+    ///
+    /// 「已有就复用」的上传靠它：头像这类同一张图反复设的场景，第二次起
+    /// 直接引用图库里那张，不再多出一条记录。只看活着的引用——回收站里的
+    /// 那张不该被悄悄翻出来用。
+    pub async fn find_live_image_by_blob(&self, owner_id: i64, blob_id: i64) -> Result<Option<Image>> {
+        let sql = format!(
+            "SELECT {} FROM images WHERE owner_id = ? AND blob_id = ? AND deleted_at IS NULL ORDER BY id LIMIT 1",
+            Image::COLUMNS
+        );
+        let row = self
+            .db
+            .fetch_optional(&sql, Args::new().int(owner_id).int(blob_id))
+            .await?;
+        row.as_ref().map(Image::from_row).transpose()
+    }
+
     /// 单张图的完整视图（含物理属性、相册名与标签）。
+    /// 换掉一张图的缩略图实体：新的一份引用加一，旧的一份减一。
+    ///
+    /// 与 `attach_image_thumb`（只补缺的）分开：重算缩略图时要**替换**已有的，
+    /// 旧实体少减一次引用就会永远回收不掉。
+    pub async fn replace_image_thumb(
+        &self,
+        image_id: i64,
+        new_thumb_id: i64,
+        old_thumb_id: Option<i64>,
+    ) -> Result<()> {
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query(
+            &self
+                .db
+                .sql("UPDATE images SET thumb_blob_id = ? WHERE id = ?"),
+        )
+        .bind(new_thumb_id)
+        .bind(image_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(&self.db.sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"))
+            .bind(new_thumb_id)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(old_thumb_id) = old_thumb_id.filter(|old| *old != new_thumb_id) {
+            let dec_ref = self.db.sql_v(
+                "UPDATE blobs SET ref_count = GREATEST(ref_count - 1, 0) WHERE id = ?",
+                "UPDATE blobs SET ref_count = MAX(ref_count - 1, 0) WHERE id = ?",
+                "UPDATE blobs SET ref_count = MAX(ref_count - 1, 0) WHERE id = ?",
+            );
+            sqlx::query(&dec_ref)
+                .bind(old_thumb_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 按 id 递增取一批活着的图片（缩略图重算按游标推进）。
+    pub async fn list_images_after_id(&self, after_id: i64, limit: i64) -> Result<Vec<Image>> {
+        let sql = format!(
+            "SELECT {} FROM images WHERE id > ? AND deleted_at IS NULL ORDER BY id ASC LIMIT ?",
+            Image::COLUMNS
+        );
+        let rows = self
+            .db
+            .fetch_all(&sql, Args::new().int(after_id).int(limit.clamp(1, 500)))
+            .await?;
+        rows.iter().map(Image::from_row).collect()
+    }
+
+    /// 某份实体在该账号名下、被标成头像的那张图（最早的）。换头像之后的清理靠它。
+    ///
+    /// 只认带 `avatar` 标签的：用户把相册里某张照片的直链手动填成头像时不会打这个
+    /// 标签，换头像也就不该动那张照片。
+    pub async fn find_avatar_image(&self, owner_id: i64, blob_id: i64) -> Result<Option<Image>> {
+        let sql = format!(
+            "SELECT {} FROM images i \
+              WHERE i.owner_id = ? AND i.blob_id = ? AND i.deleted_at IS NULL \
+                AND EXISTS ( \
+                    SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                     WHERE it.image_id = i.id AND t.owner_id = ? AND t.name = 'avatar') \
+              ORDER BY i.id LIMIT 1",
+            Image::COLUMNS
+        );
+        let row = self
+            .db
+            .fetch_optional(&sql, Args::new().int(owner_id).int(blob_id).int(owner_id))
+            .await?;
+        row.as_ref().map(Image::from_row).transpose()
+    }
+
     pub async fn find_image_view(&self, id: i64) -> Result<Option<ImageView>> {
         let row = self
             .db

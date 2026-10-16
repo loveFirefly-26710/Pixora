@@ -84,6 +84,11 @@ pub async fn site(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    // 站点默认头像：没设过头像的账号（含新注册的）用它，没配过就是 null
+    let default_avatar = match state.settings.default_avatar_url().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
     let terms = match terms_summary(&state, auth.as_ref()).await {
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
@@ -117,6 +122,8 @@ pub async fn site(
         "thumb_server_fallback": upload.thumb_server_fallback,
         "appeal_email": mail.appeal_email,
         "background": background,
+        // 站点默认头像：账号自己没设头像时前端回落到它，再没有就回落到首字母方块
+        "default_avatar": default_avatar,
         // 会话有效期：界面上要写清楚「多久不动会掉线」，这不是秘密
         "session": {
             "idle_minutes": state.settings.session().await.map(|s| s.idle_minutes).unwrap_or(0),
@@ -226,24 +233,34 @@ pub async fn plaza(
     )
 }
 
-/// `GET /api/v1/site/background` — 公开。站点背景图本体（上传进库的那张）。
+/// `GET /api/v1/site/avatar` — 公开。站点默认头像本体（上传进库的那张）。
 ///
-/// 地址里带 `?v=<更新时间>`，所以可以放心长缓存：换图之后 URL 就变了。
-/// 没有上传过背景图时返回 404，前端会退回无背景图的样子。
-pub async fn site_background(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+/// 与背景图同一条路：地址里带 `?v=<更新时间>`，可以放心长缓存。没上传过时
+/// 返回 404，前端回落到首字母方块。
+pub async fn site_avatar(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    serve_site_asset(
+        &state,
+        &headers,
+        pixora_core::settings::keys::AVATAR_ASSET_KEY,
+        "默认头像",
+    )
+    .await
+}
+
+/// 站点资产（背景图 / 默认头像）共用的发法：ETag + 一天缓存 + nosniff。
+async fn serve_site_asset(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    asset_key: &str,
+    label: &str,
 ) -> Response {
-    let asset = match state
-        .repo
-        .get_asset(pixora_core::settings::keys::BACKGROUND_ASSET_KEY)
-        .await
-    {
+    let asset = match state.repo.get_asset(asset_key).await {
         Ok(Some(asset)) => asset,
-        Ok(None) => return crate::http::error_response(AppError::not_found("背景图")),
+        Ok(None) => return crate::http::error_response(AppError::not_found(label)),
         Err(err) => return crate::http::error_response(err.into()),
     };
     let (bytes, version) = asset;
+    let _ = version;
 
     let etag = format!("\"{}\"", pixora_crypto::hash::sha256_hex(&bytes));
     if headers
@@ -277,8 +294,24 @@ pub async fn site_background(
         axum::http::header::X_CONTENT_TYPE_OPTIONS,
         axum::http::HeaderValue::from_static("nosniff"),
     );
-    let _ = version;
     response
+}
+
+/// `GET /api/v1/site/background` — 公开。站点背景图本体（上传进库的那张）。
+///
+/// 地址里带 `?v=<更新时间>`，所以可以放心长缓存：换图之后 URL 就变了。
+/// 没有上传过背景图时返回 404，前端会退回无背景图的样子。
+pub async fn site_background(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    serve_site_asset(
+        &state,
+        &headers,
+        pixora_core::settings::keys::BACKGROUND_ASSET_KEY,
+        "背景图",
+    )
+    .await
 }
 
 /// `GET /api/v1/plaza/tags` — 公开。广场顶部的标签 chips。

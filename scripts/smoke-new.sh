@@ -469,6 +469,7 @@ expect "安装账号可以改自己" '"email":"admin@pixora.test"' "$out"
 say "删除账号：连着数据和文件一起清"
 out=$(req POST /admin/users '{"email":"doomed@pixora.test","password":"Smoke-Test-2026x"}')
 DOOMED_ID=$(printf '%s' "$out" | jq_get "['user']['id']")
+DOOMED_UID=$(printf '%s' "$out" | jq_get "['user']['uid']")
 out=$(req POST "/admin/users/$DOOMED_ID/impersonate" '{}')
 expect "切到待删账号" 'doomed@pixora.test' "$out"
 python "$ROOT/scripts/make-test-png.py" "$DIR/doomed.png" 72
@@ -497,6 +498,11 @@ esac
 files_left=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
 [ "$files_left" -lt "$files_after" ] && ok "它的文件已经不在盘上（$files_after → $files_left）" \
   || bad "删账号该把文件一起清掉" "after=$files_after left=$files_left"
+# 注销之后账号历史还查得到，而且写明是哪个管理员动的
+out=$(req GET "/admin/logs?uid=$DOOMED_UID")
+expect "注销后账号历史仍在" 'account_delete' "$out"
+expect "注销那条写着管理员" '管理员' "$out"
+expect "记录里带着销号时的邮箱" 'doomed@pixora.test' "$out"
 
 say "注册邮箱白名单"
 # 冒烟机的磁盘占用常年偏高，会把注册入口自动关掉（这是设计行为）。
@@ -818,6 +824,8 @@ case "$GUEST_ROW" in
 esac
 out=$(req GET "/images?uid=0000")
 expect "管理员能翻到访客的照片" '"total":' "$out"
+# 上面那次上传客户端填的是 private：访客只有公开一种，服务端按账号定
+expect "访客上传被强制公开" '"visibility":"public"' "$out"
 
 # 访客账号不接受登录：它是游客上传的归属地，不是给人用的账号
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" \
@@ -836,9 +844,89 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" -X POST \
   "$BASE/admin/users/$GUEST_ID/impersonate" -H 'Content-Type: application/json' \
   -H "X-CSRF-Token: $(csrf)" -d '{}')
 [ "$code" = "403" ] && ok "不能切换登录到访客账号（403）" || bad "该回 403" "code=$code"
+# 也不能删：删了等于把全站游客的图一次性清空
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" -X DELETE \
+  "$BASE/admin/users/$GUEST_ID?confirm=visitor%40pixora.invalid" -H "X-CSRF-Token: $(csrf)")
+[ "$code" = "403" ] && ok "访客账号不能被删除（403）" || bad "该回 403" "code=$code"
+out=$(req GET "/admin/users?query=0000")
+expect "被拒之后访客账号还在" '"total":1' "$out"
 
 out=$(req PUT /admin/settings '{"site":{"require_login_to_upload":true}}')
 expect "关回游客上传" '"ok":true' "$out"
+out=$(req GET "/admin/users?query=0000")
+expect "关闭游客上传不删访客账号" '"total":1' "$out"
+
+say "缩略图：?thumb=1 给的是缩略图那一份"
+# 缩略图用 stdin 递给 curl（`@-`）：git-bash 下同一条命令里放两个「绝对路径的 -F
+# 文件」会让 curl 报 rc=26（命令行里那些 /e/... 路径被转换时的坑），@- 绕开它
+python - "$DIR/thumb.webp" <<'PY'
+import sys
+open(sys.argv[1], "wb").write(b"RIFF" + bytes([0x1a, 0, 0, 0]) + b"WEBP" + bytes(14))
+PY
+out=$(cat "$DIR/thumb.webp" | curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" -F "file=@$DIR/up.png" -F "thumb=@-;type=image/webp" -F "visibility=public" -F "original_name=thumb-check.png")
+expect "带缩略图上传成功" '"thumb_url"' "$out"
+THUMB_URL=$(printf '%s' "$out" | jq_get "['thumb_url']")
+ORIG_URL=$(printf '%s' "$out" | jq_get "['url']")
+THUMB_TYPE=$(curl -s -o /dev/null -w '%{content_type}' "$THUMB_URL")
+THUMB_SIZE=$(curl -s -o /dev/null -w '%{size_download}' "$THUMB_URL")
+ORIG_SIZE=$(curl -s -o /dev/null -w '%{size_download}' "$ORIG_URL")
+case "$THUMB_TYPE" in
+  image/webp) ok "带 ?thumb=1 时发的是缩略图（$THUMB_SIZE 字节）" ;;
+  *) bad "该发缩略图那一份" "content-type=$THUMB_TYPE" ;;
+esac
+[ "$THUMB_SIZE" != "$ORIG_SIZE" ] \
+  && ok "缩略图与原图是两份实体（$THUMB_SIZE vs $ORIG_SIZE）" \
+  || bad "缩略图不该等于原图" "$THUMB_SIZE"
+
+say "缩略图重算：老图按新尺寸重来"
+# 造一张 800px 的图 + 一张假的「老缩略图」（26 字节的 webp），
+# 重算之后这张缩略图应当被服务端生成的大图替换掉
+python "$ROOT/scripts/make-test-png.py" "$DIR/big.png" 800
+out=$(cat "$DIR/thumb.webp" | curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" -F "file=@$DIR/big.png" -F "thumb=@-;type=image/webp" -F "visibility=public" -F "original_name=big-thumb.png")
+expect "带旧缩略图上传" '"thumb_url"' "$out"
+BIG_THUMB=$(printf '%s' "$out" | jq_get "['thumb_url']")
+BIG_BEFORE_TYPE=$(curl -s -o /dev/null -w '%{content_type}' "$BIG_THUMB")
+BIG_BEFORE_SIZE=$(curl -s -o /dev/null -w '%{size_download}' "$BIG_THUMB")
+case "$BIG_BEFORE_TYPE" in
+  image/webp) ok "重算前用的是客户端那张小图（$BIG_BEFORE_SIZE 字节）" ;;
+  *) bad "重算前该是客户端那张" "content-type=$BIG_BEFORE_TYPE" ;;
+esac
+out=$(req POST /admin/storage/thumbs/rebuild '{}')
+expect "开始重算" '"running":true' "$out"
+# 后台分批做，轮询进度直到跑完（最多等 40 秒）
+for _ in $(seq 1 20); do
+  out=$(req GET /admin/storage)
+  case "$out" in
+    *'"running":true'*) sleep 2 ;;
+    *) break ;;
+  esac
+done
+expect "重算跑完" '"running":false' "$out"
+BIG_AFTER_TYPE=$(curl -s -o /dev/null -w '%{content_type}' "$BIG_THUMB")
+BIG_AFTER_SIZE=$(curl -s -o /dev/null -w '%{size_download}' "$BIG_THUMB")
+[ "$BIG_AFTER_TYPE" = "image/jpeg" ]   && ok "重算后换成服务端生成的大缩略图（$BIG_AFTER_SIZE 字节）"   || bad "该换成服务端生成的 jpeg" "content-type=$BIG_AFTER_TYPE"
+[ "$BIG_AFTER_SIZE" -gt "$BIG_BEFORE_SIZE" ]   && ok "缩略图确实变大了（$BIG_BEFORE_SIZE → $BIG_AFTER_SIZE）"   || bad "重算后该更大" "before=$BIG_BEFORE_SIZE after=$BIG_AFTER_SIZE"
+
+say "同一份内容复用：不在图库里留第二份（头像那套）"
+# 内容要是新的（尺寸别和上面用过的撞：内容一样就会命中去重，复用测不出来）
+python "$ROOT/scripts/make-test-png.py" "$DIR/reuse.png" 104
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" \
+  -F "file=@$DIR/reuse.png" -F "visibility=private" -F "original_name=reuse-a.png")
+FIRST_ID=$(printf '%s' "$out" | jq_get "['id']")
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" \
+  -F "file=@$DIR/reuse.png" -F "visibility=private" -F "tags=avatar" \
+  -F "reuse_existing=1" -F "original_name=reuse-b.png")
+expect "带上复用开关" '"reused":true' "$out"
+REUSED_ID=$(printf '%s' "$out" | jq_get "['id']")
+[ -n "$FIRST_ID" ] && [ "$FIRST_ID" = "$REUSED_ID" ] \
+  && ok "复用指回图库里那一张（id=$FIRST_ID）" \
+  || bad "该指回已有那张" "first=$FIRST_ID reused=$REUSED_ID"
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" \
+  -F "file=@$DIR/reuse.png" -F "visibility=private" -F "original_name=reuse-c.png")
+THIRD_ID=$(printf '%s' "$out" | jq_get "['id']")
+[ "$THIRD_ID" != "$FIRST_ID" ] \
+  && ok "不带开关时仍是新的一条记录" \
+  || bad "普通上传该是新记录" "id=$THIRD_ID"
 
 say "防盗链"
 out=$(req PUT /admin/settings '{"security":{"hotlink_enabled":true,"hotlink_allow_empty":true,"hotlink_domains":"allowed.example.com"}}')
@@ -884,6 +972,114 @@ if [ "$first" = "$second" ]; then
 else
   bad "同一 seed 的顺序该稳定" "两次结果不一致"
 fi
+
+say "站点默认头像：上传即生效，没设过头像的账号都用它"
+# 服务端只嗅探魔数，这张 26 字节的 webp 够用
+python - "$DIR/site-avatar.webp" <<'PY'
+import sys
+open(sys.argv[1], "wb").write(b"RIFF" + bytes([0x1a, 0, 0, 0]) + b"WEBP" + bytes(14))
+PY
+out=$(cat "$DIR/site-avatar.webp" | curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/admin/settings/avatar" -H "X-CSRF-Token: $(csrf)" -F "file=@-;type=image/webp")
+expect "上传默认头像成功" '"url"' "$out"
+expect "回报了字节数" '"bytes"' "$out"
+out=$(curl -s "$BASE/site")
+expect "站点信息里带默认头像" '"default_avatar"' "$out"
+DEFAULT_AVATAR=$(printf '%s' "$out" | python -c "import json,sys; print(json.load(sys.stdin)['data'].get('default_avatar') or '')")
+[ -n "$DEFAULT_AVATAR" ] && ok "默认头像有公开地址（$DEFAULT_AVATAR）" || bad "该有地址" "$out"
+if [ -n "$DEFAULT_AVATAR" ]; then
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8099$DEFAULT_AVATAR")
+  [ "$code" = "200" ] && ok "默认头像本体可访问（200）" || bad "该回 200" "code=$code url=$DEFAULT_AVATAR"
+fi
+# 默认头像是「下发给前端回落」的，不写进账号行：清掉自己的头像后 /me 里就是 null
+out=$(req PATCH /me '{"avatar":""}')
+expect "默认头像不写进账号行（清掉自己的之后是 null）" '"avatar":null' "$out"
+out=$(req PUT /admin/settings '{"appearance":{"default_avatar":null}}')
+expect "清掉默认头像" '"ok":true' "$out"
+out=$(curl -s "$BASE/site")
+expect "清掉之后不再下发地址" '"default_avatar":null' "$out"
+if [ -n "$DEFAULT_AVATAR" ]; then
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8099$DEFAULT_AVATAR")
+  [ "$code" = "404" ] && ok "资产字节也一起删了（404）" || bad "该回 404" "code=$code"
+fi
+
+say "换头像时清理本地那张：没别的引用就连文件一起收"
+python "$ROOT/scripts/make-test-png.py" "$DIR/avatar-clean.png" 120
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" -F "file=@$DIR/avatar-clean.png" -F "tags=avatar" -F "visibility=private" -F "original_name=avatar-clean.png")
+expect "传一张当头像的图" '"url"' "$out"
+files_after_upload=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
+AVATAR_DIRECT=$(printf '%s' "$out" | jq_get "['url']")
+out=$(req PATCH /me "{\"avatar\":\"$AVATAR_DIRECT\"}")
+expect "设为头像（站内直链折成相对路径）" '"avatar":"/images/' "$out"
+out=$(req PATCH /me '{"avatar":"https://example.com/me.png"}')
+expect "换成外链头像" 'https://example.com/me.png' "$out"
+AVATAR_ROWS=$(python - "$DIR/pixora.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+print(conn.execute(
+    "SELECT COUNT(*) FROM images WHERE original_name = 'avatar-clean.png' AND deleted_at IS NULL"
+).fetchone()[0])
+PY
+)
+[ "$AVATAR_ROWS" = "0" ] && ok "本地那张已从图库消失" || bad "该被清掉" "rows=$AVATAR_ROWS"
+files_after=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
+[ "$files_after" -lt "$files_after_upload" ]   && ok "没有别的引用，物理文件也收了（$files_after_upload → $files_after）"   || bad "无引用时该连文件一起删" "upload=$files_after_upload after=$files_after"
+
+# 反过来：同一份内容在图库里还留着另一条引用时，只删头像这条，文件留着
+python "$ROOT/scripts/make-test-png.py" "$DIR/avatar-shared.png" 128
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" -F "file=@$DIR/avatar-shared.png" -F "visibility=private" -F "original_name=avatar-shared.png")
+expect "先存一份在相册里" '"url"' "$out"
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" -F "file=@$DIR/avatar-shared.png" -F "tags=avatar" -F "visibility=private" -F "original_name=avatar-shared-tag.png")
+expect "同一份内容再传一次当头像" '"url"' "$out"
+SHARED_DIRECT=$(printf '%s' "$out" | jq_get "['url']")
+out=$(req PATCH /me "{\"avatar\":\"$SHARED_DIRECT\"}")
+expect "设为头像" '"avatar":"/images/' "$out"
+files_before_shared=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
+out=$(req PATCH /me '{"avatar":"https://example.com/me2.png"}')
+expect "再换成外链头像" 'https://example.com/me2.png' "$out"
+SHARED_ROWS=$(python - "$DIR/pixora.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+rows = dict(conn.execute(
+    "SELECT original_name, COUNT(*) FROM images WHERE original_name LIKE 'avatar-shared%' AND deleted_at IS NULL GROUP BY original_name"
+))
+print(f"{rows.get('avatar-shared.png', 0)}|{rows.get('avatar-shared-tag.png', 0)}")
+PY
+)
+case "$SHARED_ROWS" in
+  "1|0") ok "只删了头像那条引用，相册里那份还在（$SHARED_ROWS）" ;;
+  *) bad "该只删头像那条" "相册那份|头像那份 = $SHARED_ROWS" ;;
+esac
+files_after_shared=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
+[ "$files_after_shared" = "$files_before_shared" ]   && ok "还有引用，物理文件留着（$files_after_shared）"   || bad "有引用时别删文件" "before=$files_before_shared after=$files_after_shared"
+
+say "换绑邮箱与账号历史"
+# 没有 SMTP 时这一步要如实报错，而不是假装把码发出去了
+out=$(req POST /me/email/code '{"email":"admin-new@pixora.test","password":"Smoke-Test-2026x"}')
+expect "SMTP 没配时换绑发码如实报错" '发信服务（SMTP）尚未配置' "$out"
+# 码在真实流程里由邮件送达；这里直接落一条，走完第二步
+python - "$DIR/pixora.db" <<'PY'
+import datetime, hashlib, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+stamp = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+conn.execute(
+    "INSERT INTO email_verifications (email, code_hash, purpose, expires_at, consumed_at, attempts, request_ip, created_at) "
+    "VALUES (?, ?, 'change_email', ?, NULL, 0, '127.0.0.1', ?)",
+    ("admin-new@pixora.test", hashlib.sha256(b"135790").hexdigest(), stamp, stamp),
+)
+conn.commit()
+PY
+out=$(req POST /me/email '{"email":"admin-new@pixora.test","code":"135790"}')
+expect "带上验证码换绑成功" '"email":"admin-new@pixora.test"' "$out"
+expect "通知没发出去时如实说" '"delivered":false' "$out"
+out=$(req GET /me)
+expect "当前邮箱已经是新的" 'admin-new@pixora.test' "$out"
+out=$(req GET "/admin/logs?query=admin-new@pixora.test")
+expect "账号历史记下这次换绑" 'account_email_change' "$out"
+expect "换绑那条标明是本人操作" '本人' "$out"
+out=$(req GET "/admin/logs?action=login_success")
+expect "登录记录也在账号历史里" 'login_success' "$out"
+out=$(req GET "/admin/logs?action=account_email_change")
+expect "按动作筛得动" '更换邮箱' "$out"
 
 say "退出登录"
 out=$(req POST /auth/logout '{}')

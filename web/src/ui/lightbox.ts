@@ -260,12 +260,22 @@ export function openLightbox(
     { passive: false },
   );
 
-  // 指针事件同时覆盖鼠标拖拽与单指滑动
+  // 指针事件同时覆盖鼠标拖拽与单指滑动。
+  //
+  // 三条约束，缺一条就会出现「按住左键拖不动、松开以后图反而跟着光标走」：
+  //   1. **捕获放在 stage 上**：放在 img 上时，指针划出图片边界后事件就断了；
+  //   2. **只认左键，并且移动时必须还按着**：指针事件在没按键时也会持续上报，
+  //      少了这个判断，一次拖拽之后光标随便动一下图都会跟着跑；
+  //   3. **拖动期间关掉过渡动画**（见 `.dragging` 那条 CSS）：img 上有
+  //      `transition: transform .12s`，每次都慢半拍追光标，手感就是「拖不动」。
   stage.addEventListener("pointerdown", (event) => {
     const pointer = event as PointerEvent;
-    image.setPointerCapture?.(pointer.pointerId);
+    // 鼠标只认左键；触摸与触控笔没有「键」的概念，照常放行
+    if (pointer.pointerType === "mouse" && pointer.button !== 0) return;
     if (scale > 1) {
+      stage.setPointerCapture?.(pointer.pointerId);
       dragStart = { x: pointer.clientX - offsetX, y: pointer.clientY - offsetY };
+      stage.classList.add("dragging");
     } else {
       swipeStart = { x: pointer.clientX, y: pointer.clientY };
     }
@@ -274,6 +284,11 @@ export function openLightbox(
   stage.addEventListener("pointermove", (event) => {
     const pointer = event as PointerEvent;
     if (dragStart) {
+      // 松开之后不再跟手：有时 pointerup 被系统手势吃掉，靠这里兜底
+      if (pointer.pointerType === "mouse" && (pointer.buttons & 1) === 0) {
+        endDrag();
+        return;
+      }
       offsetX = pointer.clientX - dragStart.x;
       offsetY = pointer.clientY - dragStart.y;
       applyTransform();
@@ -303,11 +318,17 @@ export function openLightbox(
         step(dx < 0 ? 1 : -1);
       }
     }
-    dragStart = null;
+    endDrag();
     swipeStart = null;
     pullDistance = 0;
     applyTransform();
   });
+
+  /** 收尾一次拖拽：清掉状态与 `.dragging`，动画恢复。 */
+  function endDrag(): void {
+    dragStart = null;
+    stage.classList.remove("dragging");
+  }
 
   // 双指缩放
   stage.addEventListener("touchstart", (event) => {

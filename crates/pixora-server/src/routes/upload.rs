@@ -40,7 +40,7 @@ use crate::http::{cookie_value, error_response, finish, request_context, CSRF_CO
 
 use super::{require_user, PeerAddr};
 
-/// 缩略图的内存上限。客户端生成的缩略图最长边 400px，正常在几十 KB；
+/// 缩略图的内存上限。客户端生成的缩略图最长边 1024px，正常在一百多 KB；
 /// 给到 4 MiB 是为了容忍 PNG 兜底，比这更大的说明客户端在做别的事。
 const MAX_THUMB_BYTES: usize = 4 * 1024 * 1024;
 
@@ -272,6 +272,8 @@ struct UploadParts {
     sha256: Option<String>,
     original_name: Option<String>,
     thumb: Option<Vec<u8>>,
+    /// 「已经有就复用」开关（见 `UploadInput::reuse_existing`）
+    reuse_existing: bool,
 }
 
 impl UploadParts {
@@ -283,6 +285,7 @@ impl UploadParts {
             sha256: None,
             original_name: None,
             thumb: None,
+            reuse_existing: false,
         }
     }
 }
@@ -373,6 +376,15 @@ async fn collect_upload(
                     parts.thumb = Some(buffer);
                 }
             }
+            "reuse_existing" => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|err| AppError::bad_request(format!("读取 reuse_existing 失败：{err}")))?;
+                // 表单里的布尔：`1` / `true` 都算开
+                let text = text.trim().to_ascii_lowercase();
+                parts.reuse_existing = matches!(text.as_str(), "1" | "true" | "yes" | "on");
+            }
             // ---------- 文件字段：先收下来，读完后面的元数据再提交 ----------
             "file" | "image" => {
                 // multipart 的 filename / content-type 只有在这个字段上拿得到，
@@ -415,6 +427,7 @@ async fn collect_upload(
         content_type,
         upload_ip: None,
         upload_agent: None,
+        reuse_existing: parts.reuse_existing,
     }
     // 来源记在图片行上：访客上传时这是唯一的「谁传的」线索
     .with_origin(ctx.ip.as_deref(), ctx.user_agent.as_deref());
@@ -444,6 +457,8 @@ pub fn upload_payload(outcome: &UploadOutcome, csrf_token: Option<String>) -> se
         "sha256": outcome.sha256,
         "size": outcome.size,
         "dedup": outcome.dedup,
+        // 复用了图库里已有的那张（头像这类场景）：客户端据此换一句提示
+        "reused": outcome.reused,
         "storage_type": outcome.storage_type,
         "fallback_message": outcome.fallback_message,
         "tags": outcome.tags,

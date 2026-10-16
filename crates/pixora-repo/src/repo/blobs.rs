@@ -54,6 +54,36 @@ impl Repo {
         row.as_ref().map(Blob::from_row).transpose()
     }
 
+    /// 按原图哈希找这张图片的缩略图实体。
+    ///
+    /// 直链的形状是「原图哈希 + `?thumb=1`」：URL 里那个哈希标识的是这张图片，
+    /// 而缩略图是另算过哈希的一份实体，所以拿同一个哈希去 `kind = 'thumb'` 里查
+    /// 永远查不到——缩略图得顺着图片行找。
+    ///
+    /// 同一份原图可能被多人引用（去重），各自的缩略图编码参数可能不同，
+    /// 取一张就行。优先取还活着的引用：回收站里的图没必要再拿它的缩略图。
+    pub async fn find_thumb_blob_for_original(&self, sha256: &str) -> Result<Option<Blob>> {
+        let sql = format!(
+            "SELECT {} FROM blobs WHERE id = ( \
+                 SELECT i.thumb_blob_id FROM images i \
+                   JOIN blobs o ON o.id = i.blob_id \
+                  WHERE o.sha256 = ? AND o.kind = ? AND i.thumb_blob_id IS NOT NULL \
+                  ORDER BY CASE WHEN i.deleted_at IS NULL THEN 0 ELSE 1 END \
+                  LIMIT 1)",
+            Blob::COLUMNS
+        );
+        let row = self
+            .db
+            .fetch_optional(
+                &sql,
+                Args::new()
+                    .text(sha256)
+                    .text(storage_kind::ORIGINAL),
+            )
+            .await?;
+        row.as_ref().map(Blob::from_row).transpose()
+    }
+
     /// 批量预检：客户端把一批哈希发过来，服务端只回哪些已存在。
     ///
     /// 这是省带宽的关键一步——重复文件连上传请求都不发。哈希数量可能上千，

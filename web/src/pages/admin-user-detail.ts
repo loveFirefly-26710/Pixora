@@ -19,7 +19,7 @@ import {
 import { confirmDialog, openModal } from "../core/modal";
 import { navigate } from "../core/router";
 import type { PageContext } from "../core/router";
-import { canOperateAccount, getState } from "../core/state";
+import { accountLabel, canOperateAccount, getState } from "../core/state";
 import { toast, toastError, toastOk } from "../core/toast";
 import type { AdminUserRow, PolicyFields, UserActionRow } from "../core/types";
 import { openRateLogs } from "./ratelimit-cards";
@@ -519,6 +519,12 @@ function actionsCard(detail: UserDetailPayload): HTMLElement {
     deleteButton.disabled = true;
     deleteButton.title = "安装时创建的管理员账号，不能删";
   }
+  // 访客账号不能删：它是全站游客上传的归属地，删掉等于把那些图一次性清除，
+  // 而且下一次游客上传又会把它建回来。想停游客上传有开关与暂停两条路
+  if (user.guest) {
+    deleteButton.disabled = true;
+    deleteButton.title = "访客账号是系统账号，不能删除；要停止游客上传就关掉「允许游客上传」或暂停它";
+  }
   deleteButton.addEventListener("click", async () => {
     if (user.id === getState().user?.id) {
       toastError(new Error("不能删除自己的账号"));
@@ -551,6 +557,19 @@ function actionsCard(detail: UserDetailPayload): HTMLElement {
 
   return card(
     "处置记录",
+    h(
+      "div.flexline",
+      { style: { marginBottom: "10px", gap: "8px" } },
+      h("button.btn.sm", {
+        type: "button",
+        text: "查看全部账号历史",
+        on: { click: () => navigate(`/admin/logs?uid=${encodeURIComponent(user.uid)}`) },
+      }),
+      h("span.tip", {
+        style: { margin: "0" },
+        text: "下面这张表随账号一起消失；「系统日志」里的那份不随账号删除，含登录记录与是谁操作的。",
+      }),
+    ),
     actions.length > 0
       ? responsiveTable(
           ["时间", "动作", "说明"],
@@ -566,7 +585,9 @@ function actionsCard(detail: UserDetailPayload): HTMLElement {
       { style: { marginTop: "14px" } },
       dangerZone(
         "危险操作",
-        "删除账号会同时删除该用户的全部相册与图片引用。引用计数归零的物理文件才会真正释放。",
+        user.guest
+          ? "访客账号是系统账号，不能删除：它名下是全站游客上传的图片，删掉等于一次性清空那些图。要停止游客上传，关掉「允许游客上传」或者暂停这个账号。"
+          : "删除账号会同时删除该用户的全部相册与图片引用。引用计数归零的物理文件才会真正释放。",
         deleteButton,
       ),
     ),
@@ -837,6 +858,10 @@ function openDispositionDialog(
     },
   );
 
+  // 访客账号：只填时长与备注。它登不进来，邮箱又是保留域（发出去必退信），
+  // 申诉邮箱、解封要求、通知邮件这几项对它都没有意义
+  if (user.guest) notify = false;
+
   const errorLine = h("div.tip", { style: { color: "var(--danger)" } });
   const cancel = h("button.btn", { type: "button", text: "取消" });
   const confirm = h("button.btn.wrn", { type: "button" });
@@ -849,7 +874,7 @@ function openDispositionDialog(
   refreshLabel();
 
   const handle = openModal({
-    title: `处置 ${user.email}`,
+    title: `处置 ${accountLabel(user)}`,
     body: [
       h("div.fld", null, h("label.f", { text: "处置类型" }), chips),
       h(
@@ -867,17 +892,31 @@ function openDispositionDialog(
           ),
           h("div.tip", { text: "留空表示永久，只能手动解封；填了就到期自动恢复。" }),
         ),
-        h(
-          "div.fld",
-          null,
-          h("label.f", { text: "申诉接收邮箱" }),
-          appeal,
-          h("div.tip", { text: "默认取注册发信邮箱，可改" }),
-        ),
+        ...(user.guest
+          ? []
+          : [
+              h(
+                "div.fld",
+                null,
+                h("label.f", { text: "申诉接收邮箱" }),
+                appeal,
+                h("div.tip", { text: "默认取注册发信邮箱，可改" }),
+              ),
+            ]),
       ),
-      h("div.fld", null, h("label.f", { text: "处置原因（展示给用户，也写进邮件）" }), reason),
-      field("解封要求（写进通知邮件的「如何解封」部分）", requirements),
-      notifyRow,
+      h(
+        "div.fld",
+        null,
+        h("label.f", { text: user.guest ? "备注（写进账号历史）" : "处置原因（展示给用户，也写进邮件）" }),
+        reason,
+      ),
+      ...(user.guest
+        ? [
+            h("div.tip", {
+              text: "访客账号不发通知邮件：它的邮箱收不到信，账号本身也登不进来。暂停它就是按住游客上传，恢复即重新开放。",
+            }),
+          ]
+        : [field("解封要求（写进通知邮件的「如何解封」部分）", requirements), notifyRow]),
       h(
         "div",
         { style: { marginTop: "12px" } },
@@ -895,7 +934,9 @@ function openDispositionDialog(
   cancel.addEventListener("click", () => handle.close());
   confirm.addEventListener("click", async () => {
     if (!reason.value.trim()) {
-      errorLine.textContent = "请填写处置原因：它会展示给用户，也会写进通知邮件。";
+      errorLine.textContent = user.guest
+        ? "请填写备注：它会写进账号历史。"
+        : "请填写处置原因：它会展示给用户，也会写进通知邮件。";
       reason.focus();
       return;
     }

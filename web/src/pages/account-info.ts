@@ -20,6 +20,7 @@ import {
 import { confirmDialog } from "../core/modal";
 import type { PageContext } from "../core/router";
 import { loadMe, updateUser } from "../core/state";
+import { avatarUrl } from "../ui/shell";
 import { toastError, toastOk } from "../core/toast";
 import type { UserLimits, UserProfile } from "../core/types";
 import {
@@ -76,9 +77,9 @@ export async function render(ctx: PageContext): Promise<void> {
  * 头像卡：上传一张，或填一个图片地址。
  *
  * 上传走的是普通上传接口（落进默认相册、打上 `avatar` 标签），所以头像也是
- * 图库里的正经一张图：能在相册里看到、占配额、走内容审核。服务端内容是
- * 寻址的，同一张图再传一次会复用那份字节、只多一条引用——正是「已存在就
- * 复制一份过来」的意思。
+ * 图库里的正经一张图：能在相册里看到、占配额、走内容审核。带 `reuse_existing`
+ * 的意思是「这份内容我图库里已经有就复用它」——同一张图反复设头像时，相册里
+ * 不会并排多出两张一模一样的。
  */
 function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
   const preview = h("div.avatar-preview");
@@ -89,7 +90,8 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
       mount(preview, h("span", { text: (user.email[0] ?? "U").toUpperCase() }));
     }
   };
-  paint(user.avatar ?? "");
+  // 与外层的头像同一套回落：自己的 → 站点默认 → 首字母方块
+  paint(avatarUrl(user));
 
   const urlInput = textInput({
     value: user.avatar && /^https?:/.test(user.avatar) ? user.avatar : "",
@@ -120,7 +122,8 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
   remove.addEventListener("click", async () => {
     const ok = await confirmDialog({
       title: "移除头像",
-      message: "仅解除头像引用；该图片仍保留在相册中。",
+      message:
+        "移除后回到站点默认头像。当初上传的那张头像图会一并清理（同一份内容在别处还有引用时只解这条引用）。",
       confirmText: "移除",
       danger: true,
     });
@@ -138,7 +141,10 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
         "div",
         { style: { flex: "1 1 220px", minWidth: "200px" } },
         h("div", { text: "建议使用正方形图片。上传后将存入「默认相册」，并标记 avatar 标签。" }),
-        h("div.tip", { style: { marginTop: "6px" }, text: "也可直接填写图片地址（外链或本站直链）。" }),
+        h("div.tip", {
+          style: { marginTop: "6px" },
+          text: "也可直接填写图片地址（外链或本站直链）。换成别的头像（或移除）时，上一张本地上传的头像图会一并清理。",
+        }),
       ),
       h("div", { style: { flex: "0 0 auto", display: "flex", gap: "8px", flexWrap: "wrap" } }, uploadBtn, remove),
       fileInput,
@@ -194,10 +200,21 @@ async function uploadAvatar(file: File, button: HTMLButtonElement, reload: () =>
     form.append("tags", "avatar");
     form.append("visibility", "private");
     form.append("original_name", "avatar.jpg");
-    const uploaded = await request<{ url: string; dedup: boolean }>("/upload", { method: "POST", form });
+    // 同一张图设过头像就不必在图库里再留第二份：服务端直接引用已有的那张
+    form.append("reuse_existing", "1");
+    const uploaded = await request<{ url: string; dedup: boolean; reused: boolean }>("/upload", {
+      method: "POST",
+      form,
+    });
     await request("/me", { method: "PATCH", json: { avatar: uploaded.url } });
     await loadMe();
-    toastOk(uploaded.dedup ? "该图片已存在于图库，已直接引用为头像" : "头像已上传并应用");
+    toastOk(
+      uploaded.reused
+        ? "这张图已经在你的图库里，已直接引用为头像"
+        : uploaded.dedup
+          ? "图库里已有相同文件，已引用为头像"
+          : "头像已上传并应用",
+    );
     reload();
   } catch (err) {
     toastError(err);

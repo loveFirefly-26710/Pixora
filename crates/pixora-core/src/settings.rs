@@ -21,6 +21,12 @@ pub mod keys {
     pub const BACKGROUND_ASSET_MARKER: &str = "asset";
     /// 背景图的公开地址（服务器自己提供，与站点同源）
     pub const BACKGROUND_PUBLIC_PATH: &str = "/api/v1/site/background";
+    /// 站点默认头像上传后存进 `storage_objects` 的键名
+    pub const AVATAR_ASSET_KEY: &str = "config:default_avatar";
+    /// `site.default_avatar` 取这个值表示「用上传的那张图」
+    pub const AVATAR_ASSET_MARKER: &str = "asset";
+    /// 默认头像的公开地址（服务器自己提供，与站点同源）
+    pub const AVATAR_PUBLIC_PATH: &str = "/api/v1/site/avatar";
     pub const INSTALLED: &str = "install.completed";
     /// 安装时创建的那个管理员账号的 UID。它是安装账号，别的管理员动不了它
     pub const INSTALL_ADMIN_UID: &str = "install.admin_uid";
@@ -46,6 +52,11 @@ pub mod keys {
     pub const UPLOAD_REQUIRE_LOGIN: &str = "upload.require_login";
     pub const THUMB_CLIENT: &str = "thumb.client";
     pub const THUMB_SERVER_FALLBACK: &str = "thumb.server_fallback";
+    /// 缩略图重算的游标：处理到哪个 image id 了（0 = 从头来）
+    pub const THUMB_REGEN_CURSOR: &str = "thumb.regen_cursor";
+    /// 这一轮重算的总张数与已完成张数（界面上看进度用）
+    pub const THUMB_REGEN_TOTAL: &str = "thumb.regen_total";
+    pub const THUMB_REGEN_DONE: &str = "thumb.regen_done";
     pub const CAPACITY_MODE: &str = "capacity.mode";
     pub const CAPACITY_MANUAL_TOTAL: &str = "capacity.manual_total";
     pub const QUOTA_DEFAULT: &str = "quota.default_bytes";
@@ -71,6 +82,8 @@ pub mod keys {
     pub const ANTISPAM_MX: &str = "antispam.mx_check";
     pub const ANTISPAM_THIRD_PARTY: &str = "antispam.third_party_key";
     pub const APPEARANCE_BACKGROUND: &str = "appearance.background";
+    /// 站点默认头像：没设过头像的账号（含新注册的）用它。外链或上传的那张
+    pub const SITE_DEFAULT_AVATAR: &str = "site.default_avatar";
     /// 回收站保留天数。0 = 关闭回收站（删除即彻底删）
     pub const RECYCLE_RETENTION_DAYS: &str = "recycle.retention_days";
     /// 会话闲置超时（分钟）。0 = 不按闲置判
@@ -712,6 +725,30 @@ impl Settings {
             keys::BACKGROUND_PUBLIC_PATH,
             version
         )))
+    }
+
+    /// 站点默认头像的对外地址。
+    ///
+    /// 与背景图同一套：外链原样返回；上传的那张用本站地址并带版本号，
+    /// 换图之后旧缓存立刻失效。没配过返回 `None`——前端回落到首字母方块。
+    pub async fn default_avatar_url(&self) -> Result<Option<String>> {
+        let Some(raw) = self.raw(keys::SITE_DEFAULT_AVATAR).await? else {
+            return Ok(None);
+        };
+        let raw = raw.trim().to_string();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        if raw != keys::AVATAR_ASSET_MARKER {
+            return Ok(Some(raw));
+        }
+        let version = self
+            .repo
+            .asset_version(keys::AVATAR_ASSET_KEY)
+            .await?
+            .unwrap_or_default();
+        let version: String = version.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        Ok(Some(format!("{}?v={}", keys::AVATAR_PUBLIC_PATH, version)))
     }
 }
 

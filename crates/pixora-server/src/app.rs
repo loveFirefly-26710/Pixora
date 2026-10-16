@@ -59,6 +59,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         // ---------- 公开 ----------
         .route("/site", get(r::public::site))
         .route("/site/background", get(r::public::site_background))
+        .route("/site/avatar", get(r::public::site_avatar))
         .route("/plaza", get(r::public::plaza))
         .route("/plaza/tags", get(r::public::plaza_tags))
         .route("/random", get(r::public::random_image))
@@ -85,6 +86,9 @@ fn api_routes() -> Router<Arc<AppState>> {
         // ---------- 当前用户 ----------
         .route("/me", get(r::account::me_get).patch(r::account::me_patch))
         .route("/me/password", post(r::account::password_change))
+        // 换绑邮箱：先给新地址发码，再带上码提交
+        .route("/me/email/code", post(r::account::email_change_code))
+        .route("/me/email", post(r::account::email_change))
         .route("/me/totp", post(r::account::totp))
         .route(
             "/me/recovery-codes",
@@ -164,6 +168,8 @@ fn api_routes() -> Router<Arc<AppState>> {
             put(r::admin::ratelimit_user_put).delete(r::admin::ratelimit_user_delete),
         )
         .route("/admin/ratelimit/logs", get(r::admin::ratelimit_logs))
+        // 账号历史（注册 / 换邮箱 / 处置 / 注销 / 登录）：账号删掉也查得到
+        .route("/admin/logs", get(r::admin::account_logs))
         .route(
             "/admin/ratelimit",
             get(r::admin::ratelimit_get).put(r::admin::ratelimit_global_put),
@@ -180,6 +186,11 @@ fn api_routes() -> Router<Arc<AppState>> {
             put(r::admin::ratelimit_breach_put),
         )
         .route("/admin/storage", get(r::admin::storage_get))
+        // 重算缩略图：老图按新尺寸重生成一遍（后台队列分批做）
+        .route(
+            "/admin/storage/thumbs/rebuild",
+            post(r::admin::storage_thumbs_rebuild),
+        )
         .route("/admin/storage/gc", post(r::admin::storage_gc))
         .route(
             "/admin/storage/default",
@@ -222,6 +233,11 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route(
             "/admin/settings/background",
             post(r::admin::background_upload),
+        )
+        // 站点默认头像：没设过头像的账号（含新注册的）都用它
+        .route(
+            "/admin/settings/avatar",
+            post(r::admin::avatar_upload),
         )
         .route("/admin/settings/mail/test", post(r::admin::mail_test))
         // 邮件模板：管理员能在后台改文案、恢复内置

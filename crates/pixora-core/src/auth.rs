@@ -1072,6 +1072,113 @@ impl AppState {
         Ok(code)
     }
 
+    // ============================================================
+    // 自助换绑邮箱
+    // ============================================================
+
+    /// 换绑邮箱的第一步：把验证码发到**新**地址。
+    ///
+    /// 要当前密码：邮箱是「找回账号」的那把备用钥匙，光有会话还不够——
+    /// 会话被借用的场合不该顺手把账号的邮箱也改走。新地址先收到码并验过，
+    /// 才证明这个地址确实由提出更换的人在手上。
+    pub async fn send_email_change_code(
+        &self,
+        user: &User,
+        new_email: &str,
+        password_plain: &str,
+        device: &DeviceInfo,
+    ) -> Result<MailDelivery> {
+        let new_email = normalize_email_input(new_email)?;
+        if !password::verify_password(password_plain, &user.password_hash)? {
+            return Err(AppError::forbidden("当前密码不正确"));
+        }
+        if new_email.eq_ignore_ascii_case(&user.email) {
+            return Err(AppError::bad_request("新邮箱与当前邮箱相同，无需更换"));
+        }
+        // 注册用的域名白名单对换绑同样成立：站点只收这些域名的邮箱
+        self.ensure_register_domain_allowed(&new_email).await?;
+        if self.repo.email_exists(&new_email).await? {
+            return Err(AppError::Conflict("该邮箱已被其他账号使用".into()));
+        }
+        self.ensure_mail_ready()?;
+        self.ensure_verification_quota(&new_email, device.ip.as_deref(), purpose::CHANGE_EMAIL)
+            .await?;
+
+        let code = crypto_token::new_numeric_code(6)?;
+        self.repo
+            .create_email_verification(
+                &new_email,
+                &crypto_token::token_hash(&code),
+                purpose::CHANGE_EMAIL,
+                Utc::now() + Duration::minutes(code_ttl_minutes()),
+                device.ip.as_deref(),
+            )
+            .await?;
+        let delivery = self
+            .dispatch_mail(
+                &new_email,
+                pixora_mail::template::names::VERIFY_CODE,
+                serde_json::json!({ "email": new_email, "code": code }),
+            )
+            .await?;
+        Self::ensure_delivered(delivery)
+    }
+
+    /// 换绑邮箱的第二步：验码、改地址、通知新旧地址、留档。
+    ///
+    /// 返回新的地址与两封信的投递结果：界面要如实说「换成了哪个」，
+    /// 也要如实说「通知发出去了没有」。
+    pub async fn change_own_email(
+        &self,
+        user: &User,
+        new_email: &str,
+        code: &str,
+        device: &DeviceInfo,
+    ) -> Result<(String, MailDelivery)> {
+        let new_email = normalize_email_input(new_email)?;
+        if new_email.eq_ignore_ascii_case(&user.email) {
+            return Err(AppError::bad_request("新邮箱与当前邮箱相同，无需更换"));
+        }
+        self.consume_code(&new_email, purpose::CHANGE_EMAIL, code)
+            .await?;
+        // 发码之后可能被别人抢先占了这个地址，落库前再确认一次
+        if self.repo.email_exists(&new_email).await? {
+            return Err(AppError::Conflict("该邮箱已被其他账号使用".into()));
+        }
+
+        let old_email = user.email.clone();
+        // 新地址是刚验过码的，标成已验证；旧地址的「已验证」也随之失效
+        self.repo.set_email_verified(user.id, &new_email, true).await?;
+        self.repo
+            .insert_user_action(
+                user.id,
+                Some(user.id),
+                "change_email",
+                Some("本人更换邮箱"),
+                &serde_json::json!({ "from": old_email, "to": new_email, "via": "self" }),
+                false,
+                Utc::now(),
+            )
+            .await?;
+        // 「谁在什么时候把哪个账号的邮箱改成了什么」：账号历史里要看得见是本人操作的
+        self.audit_detail(
+            actions::ACCOUNT_EMAIL_CHANGE,
+            Some(user.id),
+            &user.uid,
+            serde_json::json!({ "from": old_email, "to": new_email, "via": "self", "actor_email": old_email }),
+            device.ip.as_deref(),
+        )
+        .await;
+
+        let updated = self
+            .repo
+            .find_user_by_id(user.id)
+            .await?
+            .ok_or_else(|| AppError::not_found("用户"))?;
+        let delivery = self.notify_email_change(&updated, &new_email).await?;
+        Ok((new_email, delivery))
+    }
+
     /// 生成恢复码。明文只返回一次，库里存哈希。
     pub async fn regenerate_recovery_codes(&self, user: &User) -> Result<Vec<String>> {
         let mut plain = Vec::with_capacity(RECOVERY_CODE_COUNT);
@@ -1433,6 +1540,79 @@ impl AppState {
         ))
     }
 
+    /// 换头像之后，把不再当头像的那张本地图片收掉。
+    ///
+    /// 上传头像的流程是「传一张图 → 打上 `avatar` 标签 → 把它的直链存进用户行」。
+    /// 换成别的头像（换成外链、或干脆移除）之后，那张图就只剩在图库里占地方了，
+    /// 而用户并不记得自己传过它。
+    ///
+    /// 三条边界：
+    ///   - 只动**自己**名下、带 `avatar` 标记的那张：手动把相册里某张照片的直链
+    ///     填成头像的人，换头像不该被删掉照片；
+    ///   - 同一份内容还有别的引用（比如那张图也在别的相册里存着一份）时，只删这条
+    ///     引用，物理文件留给另一条——引用计数归零才回收，与「彻底删除」同一条路；
+    ///   - 失败只记警告：头像是主要目的，清理是顺手做的事，不该让换头像失败。
+    pub async fn release_avatar_image(&self, user: &User, avatar: &str) -> Option<i64> {
+        let (sha, _ext) = parse_direct_link(avatar)?;
+        let blob = match self
+            .repo
+            .find_blob_by_sha(&sha, pixora_repo::model::storage_kind::ORIGINAL)
+            .await
+        {
+            Ok(Some(blob)) => blob,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(error = %err, "找头像实体失败，跳过清理");
+                return None;
+            }
+        };
+        let image = match self.repo.find_avatar_image(user.id, blob.id).await {
+            Ok(Some(image)) => image,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(error = %err, "找头像图片失败，跳过清理");
+                return None;
+            }
+        };
+        // 两步走：先软删（引用计数在这一步减一），再清掉墓碑。不留在回收站里——
+        // 这张图是「设头像」的副产品，用户并没有打算把它当图片留着。
+        // `purge_image_row` 只认墓碑行，少走第一步的话什么也不会发生
+        let deletion = pixora_repo::repo::images::ImageDeletion {
+            image_id: image.id,
+            owner_id: image.owner_id,
+            album_id: image.album_id,
+            blob_id: image.blob_id,
+            thumb_blob_id: image.thumb_blob_id,
+            size: blob.size,
+            by_album: false,
+        };
+        if let Err(err) = self
+            .repo
+            .delete_image_reference(&deletion, chrono::Utc::now())
+            .await
+        {
+            tracing::warn!(image_id = image.id, error = %err, "头像图片软删失败");
+            return None;
+        }
+        match self.repo.purge_image_row(image.id).await {
+            Ok(Some(targets)) => {
+                let reclaimed = self.reclaim_purged(vec![targets]).await;
+                self.kick_gc();
+                tracing::info!(
+                    image_id = image.id,
+                    reclaimed_files = reclaimed,
+                    "换头像后已清理旧的头像图片"
+                );
+                Some(image.id)
+            }
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(image_id = image.id, error = %err, "清理旧头像图片失败");
+                None
+            }
+        }
+    }
+
     /// 重置页要显示的信息：给哪个账号设密码、链接什么时候到期。
     ///
     /// 邮箱做了打码——这一页可能被旁人瞄到，链接本身就是凭据，
@@ -1563,6 +1743,27 @@ impl AppState {
             Err(err) => tracing::warn!(error = %err, "风控判定失败"),
         }
     }
+}
+
+/// 从存下来的头像地址里取出 `(sha256, ext)`。
+///
+/// 只认站内直链（`/images/{sha}.{ext}`，一级目录名可以在后台改）：外链头像
+/// 没有本地实体要收，返回 `None`。查询串与锚点忽略掉。
+pub fn parse_direct_link(value: &str) -> Option<(String, String)> {
+    let path = value.trim();
+    if !path.starts_with('/') {
+        return None;
+    }
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let file = path.rsplit('/').next()?;
+    let (hash_part, ext) = file.rsplit_once('.')?;
+    if hash_part.len() != 64 || !hash_part.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    if ext.is_empty() || ext.len() > 8 || !ext.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some((hash_part.to_ascii_lowercase(), ext.to_ascii_lowercase()))
 }
 
 /// 邮箱输入的基本校验与归一化。域名必须有点号，但不在这一步判断
@@ -1700,6 +1901,26 @@ mod tests {
         assert!(state.normalize_avatar(&"a".repeat(600)).await.is_err());
     }
 
+    /// 头像地址里那几个零件：站内直链认得出，外链与乱七八糟的输入一律不认。
+    #[test]
+    fn direct_links_are_parsed_for_cleanup() {
+        let sha = "05ed61440d8bc939cae590a525fcdcbd9c75addaabf7986a1219a3c55d3a98cd";
+        assert_eq!(
+            parse_direct_link(&format!("/images/{sha}.png")),
+            Some((sha.to_string(), "png".to_string())),
+            "站内直链要认出来（换头像时靠它找那张图）"
+        );
+        assert_eq!(
+            parse_direct_link(&format!("/i/{sha}.webp?v=2")).map(|(hash, _)| hash).as_deref(),
+            Some(sha),
+            "查询串不算在文件名里"
+        );
+        assert!(parse_direct_link("https://cdn.example.org/me.png").is_none(), "外链没有本地实体");
+        assert!(parse_direct_link("").is_none());
+        assert!(parse_direct_link("/images/not-a-hash.png").is_none(), "哈希形状不对");
+        assert!(parse_direct_link(&format!("/images/{sha}")).is_none(), "没有扩展名");
+    }
+
     /// 重置页上显示的是打码邮箱：能认出是哪个账号，又不至于摊开完整地址。
     #[test]
     fn reset_link_masks_the_email() {
@@ -1707,6 +1928,100 @@ mod tests {
         assert_eq!(mask_email("a@b.co"), "a***@b***.co");
         // 形状不标准的输入也不能崩，凑合给个结果就行
         assert_eq!(mask_email("没有at符号"), "没***@****");
+    }
+
+    /// 自助换绑邮箱：要当前密码才发码，码只认新地址，改完账号历史里记得明明白白。
+    #[tokio::test]
+    async fn self_service_email_change_switches_the_address() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let state = crate::tests_support::test_state(&dir).await;
+        let device = DeviceInfo::default();
+
+        // 口令得是真的：这一步就是要验它
+        let user = state
+            .repo
+            .create_user(&pixora_repo::repo::users::NewUser {
+                uid: "3201".to_string(),
+                email: "old@example.com".to_string(),
+                password_hash: pixora_crypto::password::hash_password("Old-Passw0rd-2026")
+                    .expect("哈希"),
+                role: pixora_repo::model::role::USER.to_string(),
+                status: pixora_repo::model::status::ACTIVE.to_string(),
+                quota_bytes: 1024 * 1024,
+                email_verified: true,
+            })
+            .await
+            .expect("建用户");
+
+        // 密码不对：不往下走
+        let wrong = state
+            .send_email_change_code(&user, "new@example.com", "Not-The-Password", &device)
+            .await
+            .unwrap_err();
+        assert!(wrong.message().contains("当前密码"), "{}", wrong.message());
+
+        // 密码对了但没配 SMTP：如实说发不出去，而不是假装发了码
+        let no_mail = state
+            .send_email_change_code(&user, "new@example.com", "Old-Passw0rd-2026", &device)
+            .await
+            .unwrap_err();
+        assert!(no_mail.message().contains("发信服务"), "{}", no_mail.message());
+
+        // 码在这一步由邮件送达（测试里直接落库），提交后地址就换了
+        let code = "482913";
+        state
+            .repo
+            .create_email_verification(
+                "new@example.com",
+                &crypto_token::token_hash(code),
+                purpose::CHANGE_EMAIL,
+                Utc::now() + Duration::minutes(10),
+                None,
+            )
+            .await
+            .expect("落码");
+        let delivery = state
+            .change_own_email(&user, "new@example.com", code, &device)
+            .await
+            .expect("换绑");
+        assert!(!delivery.1.delivered, "没有 SMTP 时不能报「通知已发出」");
+        assert_eq!(delivery.0, "new@example.com");
+
+        let after = state.repo.find_user_by_id(user.id).await.unwrap().unwrap();
+        assert_eq!(after.email, "new@example.com");
+        assert!(after.email_verified, "新地址是验过码的，标成已验证");
+
+        // 同一个码再用一次：已经消费掉了
+        assert!(
+            state
+                .change_own_email(&after, "third@example.com", code, &device)
+                .await
+                .is_err(),
+            "一次性的码不能复用"
+        );
+
+        // 账号历史里留了一条「本人更换邮箱」，从哪到哪都写着
+        let page = state
+            .account_log(
+                &crate::account_log::AccountLogFilter {
+                    action: Some(actions::ACCOUNT_EMAIL_CHANGE.to_string()),
+                    uid: None,
+                    query: None,
+                },
+                pixora_repo::PageRequest {
+                    page: 1,
+                    per_page: 50,
+                },
+            )
+            .await
+            .expect("读账号历史");
+        assert_eq!(page.items.len(), 1, "换绑只该记一条");
+        let row = &page.items[0];
+        assert_eq!(row.target_uid.as_deref(), Some("3201"));
+        assert_eq!(row.actor_kind, "self", "本人操作要标成 self");
+        assert!(row.actor_label.contains("本人"), "{}", row.actor_label);
+        assert_eq!(row.detail["from"], "old@example.com");
+        assert_eq!(row.detail["to"], "new@example.com");
     }
 
     #[tokio::test]

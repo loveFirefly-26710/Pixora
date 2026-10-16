@@ -44,6 +44,13 @@ pub struct UploadInput {
     /// 上传来源：IP 与终端。访客上传靠它留痕，登录用户顺手也记
     pub upload_ip: Option<String>,
     pub upload_agent: Option<String>,
+    /// 「同一份内容已经在我的图库里就复用它」，不新增一条引用。
+    ///
+    /// 头像这类「一张图反复设」的场景才用它：去重只让物理文件不翻倍，图片记录
+    /// 照样每传一次多一条，相册里就会并排站着两张一模一样的图。复用只补标签，
+    /// 不动那张图原有的相册、可见性与标题——它本来就是用户自己放进图库的，
+    /// 不该因为被设成头像就换位置
+    pub reuse_existing: bool,
 }
 
 impl UploadInput {
@@ -57,6 +64,7 @@ impl UploadInput {
             content_type: None,
             upload_ip: None,
             upload_agent: None,
+            reuse_existing: false,
         }
     }
 
@@ -91,6 +99,8 @@ pub struct UploadOutcome {
     pub tags: Vec<String>,
     pub url: String,
     pub thumb_url: Option<String>,
+    /// 这次没有新建图片，而是复用了图库里已有的那张（见 `UploadInput::reuse_existing`）
+    pub reused: bool,
 }
 
 /// 批量预检的结果。
@@ -193,7 +203,7 @@ impl AppState {
         }
 
         // 送原作还是送缩略图：原图在体积上限内就送原图，
-        // 超了就退回缩略图（长边 400px，判内容足够，四家都收得下）
+        // 超了就退回缩略图（长边 1024px，判内容足够，四家都收得下）
         if collected.size as usize <= crate::moderation::MAX_SUBMIT_BYTES {
             let bytes = collected.read_all().await?;
             return self
@@ -336,6 +346,13 @@ impl AppState {
     ) -> Result<UploadOutcome> {
         self.ensure_ip_allowed(ip, crate::ipguard::scope::UPLOAD).await?;
 
+        // 访客上传只有公开：那个账号登不进来，私有图片传完谁也看不见——
+        // 连它自己都进不去，等于白传。所以这里按账号定，不听客户端传了什么
+        let mut input = input;
+        if crate::guest::is_guest(user) {
+            input.visibility = visibility::PUBLIC.to_string();
+        }
+
         let upload_settings = self.settings.upload().await?;
         let policy = self.repo.effective_policy(user).await?;
         // 单文件上限、像素上限、格式白名单按「生效的上传策略」判：
@@ -383,7 +400,7 @@ impl AppState {
         }
 
         // 缩略图先读进内存：内容审核要用它，存储也要用它。
-        // 原图超过各家接口的体积上限时，送审的就是这张长边 400px 的缩略图。
+        // 原图超过各家接口的体积上限时，送审的就是这张长边 1024px 的缩略图。
         let thumb_bytes = read_thumb(thumb).await?;
 
         // 内容审核：在写任何一行数据库之前拦下违规内容
@@ -544,6 +561,40 @@ impl AppState {
             }
         };
 
+        // 「已有就复用」：同一份内容已经在这个账号的图库里，就引用那一张。
+        // 头像反复设同一张图时，相册里不该并排站着两张一模一样的。
+        // 放在建缩略图、建图片行之前——复用本来就不需要这两步
+        if input.reuse_existing {
+            if let Some(existing) = self
+                .repo
+                .find_live_image_by_blob(user.id, blob.id)
+                .await?
+            {
+                let tags = self.merge_image_tags(existing.id, user.id, &input.tags).await?;
+                let url = self.direct_url(&collected.sha256, ext, false).await;
+                let thumb_url = if existing.thumb_blob_id.is_some() {
+                    Some(self.direct_url(&collected.sha256, ext, true).await)
+                } else {
+                    None
+                };
+                return Ok(UploadOutcome {
+                    image_id: existing.id,
+                    job_id: 0,
+                    sha256: collected.sha256.clone(),
+                    ext: ext.to_string(),
+                    size,
+                    // 内容本来就在站里，对限流与审计来说和命中去重是一回事
+                    dedup: true,
+                    reused: true,
+                    storage_type: blob.storage_driver.clone(),
+                    fallback_message,
+                    tags,
+                    url,
+                    thumb_url,
+                });
+            }
+        }
+
         // 缩略图也是内容寻址的一份实体，同样去重
         let thumb_blob_id = match thumb_bytes {
             Some(thumb) => self.store_thumb(thumb).await.unwrap_or(None),
@@ -621,12 +672,42 @@ impl AppState {
             ext: ext.to_string(),
             size,
             dedup,
+            reused: false,
             storage_type: blob.storage_driver.clone(),
             fallback_message,
             tags: input.tags.clone(),
             url,
             thumb_url,
         })
+    }
+
+    /// 把这次带来的标签并到已有图片上，返回合并后的标签表。
+    ///
+    /// 只加不减：那张图原有的标签是用户自己打上去的，复用（比如设成头像）
+    /// 不该顺手抹掉它们。
+    async fn merge_image_tags(
+        &self,
+        image_id: i64,
+        owner_id: i64,
+        extra: &[String],
+    ) -> Result<Vec<String>> {
+        let mut current = self
+            .repo
+            .tags_for_images(&[image_id])
+            .await?
+            .remove(&image_id)
+            .unwrap_or_default();
+        let missing: Vec<String> = extra
+            .iter()
+            .filter(|name| !name.trim().is_empty() && !current.contains(name))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(current);
+        }
+        current.extend(missing);
+        self.repo.set_image_tags(image_id, owner_id, &current).await?;
+        Ok(current)
     }
 
     /// 存缩略图。同样内容寻址 + 去重，失败只返回 None（不毁掉整次上传）。

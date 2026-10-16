@@ -371,7 +371,16 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
         ? null
         : h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "目标相册" }), albumSelect),
       h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "标签（全部共用）" }), tagsInput),
-      h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "可见性" }), visibilitySelect),
+      // 访客没有「隐私」这回事：图片归在访客相册里，而那个账号登不进来，
+      // 设成私有等于传完就找不到人认领。所以访客只有公开一种，不摆选择
+      options.guest
+        ? h(
+            "div.fld",
+            { style: { margin: "0" } },
+            h("label.f", { text: "可见性" }),
+            h("div.tip", { style: { margin: "0", paddingTop: "10px" }, text: "公开（访客上传只有公开）" }),
+          )
+        : h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "可见性" }), visibilitySelect),
       h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "并发数" }), concurrencySelect),
     ),
     h(
@@ -791,9 +800,13 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     const settings = queue.getSettings();
     const albumName =
       [...albumSelect.options].find((option) => option.value === String(settings.albumId ?? ""))?.text ?? "默认相册";
-    queueSub.textContent = `目标相册「${albumName}」${settings.tags ? ` · 标签「${settings.tags}」` : ""} · 可见性 ${
-      settings.visibility === "public" ? "公开" : "私有"
-    } · 并发 ${settings.concurrency}`;
+    queueSub.textContent = options.guest
+      ? `目标相册「访客相册」${settings.tags ? ` · 标签「${settings.tags}」` : ""} · 可见性 公开 · 并发 ${
+          settings.concurrency
+        }`
+      : `目标相册「${albumName}」${settings.tags ? ` · 标签「${settings.tags}」` : ""} · 可见性 ${
+          settings.visibility === "public" ? "公开" : "私有"
+        } · 并发 ${settings.concurrency}`;
 
     statHost.replaceChildren(
       statCard("上传成功", formatNumber(stats.success), "ok"),

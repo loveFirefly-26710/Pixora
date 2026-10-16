@@ -138,6 +138,8 @@ interface SettingsDraft {
   mxCheck: boolean;
   thirdPartyCheck: boolean;
   background: HTMLInputElement;
+  /** 站点默认头像地址（外链或上传那张的公开地址） */
+  defaultAvatar: HTMLInputElement;
   /** 格式白名单改一处就提交一次，这里只是当前选中态 */
   formats: string[];
 }
@@ -244,6 +246,7 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     mxCheck: data.mail.mx_check,
     thirdPartyCheck: data.mail.third_party_check,
     background: textInput({ value: data.appearance.background ?? "", mono: true }),
+    defaultAvatar: textInput({ value: data.appearance.default_avatar ?? "", mono: true }),
     formats: [...(data.upload.formats ?? [])],
     maxWidth: textInput({ value: String(data.upload.max_width ?? 0), type: "number", mono: true }),
     maxHeight: textInput({ value: String(data.upload.max_height ?? 0), type: "number", mono: true }),
@@ -870,6 +873,78 @@ function appearanceCard(
 
   const isUploaded = data.appearance.background?.startsWith("/api/v1/site/background") ?? false;
 
+  // ---- 站点默认头像 ----
+  // 没设过头像的账号（含新注册的）都用它。不写进用户行、放在这里下发：
+  // 管理员换一张，所有人立刻跟着换
+  const avatarPreview = h("div.avatar-preview");
+  const syncAvatar = (): void => {
+    const url = draft.defaultAvatar.value.trim();
+    if (!url) {
+      mount(avatarPreview, h("span", { text: "默认" }));
+      return;
+    }
+    mount(avatarPreview, h("img", { src: url, alt: "当前默认头像" }));
+  };
+  syncAvatar();
+  draft.defaultAvatar.addEventListener("input", syncAvatar);
+
+  const avatarFile = h("input", {
+    type: "file",
+    accept: "image/*",
+    style: { display: "none" },
+    "aria-hidden": "true",
+  });
+  const avatarUploadBtn = h("button.btn.sm.pri", { type: "button", text: "上传默认头像" });
+  avatarUploadBtn.addEventListener("click", () => avatarFile.click());
+  avatarFile.addEventListener("change", () => {
+    const file = avatarFile.files?.[0];
+    if (file) void uploadDefaultAvatar(file, avatarUploadBtn, reload);
+  });
+
+  const avatarRemoveBtn = h("button.btn.sm.dgr", { type: "button", text: "移除默认头像" });
+  avatarRemoveBtn.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "移除默认头像",
+      message: "没设过头像的账号会回到「邮箱首字母方块」。同一份头像若被账号设成自己的，不受影响。",
+      confirmText: "移除",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await request("/admin/settings", { method: "PUT", json: { appearance: { default_avatar: null } } });
+      toastOk("默认头像已移除");
+      reload();
+    } catch (err) {
+      toastError(err);
+    }
+  });
+
+  const avatarBlock = (): HTMLElement =>
+    h(
+      "div",
+      null,
+      h(
+        "div.row",
+        { style: { alignItems: "flex-end" } },
+        field(
+          "默认头像地址",
+          draft.defaultAvatar,
+          "没设过头像的账号（含新注册的）都用它；留空就是各账号邮箱首字母的方块。也可以直接上传一张。",
+        ),
+        h("div", { style: { flex: "0 0 76px", paddingBottom: "13px" } }, avatarPreview),
+        h(
+          "div",
+          { style: { flex: "0 0 auto", paddingBottom: "13px", display: "flex", gap: "8px" } },
+          avatarUploadBtn,
+          avatarRemoveBtn,
+        ),
+      ),
+      avatarFile,
+      h("div.tip", {
+        text: "上传的图先在本机缩到 512px 再存进数据库，圆角与裁切由前端完成。换了地址记得点「保存设置」。",
+      }),
+    );
+
   const removeBtn = h("button.btn.sm.dgr", { type: "button", text: "移除背景图" });
   removeBtn.addEventListener("click", async () => {
     const ok = await confirmDialog({
@@ -912,7 +987,41 @@ function appearanceCard(
     h("div.tip", {
       text: "上传的图先在本机压到 1920px 再存进数据库，不落文件系统，上传完立刻生效。换了地址记得点「保存设置」。",
     }),
+    h("div", { style: { borderTop: "1px solid var(--line)", margin: "16px 0 14px" } }),
+    avatarBlock(),
   );
+}
+
+/** 默认头像：同样先在本机缩小再上传，头像用不着大图。 */
+async function uploadDefaultAvatar(
+  file: File,
+  button: HTMLButtonElement,
+  reload: () => void,
+): Promise<void> {
+  if (file.size > 20 * 1024 * 1024) {
+    toastError("头像图片不要超过 20 MiB，先压一下再传");
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "处理中…";
+  try {
+    // 512px 足够任何显示尺寸；圆角与裁切交给 CSS 的 object-fit: cover
+    const blob = await downscaleImage(file, 512);
+    const form = new FormData();
+    form.append("file", blob, "default-avatar.jpg");
+    const payload = await request<{ ok: boolean; url: string; bytes: number }>(
+      "/admin/settings/avatar",
+      { method: "POST", form },
+    );
+    toastOk(`默认头像已上传（${formatBytes(payload.bytes)}）并生效`);
+    await reloadSiteIdentity();
+    reload();
+  } catch (err) {
+    toastError(err);
+  } finally {
+    button.disabled = false;
+    button.textContent = "上传默认头像";
+  }
 }
 
 /** 选好的文件 → 压到 1920px → 上传进库。 */
@@ -1147,7 +1256,10 @@ async function save(
       fail_open: draft.moderationFailOpen,
     },
     thumb: { client: draft.thumbClient, server_fallback: draft.thumbFallback },
-    appearance: { background: draft.background.value.trim() || null },
+    appearance: {
+      background: draft.background.value.trim() || null,
+      default_avatar: draft.defaultAvatar.value.trim() || null,
+    },
   };
 
   // 密钥：留空＝不修改，所以只在填了的时候带上（服务端同样按「给了才写」处理）

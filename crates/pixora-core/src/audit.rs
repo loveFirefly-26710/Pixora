@@ -35,6 +35,8 @@ pub mod actions {
     pub const ACCOUNT_BAN: &str = "account_ban";
     pub const ACCOUNT_RESTORE: &str = "account_restore";
     pub const ACCOUNT_DELETE: &str = "account_delete";
+    /// 换绑邮箱：管理员代改与本人自助都记这一条，detail 里的 `via` 说明是谁改的
+    pub const ACCOUNT_EMAIL_CHANGE: &str = "account_email_change";
     pub const QUOTA_CHANGE: &str = "quota_change";
     pub const SETTINGS_CHANGE: &str = "settings_change";
     pub const STORAGE_CHANGE: &str = "storage_change";

@@ -120,8 +120,24 @@ pub async fn me_patch(
             Ok(value) => value,
             Err(err) => return crate::http::error_response(err),
         };
+        let previous = auth.user.avatar.clone();
         if let Err(err) = state.repo.set_user_avatar(auth.user.id, avatar.as_deref()).await {
             return crate::http::error_response(err.into());
+        }
+        // 换掉的若是本地上传的那张头像图，连带把它收掉——否则相册里会一直留着一张
+        // 用户不记得传过的图（见 AppState::release_avatar_image 的边界说明）
+        if let Some(old) = previous.as_deref().filter(|old| Some(*old) != avatar.as_deref()) {
+            if let Some(image_id) = state.release_avatar_image(&auth.user, old).await {
+                state
+                    .audit_detail(
+                        pixora_core::audit::actions::DELETE_IMAGE,
+                        Some(auth.user.id),
+                        "images:1".to_string(),
+                        serde_json::json!({ "ids": [image_id], "reason": "avatar_replaced" }),
+                        rectx.ip.as_deref(),
+                    )
+                    .await;
+            }
         }
         changed = true;
     }
@@ -187,8 +203,92 @@ pub async fn password_change(
     }
 }
 
-/// `GET /api/v1/me/sessions`。
+/// `POST /api/v1/me/email/code`：换绑邮箱的第一步，验证码发到**新**地址。
 ///
+/// 要当前密码：邮箱是找回账号的备份凭据，光有会话不该能把它改走。
+pub async fn email_change_code(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = super::ensure_scope(&auth, "write") {
+        return resp;
+    }
+
+    let email = match field_str(&body, "email") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    let password = match field_str(&body, "password") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+
+    match state
+        .send_email_change_code(&auth.user, &email, &password, &rectx.device())
+        .await
+    {
+        Ok(delivery) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "ok": true,
+            "delivered": delivery.delivered,
+            "detail": delivery.detail,
+            "message": delivery.describe(),
+        }))),
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
+/// `POST /api/v1/me/email`：换绑邮箱的第二步，验码后生效。
+///
+/// 生效后给新旧两个地址各发一封通知：新地址确认「这确实是我改的」，
+/// 旧地址才能在「不是我干的」时第一时间发现。
+pub async fn email_change(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = super::ensure_scope(&auth, "write") {
+        return resp;
+    }
+
+    let email = match field_str(&body, "email") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    let code = match field_str(&body, "code") {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+
+    match state
+        .change_own_email(&auth.user, &email, &code, &rectx.device())
+        .await
+    {
+        Ok((new_email, delivery)) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "email": new_email,
+            "delivered": delivery.delivered,
+            "detail": delivery.detail,
+            "message": delivery.describe(),
+        }))),
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
+/// `GET /api/v1/me/sessions`。///
 /// `current` 靠会话 id 比对：Token 模式没有会话 id，全部标 false
 /// （前端据此不显示「当前设备」徽标）。
 pub async fn sessions_list(

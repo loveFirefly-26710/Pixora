@@ -60,6 +60,7 @@ impl Default for QueueConfig {
 /// 启动后台任务。返回的任务句柄在进程退出时被丢弃即可。
 pub fn spawn(state: Arc<AppState>, config: QueueConfig) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
+    let state = state;
 
     // 1. 启动清理
     handles.push(tokio::spawn({
@@ -156,17 +157,38 @@ pub fn spawn(state: Arc<AppState>, config: QueueConfig) -> Vec<tokio::task::Join
         }
     }));
 
-    // 5. 缩略图兜底（默认关闭，开启后才有意义）
+    // 5. 缩略图兜底（默认关闭，开启后才有意义）+ 缩略图重算
     handles.push(tokio::spawn({
         let state = state.clone();
         let interval = config.thumb_poll_seconds.max(60);
         async move {
+            // 上一轮有没有在重算：决定这一次睡多久
+            let mut regen_running = false;
             loop {
-                tokio::time::sleep(Duration::from_secs(interval)).await;
+                // 重算进行中时用短间隔：默认那一轮是五分钟，管理员点了按钮不该干等
+                let wait = if regen_running { 3 } else { interval };
+                tokio::time::sleep(Duration::from_secs(wait)).await;
                 match thumbs::backfill(&state, 8).await {
                     Ok(0) => {}
                     Ok(count) => tracing::info!(count, "服务端兜底生成了缩略图"),
                     Err(err) => tracing::warn!(error = %err, "缩略图兜底失败"),
+                }
+                // 管理员点过「重算缩略图」就把游标往前推；没点过时这一步立刻返回 0
+                match thumbs::regenerate_batch(&state, 20).await {
+                    Ok(0) => {}
+                    Ok(count) => {
+                        regen_running = true;
+                        tracing::info!(count, "重算了一批缩略图");
+                    }
+                    Err(err) => tracing::warn!(error = %err, "重算缩略图失败"),
+                }
+                if !regen_running {
+                    // 没在重算时也看一眼进度：进程重启后要接着把没跑完的补完
+                    regen_running = state
+                        .thumb_rebuild_progress()
+                        .await
+                        .map(|progress| progress.running)
+                        .unwrap_or(false);
                 }
             }
         }

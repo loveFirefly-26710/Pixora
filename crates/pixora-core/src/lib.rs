@@ -5,6 +5,7 @@
 //! 测试里可以随时装一个只跑 SQLite + 本地目录的实例出来。
 
 pub mod admin;
+pub mod account_log;
 pub mod albums;
 pub mod antispam;
 pub mod audit;

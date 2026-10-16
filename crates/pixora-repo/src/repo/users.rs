@@ -318,6 +318,28 @@ impl Repo {
         Ok(())
     }
 
+    /// 一批 UID → (uid, email)。账号历史要按操作人 id 补出「是谁做的」，
+    /// 一页几十条逐条查会变成 N+1。
+    pub async fn identities_for_ids(&self, ids: &[i64]) -> Result<std::collections::HashMap<i64, (String, String)>> {
+        let mut out = std::collections::HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql = format!("SELECT id, uid, email FROM users WHERE id IN ({placeholders})");
+        let rows = self
+            .db
+            .fetch_all(&sql, ids.iter().fold(Args::new(), |args, id| args.int(*id)))
+            .await?;
+        for row in rows.iter() {
+            out.insert(
+                get_i64(row, "id")?,
+                (get_str(row, "uid")?, get_str(row, "email")?),
+            );
+        }
+        Ok(out)
+    }
+
     pub async fn update_user_role(&self, id: i64, role_value: &str) -> Result<()> {
         self.db
             .execute(

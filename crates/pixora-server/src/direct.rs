@@ -77,30 +77,34 @@ async fn direct_inner(
     let want_thumb = params.contains_key("thumb");
     let want_download = params.contains_key("download");
 
-    // 缩略图是另一份实体；没有缩略图时回落到原图（列表页就是靠这个不做额外判断）
-    let kind = if want_thumb {
-        storage_kind::THUMB
+    // 原图那一份实体：URL 里的哈希与扩展名讲的就是它
+    let original = state
+        .repo
+        .find_blob_by_sha(&hash, storage_kind::ORIGINAL)
+        .await?;
+    // 缩略图是另一份实体（自己算哈希）。`?thumb=1` 的意思是「这张图片的缩略图」，
+    // 所以要顺着图片行去找它——用 URL 里那个原图哈希去 thumb 里查是查不到的。
+    // 没有缩略图就回落到原图：列表页靠这个不做额外判断
+    let thumb = if want_thumb {
+        state.repo.find_thumb_blob_for_original(&hash).await?
     } else {
-        storage_kind::ORIGINAL
+        None
     };
-    let mut blob = state.repo.find_blob_by_sha(&hash, kind).await?;
-    let mut is_thumb = want_thumb;
-    if blob.is_none() && want_thumb {
-        blob = state
-            .repo
-            .find_blob_by_sha(&hash, storage_kind::ORIGINAL)
-            .await?;
-        is_thumb = false;
-    }
-    let Some(blob) = blob else {
+    let is_thumb = thumb.is_some();
+    let Some(blob) = thumb.or(original.clone()) else {
         return Err(AppError::not_found("图片"));
     };
 
-    // 扩展名与库里记录不一致 → 当作不存在，防止用伪造扩展名探测
-    if !ext.is_empty()
-        && pixora_core::media::normalize_ext(ext) != pixora_core::media::normalize_ext(&blob.ext)
-    {
-        return Err(AppError::not_found("图片"));
+    // 扩展名要和「URL 指向的那份文件」一致，防止有人用伪造扩展名探测任意键。
+    // 比对的是原图的扩展名：缩略图存成 webp 是内部编码，不该出现在 URL 里
+    if !ext.is_empty() {
+        let expected = original
+            .as_ref()
+            .map(|item| item.ext.as_str())
+            .unwrap_or(blob.ext.as_str());
+        if pixora_core::media::normalize_ext(ext) != pixora_core::media::normalize_ext(expected) {
+            return Err(AppError::not_found("图片"));
+        }
     }
 
     // 私有图片：直链本身不可枚举，但拿到链接的人不该因此看到私有内容。

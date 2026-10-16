@@ -38,6 +38,7 @@ import {
   skeletonGrid,
   sortSelect,
   spinner,
+  thumbImage,
 } from "../ui/widgets";
 
 type SortKey = string;
@@ -502,13 +503,14 @@ export async function render(ctx: PageContext): Promise<void> {
 
   function thumbFor(item: ImageItem): HTMLElement {
     const thumb = h("div.ph", { class: `c${(item.id % 6) + 1}` });
-    // 有缩略图用缩略图；没有就用原图按容器缩放，带宽影响有限（契约 4.1）
+    // 有缩略图用缩略图；没有就用原图按容器缩放，带宽影响有限（契约 4.1）。
+    // 读不出来时由 thumbImage 重试一次、再退回原图
     thumb.append(
-      h("img", {
-        src: item.has_thumb && item.thumb_url ? item.thumb_url : item.url,
-        alt: titleOf(item),
-        loading: "lazy",
-        decoding: "async",
+      thumbImage({
+        url: item.url,
+        thumb_url: item.thumb_url,
+        has_thumb: item.has_thumb,
+        title: titleOf(item),
       }),
     );
     return thumb;

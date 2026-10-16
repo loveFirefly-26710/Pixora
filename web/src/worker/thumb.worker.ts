@@ -8,9 +8,16 @@
 
 declare const self: DedicatedWorkerGlobalScope;
 
-/** 最长边 400px：列表卡片与预览条都够用，再大只是浪费带宽。 */
-const MAX_EDGE = 400;
-const WEBP_QUALITY = 0.85;
+/**
+ * 最长边 1024px。
+ *
+ * 400px 那会儿是「够列表用」，结果是宽屏下列表一格 500–800 CSS px、
+ * 2 倍屏再翻一倍——缩略图被放大两三倍去填，预览看着就是糊的（点开原图才清晰）。
+ * 1024 覆盖得住网格里的实际显示尺寸，代价是每张多几十到一百多 KB，
+ * 相对原图那几个 MB 还是零头。
+ */
+const MAX_EDGE = 1024;
+const WEBP_QUALITY = 0.82;
 
 export interface ThumbRequest {
   type: "thumb";
@@ -23,7 +30,7 @@ export type ThumbResponse =
   | { type: "done"; id: string; blob: Blob | null; width: number; height: number; reason: string | null }
   | { type: "error"; id: string; message: string };
 
-/** 缩略图目标尺寸：只缩不放，避免把小图糊成 400px。纯函数，单测用。 */
+/** 缩略图目标尺寸：只缩不放，避免把小图糊成 1024px。纯函数，单测用。 */
 export function thumbSize(
   width: number,
   height: number,

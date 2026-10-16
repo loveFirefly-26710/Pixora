@@ -11,7 +11,8 @@
 //! 缩略图共用同一套去重逻辑：同一张图被两个人引用时只会有一份缩略图。
 //!
 //! 输出统一用 JPEG：`image` crate 能编码 JPEG 而不用拖进 libwebp 这类 C 依赖，
-//! 而缩略图在这个尺寸上（最长边 400px）JPEG 的体积与 WebP 相差很小。
+//! 而缩略图这个尺寸（最长边与客户端一致，1024px）上 JPEG 的体积仍然可接受，
+//! 没必要为了格式再去引一个 WebP 编码器。
 
 use std::sync::Arc;
 
@@ -21,7 +22,7 @@ use pixora_repo::repo::uploads::NewBlob;
 use pixora_storage::cas::cas_key;
 
 /// 缩略图最长边。
-const MAX_EDGE: u32 = 400;
+const MAX_EDGE: u32 = 1024;
 /// JPEG 质量。80 是体积与观感的常见折中。
 const QUALITY: u8 = 80;
 /// 单张原图最大解码体积（超过就不兜底了，避免把内存吃满）。
@@ -52,6 +53,149 @@ pub async fn backfill(state: &Arc<AppState>, limit: i64) -> pixora_core::Result<
         }
     }
     Ok(generated)
+}
+
+// ============================================================
+// 缩略图重算（把已经有的换成新尺寸）
+// ============================================================
+
+/// 重算的每批张数。太多了会长时间占着 CPU，太小了又要等下一轮轮询。
+const REGEN_BATCH: i64 = 20;
+
+/// 推进一批：游标之后的图片按新尺寸重算缩略图。返回这一批处理了几张。
+///
+/// 与 `backfill` 的分工：那个只补「缺缩略图的」，而这个**替换**已经有的——
+/// 客户端早期按 400px 生成，在宽屏上放大两倍多就是糊的，得重算一遍才跟得上。
+/// 游标存在设置里，所以跑一半重启也不会从头再来。
+pub async fn regenerate_batch(state: &Arc<AppState>, limit: i64) -> pixora_core::Result<u64> {
+    let progress = state.thumb_rebuild_progress().await?;
+    if !progress.running {
+        return Ok(0);
+    }
+    let cursor = state
+        .settings
+        .raw(pixora_core::settings::keys::THUMB_REGEN_CURSOR)
+        .await?
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+
+    let images = state
+        .repo
+        .list_images_after_id(cursor, limit.clamp(1, REGEN_BATCH))
+        .await?;
+    if images.is_empty() {
+        // 没有下一批了：直接把进度补满，别让「进行中」永远挂着
+        state
+            .settings
+            .set(
+                pixora_core::settings::keys::THUMB_REGEN_DONE,
+                &progress.total.to_string(),
+            )
+            .await?;
+        return Ok(0);
+    }
+
+    let mut processed = 0u64;
+    let mut last_id = cursor;
+    for image in &images {
+        last_id = last_id.max(image.id);
+        let old_thumb = image.thumb_blob_id;
+        match make_thumb_for(state, image.id, image.blob_id, old_thumb).await {
+            Ok(_) => processed += 1,
+            Err(err) => tracing::debug!(image_id = image.id, error = %err, "重算缩略图跳过"),
+        }
+    }
+
+    state
+        .settings
+        .set(
+            pixora_core::settings::keys::THUMB_REGEN_CURSOR,
+            &last_id.to_string(),
+        )
+        .await?;
+    state
+        .settings
+        .set(
+            pixora_core::settings::keys::THUMB_REGEN_DONE,
+            &(progress.done + processed as i64).to_string(),
+        )
+        .await?;
+    Ok(processed)
+}
+
+/// 重算单张：读原图 → 缩放编码 → 存实体 → 换掉旧的那条引用。
+async fn make_thumb_for(
+    state: &Arc<AppState>,
+    image_id: i64,
+    blob_id: i64,
+    old_thumb_id: Option<i64>,
+) -> pixora_core::Result<bool> {
+    let Some(blob) = state.repo.find_blob_by_id(blob_id).await? else {
+        return Ok(false);
+    };
+    if blob.size > MAX_SOURCE_BYTES as i64 {
+        return Ok(false);
+    }
+    let mut reader = state
+        .storage
+        .open_object(&blob.storage_driver, blob.backend_id, &blob.storage_key)
+        .await?;
+    let mut source = Vec::with_capacity(blob.size.clamp(0, 8 * 1024 * 1024) as usize);
+    tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut source)
+        .await
+        .map_err(|err| AppError::internal(format!("读取原图失败：{err}")))?;
+
+    let encoded = tokio::task::spawn_blocking(move || encode_thumb(&source))
+        .await
+        .map_err(|err| AppError::internal(format!("缩略图任务失败：{err}")))?
+        .map_err(AppError::InvalidImage)?;
+
+    // 已经有了就不用再存一份（同一张图被多人引用时很常见）
+    let sha256 = pixora_crypto::hash::sha256_hex(&encoded);
+    let thumb_id = match state
+        .repo
+        .find_blob_by_sha(&sha256, storage_kind::THUMB)
+        .await?
+    {
+        Some(existing) => existing.id,
+        None => {
+            let key = cas_key(&sha256, "jpg");
+            let (resolved, _) = state
+                .storage
+                .store_object(
+                    &key,
+                    Box::new(std::io::Cursor::new(encoded.clone())),
+                    encoded.len() as u64,
+                    "image/jpeg",
+                    false,
+                )
+                .await?;
+            let driver_name = resolved.driver_name().to_string();
+            let backend_id = resolved.backend_id();
+            state
+                .repo
+                .insert_blob_if_absent(&NewBlob {
+                    sha256,
+                    kind: storage_kind::THUMB.to_string(),
+                    size: encoded.len() as i64,
+                    mime_type: "image/jpeg".to_string(),
+                    ext: "jpg".to_string(),
+                    width: None,
+                    height: None,
+                    storage_driver: driver_name,
+                    storage_key: resolved.key,
+                    backend_id,
+                })
+                .await?
+                .id
+        }
+    };
+
+    state
+        .repo
+        .replace_image_thumb(image_id, thumb_id, old_thumb_id)
+        .await?;
+    Ok(true)
 }
 
 /// 单张：读原图 → 缩放 → 编码 → 存成实体 → 挂到图片上。
@@ -124,7 +268,7 @@ async fn generate_for(state: &Arc<AppState>, image_id: i64, blob_id: i64) -> pix
     Ok(true)
 }
 
-/// 纯计算部分：解码 → 等比缩放到最长边 400px → 编码 JPEG。
+/// 纯计算部分：解码 → 等比缩放到最长边 1024px → 编码 JPEG。
 ///
 /// 单独抽出来是为了能写单测：给一段构造出来的 PNG，验证输出是能被解回来的 JPEG。
 fn encode_thumb(source: &[u8]) -> Result<Vec<u8>, String> {
@@ -141,7 +285,7 @@ fn encode_thumb(source: &[u8]) -> Result<Vec<u8>, String> {
         return Err("图片尺寸为 0".into());
     }
 
-    // 等比缩放到最长边 400：不放大，小图保持原尺寸
+    // 等比缩放到最长边 1024：不放大，小图保持原尺寸
     let scale = (MAX_EDGE as f32 / width.max(height) as f32).min(1.0);
     let source_rgb = image.to_rgb8();
     let resized = if scale < 1.0 {
@@ -219,7 +363,7 @@ mod tests {
             .expect("解码缩略图");
         assert!(thumb.starts_with(&[0xFF, 0xD8, 0xFF]), "JPEG 魔数");
         assert_eq!(decoded.width(), MAX_EDGE);
-        assert_eq!(decoded.height(), 300, "等比缩放：1600×1200 → 400×300");
+        assert_eq!(decoded.height(), MAX_EDGE * 3 / 4, "等比缩放：1600×1200 → 1024×768");
     }
 
     #[test]
