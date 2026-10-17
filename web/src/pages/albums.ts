@@ -30,6 +30,7 @@ import { applyMasonry } from "../ui/masonry";
 import { userViewBanner } from "../ui/shell";
 import {
   emptyState,
+  field,
   imageTile,
   newShuffleSeed,
   progressBar,
@@ -224,6 +225,7 @@ export async function render(ctx: PageContext): Promise<void> {
     null,
     wideCount,
     h("button.btn.sm", { type: "button", text: "打标签", on: { click: () => void batchTag() } }),
+    h("button.btn.sm", { type: "button", text: "可见性", on: { click: () => void batchVisibility() } }),
     h("button.btn.sm", { type: "button", text: "移动到相册", on: { click: () => void batchMove() } }),
     h("button.btn.sm", { type: "button", text: "复制直链", on: { click: () => void batchCopy() } }),
     h("button.btn.sm.dgr", { type: "button", text: "删除", on: { click: () => void batchDelete() } }),
@@ -244,6 +246,7 @@ export async function render(ctx: PageContext): Promise<void> {
 
   const selbarActions: Array<[string, string, () => void]> = [
     ["打标签", "", () => void batchTag()],
+    ["可见性", "", () => void batchVisibility()],
     ["移动", "", () => void batchMove()],
     ["复制直链", "", () => void batchCopy()],
     ["删除", "dgr", () => void batchDelete()],
@@ -907,6 +910,49 @@ export async function render(ctx: PageContext): Promise<void> {
     }
   }
 
+  async function batchVisibility(): Promise<void> {
+    const count = selectedCount();
+    if (count === 0) return;
+    const select = h(
+      "select.f",
+      null,
+      h("option", { value: "private", text: "私有（仅本人与管理员可见）" }),
+      h("option", { value: "public", text: "公开（会出现在广场，直链可匿名访问）" }),
+    );
+    const handle = openModal({
+      title: `设置 ${count} 张图片的可见性`,
+      body: [
+        field("可见性", select),
+        qtip(
+          "info",
+          "只改选中这些图片",
+          "相册本身的公开/私有是另一项设置。公开图片会进入广场；私有图片的直链只对本人和管理员开放。",
+        ),
+      ],
+      footer: [
+        h("button.btn", { type: "button", text: "取消", on: { click: () => handle.close() } }),
+        h("button.btn.pri", {
+          type: "button",
+          text: "应用",
+          on: {
+            click: async () => {
+              const visibility = select.value === "public" ? "public" : "private";
+              handle.close();
+              try {
+                const affected = await runBatch("visibility", { visibility });
+                await afterBatch(
+                  `已将 ${affected} 张图片设为${visibility === "public" ? "公开" : "私有"}`,
+                );
+              } catch (err) {
+                toastError(err);
+              }
+            },
+          },
+        }),
+      ],
+    });
+  }
+
   async function batchMove(): Promise<void> {
     const count = selectedCount();
     if (count === 0) return;
@@ -1040,6 +1086,7 @@ export async function render(ctx: PageContext): Promise<void> {
     let pinchDistance = 0;
     let moveX = 0;
     let moveY = 0;
+    let dirty = false;
 
     const img = h("img", { alt: "", draggable: false });
     img.addEventListener("dragstart", (event) => event.preventDefault());
@@ -1124,6 +1171,71 @@ export async function render(ctx: PageContext): Promise<void> {
       });
     }
 
+    /** 单张图片的后期编辑：标题、标签、公开/私有。 */
+    function editImageInfo(item: ImageItem): void {
+      const titleInput = h("input.f", {
+        value: item.title ?? "",
+        placeholder: "留空则显示原始文件名",
+        maxlength: "255",
+      });
+      const tagsInput = h("input.f", {
+        value: item.tags.join(", "),
+        placeholder: "风景,旅行",
+      });
+      const visibilitySelect = h(
+        "select.f",
+        null,
+        h("option", { value: "private", text: "私有（仅本人与管理员可见）" }),
+        h("option", { value: "public", text: "公开（会出现在广场，直链可匿名访问）" }),
+      );
+      visibilitySelect.value = item.visibility;
+
+      const handle = openModal({
+        title: "编辑图片信息",
+        body: [
+          field("标题", titleInput),
+          field("标签", tagsInput, "逗号分隔；留空表示清空标签。"),
+          field("可见性", visibilitySelect),
+        ],
+        footer: [
+          h("button.btn", { type: "button", text: "取消", on: { click: () => handle.close() } }),
+          h("button.btn.pri", {
+            type: "button",
+            text: "保存",
+            on: {
+              click: async () => {
+                const title = titleInput.value.trim();
+                const tags = tagsInput.value
+                  .split(/[,，\s]+/)
+                  .map((tag) => tag.trim())
+                  .filter(Boolean);
+                const visibility = visibilitySelect.value === "public" ? "public" : "private";
+                try {
+                  await request(`/images/${item.id}`, {
+                    method: "PATCH",
+                    json: { title: title || null, tags, visibility },
+                  });
+                  item.title = title || null;
+                  item.tags = tags;
+                  item.visibility = visibility;
+                  dirty = true;
+                  titleEl.textContent = titleOf(item);
+                  img.alt = titleOf(item);
+                  renderSide(item);
+                  renderActions(item);
+                  renderThumbs();
+                  handle.close();
+                  toastOk("已更新图片信息");
+                } catch (err) {
+                  toastError(err);
+                }
+              },
+            },
+          }),
+        ],
+      });
+    }
+
     function renderSide(item: ImageItem): void {
       const line = (label: string, value: string, mono = false): HTMLElement =>
         h(
@@ -1141,6 +1253,7 @@ export async function render(ctx: PageContext): Promise<void> {
         line("相册", item.album_name ?? "默认相册"),
         line("上传", formatDateTime(item.upload_time)),
         line("可见性", item.visibility === "public" ? "公开" : "私有"),
+        line("标签", item.tags.length > 0 ? item.tags.join(" · ") : "未设置"),
         h("div", { style: { marginTop: "10px", color: "var(--muted)" }, text: "SHA-256" }),
         h("div.mono", {
           style: { fontSize: "10px", color: "var(--faint)", wordBreak: "break-all" },
@@ -1163,10 +1276,16 @@ export async function render(ctx: PageContext): Promise<void> {
             text: "下载",
           }),
         ),
+        h("button.btn.sm", {
+          type: "button",
+          style: { marginTop: "8px", width: "100%" },
+          text: "编辑标题、标签与可见性",
+          on: { click: () => editImageInfo(item) },
+        }),
       );
     }
 
-    /** 窄屏底部三个按钮：信息卡默认收起，靠「信息」展开。 */
+    /** 窄屏底部按钮：信息卡默认收起，靠「信息」展开。 */
     function renderActions(item: ImageItem): void {
       mount(
         actions,
@@ -1176,6 +1295,11 @@ export async function render(ctx: PageContext): Promise<void> {
           on: { click: () => copyDirectLink(item) },
         }),
         h("a.btn.sm", { href: downloadUrl(item), download: "", text: "下载" }),
+        h("button.btn.sm", {
+          type: "button",
+          text: "编辑",
+          on: { click: () => editImageInfo(item) },
+        }),
         h("button.btn.sm", {
           type: "button",
           text: "信息",
@@ -1219,6 +1343,10 @@ export async function render(ctx: PageContext): Promise<void> {
       overlay.remove();
       document.body.style.overflow = "";
       state.lightboxOpen = false;
+      // 编辑过标题/标签/可见性就把列表刷回当前页，别让背后的卡片继续显示旧信息
+      if (dirty) {
+        void loadImages(Math.floor((state.offset + current) / PER_PAGE) + 1);
+      }
     }
 
     function onKey(event: KeyboardEvent): void {

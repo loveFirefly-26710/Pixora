@@ -163,6 +163,9 @@ export async function render(ctx: PageContext): Promise<void> {
   if (phonePanel) panels.push({ key: "phone", label: "手机号登录", node: phonePanel });
   if (qrPanel) panels.push({ key: "qr", label: "扫码登录", node: qrPanel });
 
+  // 只有一种登录入口时不要摆一排只有一个按钮的标签栏。手机号未开通且没有
+  // 扫码方式时，页面就是「邮箱登录 + 下方第三方按钮」，不再出现多余的分栏。
+  const hasTabs = panels.length > 1;
   let activePanel = panels[0].key;
   const tabs = h(
     "div.auth-tabs",
@@ -189,6 +192,7 @@ export async function render(ctx: PageContext): Promise<void> {
       return tab;
     }),
   );
+  if (!hasTabs) tabs.style.display = "none";
   for (const panel of panels) {
     panel.node.style.display = panel.key === activePanel ? "" : "none";
   }
@@ -239,7 +243,7 @@ export async function render(ctx: PageContext): Promise<void> {
   /** 翻到第几步。第二步把「填动态码」摆成正常的一步，不用错误提示吓人。 */
   function showStep(which: 1 | 2): void {
     step = which;
-    tabs.style.display = which === 1 ? "" : "none";
+    tabs.style.display = hasTabs && which === 1 ? "" : "none";
     for (const panel of panels) {
       panel.node.style.display = which === 1 && panel.key === activePanel ? "" : "none";
     }

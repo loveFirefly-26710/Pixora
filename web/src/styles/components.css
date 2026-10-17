@@ -1118,7 +1118,7 @@ tr.pick {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  z-index: 60;
+  z-index: 90;
   pointer-events: none;
   max-width: min(92vw, 640px);
 }
@@ -1173,7 +1173,9 @@ tr.pick {
 .modal {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  /* 高于图片预览浮层（.lb = 70）：查看器里的「编辑」要能盖在图片上，
+     不能把表单藏到预览层后面 */
+  z-index: 80;
   display: flex;
   align-items: flex-end;
   justify-content: center;

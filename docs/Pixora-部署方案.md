@@ -1,6 +1,6 @@
 # Pixora 部署方案
 
-当前版本 0.1.3。本文按部署方式分三条主线：纯 Docker、Linux 单二进制、Windows 单二进制。前端嵌在后端二进制里，前后端同源，不再支持把前端单独发到静态托管。每条线都从准备工作写到验收，命令可以直接复制。
+当前版本 0.1.4。本文按部署方式分三条主线：纯 Docker、Linux 单二进制、Windows 单二进制。前端嵌在后端二进制里，前后端同源，不再支持把前端单独发到静态托管。每条线都从准备工作写到验收，命令可以直接复制。
 
 第一次部署建议先走 Docker + SQLite（§4.2），跑通后再换数据库。遇到报错先看 §10 的对照表。
 
@@ -160,7 +160,7 @@ docker compose version   # 需要 2.23 以上
 从 GHCR 拉镜像：
 
 ```bash
-docker pull ghcr.io/lovefirefly-26710/pixora:0.1.3
+docker pull ghcr.io/lovefirefly-26710/pixora:0.1.4
 ```
 
 报 `denied` 或 `unauthorized` 时，说明包是私有的，或者当前 Docker 没登录。用一个带 `read:packages` 权限的 GitHub PAT：
@@ -176,13 +176,13 @@ echo "<PAT>" | docker login ghcr.io -u <GitHub用户名> --password-stdin
 | 标签 | 是什么 |
 |---|---|
 | `latest` | 最近一次正式发版，生产可用 |
-| `0.1.3` | 固定版本，生产推荐 |
+| `0.1.4` | 固定版本，生产推荐 |
 | `edge` | 主干最新代码，包含尚未发版的修复 |
 | `master` / `sha-<短哈希>` | 调试与追溯用 |
 
 生产环境建议把 compose 里的 `:latest` 换成具体版本号，升级时再改，出问题好回滚。
 
-部署前先确认要用的标签真的存在（`docker pull ...:0.1.3`）。GHCR 推送失败时 `latest` 会停在上一个版本；这时要么先修好权限，要么临时用 `:edge`，不要拿 0.1.0 跑 PostgreSQL/MySQL。
+部署前先确认要用的标签真的存在（`docker pull ...:0.1.4`）。GHCR 推送失败时 `latest` 会停在上一个版本；这时要么先修好权限，要么临时用 `:edge`，不要拿 0.1.0 跑 PostgreSQL/MySQL。
 
 建目录、下载编排文件：
 
@@ -245,7 +245,7 @@ SQLite 版 compose 里 `PIXORA_TRUST_PROXY` 默认是 `1`，因为前面有 Cadd
 # 需要 Docker Compose 2.23 以上（用 configs.content 内嵌了 Caddy 配置）：
 #   docker compose version
 #
-# 镜像默认用 :latest（最近一次发版）。生产环境建议固定成具体版本号（如 :0.1.3），
+# 镜像默认用 :latest（最近一次发版）。生产环境建议固定成具体版本号（如 :0.1.4），
 # 升级时再改，出问题好回滚；主干上尚未发版的修复在 :edge 里。
 #
 # 安装向导第 4 步的「基础 URL」会写进数据库，之后以数据库里的值为准。
@@ -351,7 +351,7 @@ curl -s https://img.example.com/healthz
 预期结果：
 
 - `docker compose ps` 里 `pixora` 是 `Up (healthy)`，`caddy` 是 `Up`；
-- 日志里有 `INFO Pixora 已启动 version="0.1.3" ... db="sqlite"`；
+- 日志里有 `INFO Pixora 已启动 version="0.1.4" ... db="sqlite"`；
 - `/healthz` 返回 `{"db":"ok","status":"ok","uptime_seconds":...}`。
 
 `--health-probe` 只确认进程能响应；数据库是否通，看 `/healthz` 里的 `db` 字段。Caddy 第一次申请证书要几秒到几十秒，失败就看 `docker compose logs caddy`。
@@ -367,7 +367,7 @@ curl -s https://img.example.com/healthz
 # 数据库密码在文件里出现 2 处（DSN 与 POSTGRES_PASSWORD），改成同一个值。
 #
 # 需要 Docker Compose 2.23 以上（configs.content 内嵌了 Caddy 配置）。
-# 镜像默认用 :latest；生产建议固定成具体版本号（如 :0.1.3）。
+# 镜像默认用 :latest；生产建议固定成具体版本号（如 :0.1.4）。
 # 安装向导第 4 步的「基础 URL」会写进数据库，之后以数据库里的值为准。
 
 services:
@@ -487,7 +487,7 @@ configs:
 # 三处改成同一个值。
 #
 # 需要 Docker Compose 2.23 以上（configs.content 内嵌了 Caddy 配置）。
-# 镜像默认用 :latest；生产建议固定成具体版本号（如 :0.1.3）。
+# 镜像默认用 :latest；生产建议固定成具体版本号（如 :0.1.4）。
 # 安装向导第 4 步的「基础 URL」会写进数据库，之后以数据库里的值为准。
 
 services:
@@ -799,7 +799,7 @@ docker compose logs --tail=50 pixora
 
 数据库迁移在启动时自动执行，只向前不回头。升级前先做备份。生产环境建议在 compose 里固定版本号，而不是一直用 `latest`。
 
-拉新镜像不需要删除 GHCR 上的包，也不需要先在服务器上删旧镜像。`docker compose pull` 会拿到 compose 里写的标签，`docker compose up -d` 发现镜像 ID 变了就会重建容器；旧的本地镜像留着可以回滚，想清理再 `docker image prune`。如果 compose 固定的是 `:0.1.3`，要把标签改成新版本；用 `:latest` 的话，只有正式 Release 发布后它才会移动，平时推主干只更新 `:edge` / `:master` / `:sha-<短哈希>`。
+拉新镜像不需要删除 GHCR 上的包，也不需要先在服务器上删旧镜像。`docker compose pull` 会拿到 compose 里写的标签，`docker compose up -d` 发现镜像 ID 变了就会重建容器；旧的本地镜像留着可以回滚，想清理再 `docker image prune`。如果 compose 固定的是 `:0.1.4`，要把标签改成新版本；用 `:latest` 的话，只有正式 Release 发布后它才会移动，平时推主干只更新 `:edge` / `:master` / `:sha-<短哈希>`。
 
 备份 SQLite 版（数据目录 + 图片 + 主密钥）：
 
@@ -892,10 +892,10 @@ docker compose start pixora
 
 ### 5.1 下载与校验
 
-在 [Releases](https://github.com/loveFirefly-26710/Pixora/releases) 下载对应版本。以 0.1.3 为例：
+在 [Releases](https://github.com/loveFirefly-26710/Pixora/releases) 下载对应版本。以 0.1.4 为例：
 
 ```bash
-VERSION=0.1.3
+VERSION=0.1.4
 curl -LO "https://github.com/loveFirefly-26710/Pixora/releases/download/v${VERSION}/pixora-v${VERSION}-linux-x86_64.tar.gz"
 curl -LO "https://github.com/loveFirefly-26710/Pixora/releases/download/v${VERSION}/SHA256SUMS.txt"
 sha256sum -c SHA256SUMS.txt --ignore-missing   # 期望：...: OK
@@ -1070,10 +1070,10 @@ systemctl status pixora --no-pager
 
 ### 6.1 下载与解压
 
-在 [Releases](https://github.com/loveFirefly-26710/Pixora/releases) 下载 `pixora-v0.1.3-windows-x86_64.zip` 与 `SHA256SUMS.txt`：
+在 [Releases](https://github.com/loveFirefly-26710/Pixora/releases) 下载 `pixora-v0.1.4-windows-x86_64.zip` 与 `SHA256SUMS.txt`：
 
 ```powershell
-PS> Expand-Archive .\pixora-v0.1.3-windows-x86_64.zip C:\pixora -Force
+PS> Expand-Archive .\pixora-v0.1.4-windows-x86_64.zip C:\pixora -Force
 PS> Get-FileHash C:\pixora\pixora\pixora.exe -Algorithm SHA256   # 与 SHA256SUMS.txt 对照
 PS> cd C:\pixora\pixora
 ```
@@ -1102,7 +1102,7 @@ PS> .\pixora.exe
 预期输出（截取）：
 
 ```
-INFO Pixora 已启动 version="0.1.3" listen=127.0.0.1:8080 data_dir=C:\pixora\data db="sqlite"
+INFO Pixora 已启动 version="0.1.4" listen=127.0.0.1:8080 data_dir=C:\pixora\data db="sqlite"
      storage_default=local master_key=首次启动自动生成，已写入 C:\pixora\data\master.key web=已嵌入二进制
 WARN 主密钥是自动生成的（…）：单机自托管够用，生产环境建议改用 PIXORA_MASTER_KEY 注入并纳入备份
 ```
@@ -1302,7 +1302,7 @@ MySQL 那条记得带 `--default-character-set=utf8mb4`：客户端默认按系�
 
 环境：Windows 11（10.0.22631）、x86_64；便携版 PostgreSQL 17.6（EDB 二进制包）、MySQL 8.4.0（Community zip），分别跑在 127.0.0.1 的 55432 / 33306 端口，独立数据目录；没有 Docker 守护进程，也没有 WSL。所有服务实例都放在仓库外的 `E:\Develop\db\` 下，不碰仓库里的 `data/`。
 
-下表是实际跑过的内容。发行包那两行用的是 v0.1.0（本次数据库修复前的最后一版）；0.1.3 的二进制与镜像由推送后的工作流构建，发布后建议按 §5.1 再校验一次 SHA256。
+下表是实际跑过的内容。发行包那两行用的是 v0.1.0（本次数据库修复前的最后一版）；0.1.4 的二进制与镜像由推送后的工作流构建，发布后建议按 §5.1 再校验一次 SHA256。
 
 | 场景 | 怎么验的 | 结果 |
 |---|---|---|
