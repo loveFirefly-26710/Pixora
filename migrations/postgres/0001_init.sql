@@ -374,7 +374,10 @@ CREATE TABLE storage_backends (
     capacity_total BIGINT,
     created_at     VARCHAR(32) NOT NULL
 );
-CREATE UNIQUE INDEX idx_backend_default ON storage_backends(is_default) WHERE is_default;
+-- 部分索引的 WHERE 必须是布尔表达式：这一列的方言约定是 BIGINT（0/1），
+-- 直接写 `WHERE is_default` 在 PostgreSQL 上会报 argument of WHERE must be
+-- type boolean, not type bigint。SQLite 把整数当布尔，所以那边不用改。
+CREATE UNIQUE INDEX idx_backend_default ON storage_backends(is_default) WHERE is_default = 1;
 
 -- ============================================================
 -- 审计日志

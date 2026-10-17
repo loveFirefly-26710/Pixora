@@ -8,4 +8,7 @@
 --
 -- 走自助重置（邮件里的链接/验证码）设的密码不打这个标记：那是用户自己选的。
 
-ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
+-- 这一列的方言约定是 BIGINT（0/1），与其余布尔列一致：代码层统一按 i64 解码，
+-- 声明成 BOOLEAN 会让 sqlx 在读取时报「Rust type i64 is not compatible with
+-- SQL type BOOLEAN」。
+ALTER TABLE users ADD COLUMN must_change_password BIGINT NOT NULL DEFAULT 0;

@@ -266,7 +266,9 @@ CREATE TABLE rate_limit_policies (
     updated_at             VARCHAR(32)  NOT NULL,
     UNIQUE KEY uq_rate_user (user_id),
     UNIQUE KEY uq_rate_global (is_global),
-    CONSTRAINT fk_rate_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    -- 生成列的基列上不许挂级联外键（MySQL 8 建表直接报 1215），这张表的
+    -- 清理只能由应用来做：删账号前显式删掉它的策略行，见 repo::users::delete_user。
+    CONSTRAINT fk_rate_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE rate_counters (
