@@ -453,6 +453,11 @@ try {
     $binAlbums = Api GET "/api/v1/recycle/albums"
     ExpectJson $binAlbums { @($d.data.albums).Count -eq 1 } "回收站里能看到这个相册"
 
+    # 软删只是进回收站，物理文件必须还在，恢复才有字节可用
+    $keptBlobs = @(Get-ChildItem -Recurse -File (Join-Path $dataDir "blobs")).Count
+    if ($keptBlobs -lt 1) { Fail "回收站里的图片物理文件应当保留（实际 $keptBlobs 个）" }
+    Ok "回收站保留物理文件"
+
     $restoreAlbum = Api POST "/api/v1/recycle/albums/$albumId/restore"
     ExpectJson $restoreAlbum { $d.data.restored_images -eq 1 } "恢复相册把图一起带回来"
     $liveBack = Api GET "/api/v1/images?album_id=$albumId"
@@ -471,11 +476,11 @@ try {
     $binEmpty = Api GET "/api/v1/recycle/images"
     ExpectJson $binEmpty { $d.meta.total -eq 0 } "回收站已经空了"
 
-    # 引用归零 ≠ 立刻回收：物理文件由后台 GC 在宽限期之后删，回收行为由
-    # crates/pixora-queue/tests/gc.rs 覆盖（含「回收站保留期内绝不删」）。
+    # 彻底删除是明确的销毁动作：引用归零的实体当场回收，不再等宽限期。
+    # 宽限期的保护由 crates/pixora-queue/tests/gc.rs 覆盖。
     $stillThere = @(Get-ChildItem -Recurse -File (Join-Path $dataDir "blobs")).Count
-    if ($stillThere -lt 1) { Fail "宽限期内物理文件不该被删（实际 $stillThere 个）" }
-    Ok "引用归零，物理文件留待后台 GC 回收"
+    if ($stillThere -ne 0) { Fail "彻底删除后物理文件应当回收（实际 $stillThere 个）" }
+    Ok "彻底删除后物理文件已回收"
 
     Step "管理后台"
     ExpectJson (Api GET "/api/v1/admin/stats") { $d.data.user_total -ge 1 } "管理概览"
@@ -517,7 +522,10 @@ try {
         "-d", (JsonBody "demote" @{ role = "user" }))
     ExpectJson $demoted { $d.data.user.role -eq "user" } "管理员降回普通用户"
 
-    Api DELETE "/api/v1/admin/users/$newId" | Out-Null
+    # 删账号要带 confirm=<邮箱>：服务端用这一步挡住误删
+    $confirmEmail = [uri]::EscapeDataString("smoke-user@example.com")
+    $deletedUser = Api DELETE "/api/v1/admin/users/${newId}?confirm=$confirmEmail"
+    ExpectJson $deletedUser { $d.data.ok } "测试账号已删除"
     $rowsAfter = Api GET "/api/v1/admin/users"
     ExpectJson $rowsAfter { $d.meta.total -eq 1 } "测试账号已删除，用户数回到 1"
 
