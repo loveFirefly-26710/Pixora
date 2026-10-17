@@ -123,7 +123,7 @@ export interface UserProfile {
   totp_enabled: boolean;
   /** 管理员直接设过密码：改掉之前只放行 /me 与改密码，前端把人钉在改密码页 */
   must_change_password?: boolean;
-  /** 头像：站内相对路径或外链；空 = 没设，界面回落到邮箱首字母 */
+  /** 头像：站内相对路径或外链；空 = 没设，界面回落到站点默认或内置翼标 */
   avatar?: string | null;
   login_alert: boolean;
   new_device_guard: boolean;

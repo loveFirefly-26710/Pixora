@@ -104,12 +104,12 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
       });
       mount(preview, img);
     } else {
-      mount(preview, h("span", { text: (user.email[0] ?? "U").toUpperCase() }));
+      mount(preview, h("img", { src: avatarUrl(null), alt: "默认头像" }));
     }
   };
   // 没设过自己的头像时显示的是「站点默认 / 内置默认」那张，
   // 下方的说明会讲清楚这一张是从哪来的
-  // 与外层的头像同一套回落：自己的 → 站点默认 → 首字母方块
+  // 与外层的头像同一套回落：自己的 → 站点默认 → 内置翼标
   paint(avatarUrl(user));
 
   const urlInput = textInput({
@@ -145,7 +145,7 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
     const ok = await confirmDialog({
       title: "移除头像",
       message:
-        "移除后回到站点默认头像。当初上传的那张头像图会一并清理（同一份内容在别处还有引用时只解这条引用）。",
+        "移除后回到站点默认头像（站点未配置时是内置翼标）。当初上传的那张头像图会一并清理（同一份内容在别处还有引用时只解这条引用）。",
       confirmText: "移除",
       danger: true,
     });
@@ -163,7 +163,7 @@ function avatarCard(user: UserProfile, reload: () => void): HTMLElement {
       h(
         "div",
         { style: { flex: "1 1 220px", minWidth: "200px" } },
-        h("div", { text: "推荐使用 URL 地址；不设置时采用站点默认头像。" }),
+        h("div", { text: "推荐使用 URL 地址；不设置时采用站点默认头像，站点未配置时使用内置翼标。" }),
         h("div.tip", { style: { marginTop: "6px" }, text: "上传的图会存进「默认相册」，并标记 avatar 标签。" }),
       ),
       h("div", { style: { flex: "0 0 auto", display: "flex", gap: "8px", flexWrap: "wrap" } }, uploadBtn, remove),
