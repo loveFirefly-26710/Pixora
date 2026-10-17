@@ -73,7 +73,7 @@ function renderPayload(payload: TermsPayload, reload: () => void): Node[] {
         "本次更新摘要",
         h(
           "ul",
-          { style: { margin: "0", paddingLeft: "20px", fontSize: "12.5px", lineHeight: "2", color: "#4b5563" } },
+          { style: { margin: "0", paddingLeft: "20px", fontSize: "12.5px", lineHeight: "2", color: "var(--muted)" } },
           ...items.map((text) => h("li", { text })),
         ),
       ),
@@ -152,7 +152,7 @@ function currentCard(payload: TermsPayload, current: TermsVersion, reload: () =>
       style: {
         marginTop: "12px",
         paddingTop: "12px",
-        borderTop: "1px solid #f3f4f6",
+        borderTop: "1px solid var(--border)",
         fontSize: "12.5px",
         color: "var(--muted)",
       },
@@ -452,7 +452,7 @@ function versionMeta(version: TermsVersion): string {
  * 不做 Markdown 解析——正文允许出现任何字符，解析器只会变成又一个出错点。
  */
 function renderBody(text: string): HTMLElement {
-  const box = h("div", { style: { fontSize: "12.5px", lineHeight: "1.95", color: "#4b5563" } });
+  const box = h("div", { style: { fontSize: "12.5px", lineHeight: "1.95", color: "var(--muted)" } });
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) {
@@ -461,7 +461,7 @@ function renderBody(text: string): HTMLElement {
     }
     if (/^(?:[一二三四五六七八九十]+、|第[一二三四五六七八九十百零\d]+条)/.test(line)) {
       box.append(
-        h("div", { style: { fontWeight: "700", color: "#1f2328", marginTop: "4px" }, text: line }),
+        h("div", { style: { fontWeight: "700", color: "var(--text)", marginTop: "4px" }, text: line }),
       );
     } else {
       box.append(h("div", { text: line }));

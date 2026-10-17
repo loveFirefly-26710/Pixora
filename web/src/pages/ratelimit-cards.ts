@@ -457,7 +457,7 @@ export function usersCard(
     ),
     h(
       "div",
-      { style: { padding: "12px 14px", borderTop: "1px solid var(--border)", background: "#fafafa" } },
+      { style: { padding: "12px 14px", borderTop: "1px solid var(--border)", background: "var(--surface-2)" } },
       h("div.tip", {
         style: { margin: "0" },
         text: "改「全局默认」时，标了「继承默认」的用户立刻跟着变，标了「自定义」的不受影响。按人调整用这一行的「编辑」。",

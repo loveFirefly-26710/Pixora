@@ -53,7 +53,7 @@ function driverMeta(driver: string): DriverMeta {
       driver,
       label: driver,
       desc: "自定义后端",
-      color: "#94a3b8",
+      color: "var(--faint)",
     }
   );
 }
@@ -421,7 +421,7 @@ function distributionCard(reload: () => void, data: StorageAdmin): HTMLElement {
       h(
         "div.flexline",
         null,
-        h("span.dot", { style: { background: "#f59e0b" } }),
+        h("span.dot", { style: { background: "var(--warning)" } }),
         "回收站（保留期内）",
         h("span.spacer"),
         h("span", {
@@ -465,7 +465,7 @@ function distributionCard(reload: () => void, data: StorageAdmin): HTMLElement {
       }
     });
     gcRow.append(
-      h("span.dot", { style: { background: "#9ca3af" } }),
+      h("span.dot", { style: { background: "var(--faint)" } }),
       "待回收（已删除，等后台清理）",
       h("span.spacer"),
       h("span", {
@@ -484,7 +484,7 @@ function distributionCard(reload: () => void, data: StorageAdmin): HTMLElement {
       style: {
         marginTop: "10px",
         paddingTop: "10px",
-        borderTop: "1px solid #f3f4f6",
+        borderTop: "1px solid var(--border)",
         fontSize: "12.5px",
         color: "var(--muted)",
       },
@@ -751,7 +751,7 @@ function backendBlock(reload: () => void, backend: BackendRow): HTMLElement {
         borderRadius: "10px",
         padding: "12px",
         marginBottom: "12px",
-        background: backend.enabled ? "#fff" : "#fafafa",
+        background: backend.enabled ? "var(--surface)" : "var(--surface-2)",
       },
     },
     head,

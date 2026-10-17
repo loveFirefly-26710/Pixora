@@ -16,6 +16,7 @@ import { h, mount } from "../core/dom";
 import { navigate, type PageContext } from "../core/router";
 import { getState, loadMe } from "../core/state";
 import { toastError } from "../core/toast";
+import { brandLockup } from "../ui/brand";
 import { field, qtip, textInput } from "../ui/widgets";
 import { oauthButtons, oauthErrorTip, phoneForm, scanPanel } from "../ui/login-methods";
 
@@ -35,7 +36,7 @@ export async function render(ctx: PageContext): Promise<void> {
   const step2Error = h("div", { style: { display: "none", marginBottom: "12px" } });
   const step1Error = h("div", { style: { display: "none", marginBottom: "12px" } });
 
-  const subtitle = h("div.tip", { text: "登录后管理你的相册" });
+  const subtitle = h("div.auth-sub", { text: "登录后管理你的相册" });
   const submit = h("button.btn.pri.blk", { type: "submit", text: "登录" });
 
   const step1 = h(
@@ -49,7 +50,7 @@ export async function render(ctx: PageContext): Promise<void> {
       { style: { justifyContent: "space-between", marginBottom: "16px", fontSize: "12.5px" } },
       h(
         "label",
-        { style: { display: "flex", alignItems: "center", gap: "6px", color: "#4b5563" } },
+        { style: { display: "flex", alignItems: "center", gap: "6px", color: "var(--muted)" } },
         remember,
         h("span", { text: "记住我" }),
       ),
@@ -210,12 +211,18 @@ export async function render(ctx: PageContext): Promise<void> {
   );
 
   const form = h(
-    "form",
-    { style: { maxWidth: "420px", margin: "0 auto", padding: "38px 18px" } },
+    "form.auth-card",
+    null,
     h(
-      "div",
-      { style: { textAlign: "center", marginBottom: "22px" } },
-      h("div.logo", { style: { fontSize: "20px" }, html: "Pi<em>x</em>ora" }),
+      "div.auth-head",
+      null,
+      h(
+        "div.auth-brand",
+        null,
+        brandLockup((getState().site?.name ?? "").trim() || "Pixora"),
+      ),
+      h("div.auth-eyebrow", { text: "Welcome back" }),
+      h("h1.auth-title", { text: "回到萤火" }),
       subtitle,
     ),
     tabs,

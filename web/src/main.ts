@@ -8,6 +8,7 @@
 
 import "./styles/tokens.css";
 import "./styles/components.css";
+import "./styles/theme.css";
 
 import {
   navigate,
@@ -16,6 +17,7 @@ import {
   setOutlet,
   startRouter,
 } from "./core/router";
+import { initTheme } from "./core/theme";
 import { bootstrap, getState, setUser, subscribe, updateUser } from "./core/state";
 import { mountShell, refreshNav } from "./ui/shell";
 import { openModal } from "./core/modal";
@@ -172,6 +174,10 @@ async function promptTermsIfNeeded(): Promise<void> {
 async function main(): Promise<void> {
   const root = document.getElementById("app");
   if (!root) return;
+
+  // 主题与环境光先于任何页面渲染：首绘前 index.html 已经定好 data-theme，
+  // 这里补上系统偏好监听、按钮同步和背景萤火。
+  initTheme();
 
   // 会话超时的收尾动作。放在这里而不是 api.ts：那里是被路由与状态依赖的
   // 底层模块，反向 import 会绕成环

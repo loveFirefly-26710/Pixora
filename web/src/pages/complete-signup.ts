@@ -13,6 +13,7 @@ import { h } from "../core/dom";
 import { navigate, type PageContext } from "../core/router";
 import { getState, loadMe } from "../core/state";
 import { toastError, toastOk } from "../core/toast";
+import { brandLockup } from "../ui/brand";
 import { field, qtip, textInput } from "../ui/widgets";
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -73,12 +74,18 @@ export async function render(ctx: PageContext): Promise<void> {
 
   const form = h(
     "form",
-    { style: { maxWidth: "420px", margin: "0 auto", padding: "38px 18px" } },
+    { class: "auth-card" },
     h(
-      "div",
-      { style: { textAlign: "center", marginBottom: "22px" } },
-      h("div.logo", { style: { fontSize: "20px" }, html: "Pi<em>x</em>ora" }),
-      h("div.tip", { text: `还差一个邮箱就能建号${label}` }),
+      "div.auth-head",
+      null,
+      h(
+        "div.auth-brand",
+        null,
+        brandLockup((site?.name ?? "").trim() || "Pixora"),
+      ),
+      h("div.auth-eyebrow", { text: "Complete signup" }),
+      h("h1.auth-title", { text: "补全邮箱" }),
+      h("div.auth-sub", { text: `还差一个邮箱就能建号${label}。` }),
     ),
     errorBox,
     qtip(

@@ -456,7 +456,7 @@ async function publishRow(view: View, row: AdminTermsRow): Promise<void> {
 function openPreview(row: AdminTermsRow): void {
   let handle: { close: () => void } | null = null;
   const body = h("div", {
-    style: { whiteSpace: "pre-wrap", fontSize: "12.5px", lineHeight: "1.95", color: "#4b5563" },
+    style: { whiteSpace: "pre-wrap", fontSize: "12.5px", lineHeight: "1.95", color: "var(--text)" },
   });
   body.textContent = row.body || "这个版本的正文是空的。";
   handle = openModal({
@@ -532,7 +532,7 @@ function editorCard(view: View): HTMLElement {
               whiteSpace: "pre-wrap",
               fontSize: "12.5px",
               lineHeight: "1.95",
-              color: "#4b5563",
+              color: "var(--text)",
             },
           },
           txt(controls.body.value || "（正文为空）"),

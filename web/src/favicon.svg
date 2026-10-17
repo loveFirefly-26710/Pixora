@@ -1,6 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#2563eb" />
-  <path d="M18 44V20h12a9 9 0 0 1 0 18h-5v6z" fill="#fff" />
-  <circle cx="45" cy="24" r="5" fill="#93c5fd" />
-  <path d="M14 48h36" stroke="#93c5fd" stroke-width="4" stroke-linecap="round" />
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eafff7"/>
+      <stop offset=".55" stop-color="#7ef0cd"/>
+      <stop offset="1" stop-color="#efc887"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="#040c0e"/>
+  <g fill="none" stroke="url(#g)" stroke-width="2.2" stroke-linecap="round">
+    <path d="M32 13 C23.5 18.5 20.7 25.4 22.6 33 C24.4 40.2 28.1 44.1 32 46.4 C35.9 44.1 39.6 40.2 41.4 33 C43.3 25.4 40.5 18.5 32 13Z" opacity=".85"/>
+    <path d="M30.6 24 C20.6 17.8 14 20.1 12 26.6 C9.9 33.3 14.9 39.1 24.5 39.9"/>
+    <path d="M33.4 24 C43.4 17.8 50 20.1 52 26.6 C54.1 33.3 49.1 39.1 39.5 39.9"/>
+    <path d="M27 36.1 C19.2 35.1 14.9 38.7 15.2 44.8 C15.5 50.3 20.3 53.2 26.6 51"/>
+    <path d="M37 36.1 C44.8 35.1 49.1 38.7 48.8 44.8 C48.5 50.3 43.7 53.2 37.4 51"/>
+  </g>
+  <circle cx="32" cy="31.8" r="3.2" fill="#efc887"/>
 </svg>

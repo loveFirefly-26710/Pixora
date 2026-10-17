@@ -17,20 +17,22 @@ import { h } from "../core/dom";
 import { relativeTime } from "../core/format";
 import { navigate, type PageContext } from "../core/router";
 import { currentUser, getState } from "../core/state";
-import { toastError } from "../core/toast";
+import { toast, toastError } from "../core/toast";
 import type { ImageItem } from "../core/types";
 import { createUploadPanel } from "../upload/panel";
+import { FIREFLY_MARK } from "../ui/brand";
 import { openLightbox } from "../ui/lightbox";
 import { applyMasonry } from "../ui/masonry";
 import {
   emptyState,
   imageTile,
   newShuffleSeed,
-  pageHead,
   qtip,
   skeletonTiles,
   sortSelect,
   spinner,
+  thumbImage,
+  viewHead,
 } from "../ui/widgets";
 
 /** 一页取多少：与列表页一致。 */
@@ -85,9 +87,9 @@ function gridColumnsStyle(): string {
 function emptyGridHint(query: PlazaQuery, loggedIn: boolean): HTMLElement {
   const node =
     query.q || query.tag
-      ? emptyState("🖼", "没有匹配的图片，请更换关键词。")
+      ? emptyState("✦", "没有匹配的图片，请更换关键词。")
       : emptyState(
-          "🖼",
+          "✦",
           "广场还没有公开图片",
           h("div.tip", {
             style: { margin: "0" },
@@ -96,6 +98,122 @@ function emptyGridHint(query: PlazaQuery, loggedIn: boolean): HTMLElement {
         );
   node.classList.add("fill");
   return node;
+}
+
+interface PlazaHeroHandle {
+  root: HTMLElement;
+  setFeatured(item: ImageItem | null): void;
+  setTotal(total: number): void;
+}
+
+/**
+ * 广场首屏：一段品牌文案 + 一个圆形「随机一帧」。
+ *
+ * 图不是另找的素材：第一页回来之后直接拿第一张公开图当 hero，
+ * 点它就在当前列表里打开预览。没有图时退回萤火翼标，不留一块空白。
+ */
+function buildPlazaHero(
+  onUpload: () => void,
+  onRandom: () => void,
+  onOpen: (item: ImageItem) => void,
+): PlazaHeroHandle {
+  let featured: ImageItem | null = null;
+  const count = h("span", { text: "0 幅公开影像" });
+  const chipTitle = h("div.hero-chip-title", { text: "等待第一束光" });
+  const chipSub = h("div.hero-chip-sub", { text: "上传后出现在这里" });
+
+  const core = h("span.hero-core", null, h("span.logo-mark", { html: FIREFLY_MARK }));
+  const frameInner = h("div.hero-frame-inner", null, core);
+  const frame = h(
+    "button.hero-frame",
+    { type: "button", "aria-label": "广场还没有公开图片" },
+    frameInner,
+  );
+  frame.addEventListener("click", () => {
+    if (featured) onOpen(featured);
+  });
+
+  const upload = h("button.btn.pri", { type: "button", text: "投递影像" });
+  upload.addEventListener("click", onUpload);
+  const random = h("button.btn.gho", { type: "button", text: "随机漫游" });
+  random.addEventListener("click", onRandom);
+
+  const hero = h(
+    "section.plaza-hero",
+    null,
+    h(
+      "div.plaza-hero-copy",
+      null,
+      h("div.view-eyebrow", { text: "Night archive · Firefly signal" }),
+      h("h1.plaza-hero-title", null, "萤火", h("em", { text: "广场" })),
+      h("p.plaza-hero-desc", {
+        text: "在夜里，留下一点光。浏览公开影像，或把自己的那一帧投进这片夜空。",
+      }),
+      h("div.plaza-hero-actions", null, upload, random),
+      h(
+        "div.plaza-hero-meta",
+        null,
+        count,
+        h("i", { "aria-hidden": "true" }),
+        h("span", { text: "每次刷新，都是新的轨迹" }),
+      ),
+    ),
+    h(
+      "div.plaza-hero-visual",
+      null,
+      h("div.hero-halo", { "aria-hidden": "true" }),
+      h("div.hero-ring.r1", { "aria-hidden": "true" }),
+      h("div.hero-ring.r2", { "aria-hidden": "true" }),
+      h("div.hero-ring.r3", { "aria-hidden": "true" }),
+      h("div.hero-arc", { "aria-hidden": "true" }),
+      frame,
+      h(
+        "div.hero-chip.one",
+        null,
+        h("div.hero-chip-label", { text: "来自广场 · 随机一帧" }),
+        chipTitle,
+        chipSub,
+      ),
+      h(
+        "div.hero-chip.two",
+        null,
+        h("div.hero-chip-label", { text: "Firefly signal 01" }),
+        h("div.hero-chip-title", { text: "今夜有光" }),
+        h("div.hero-chip-sub", { text: "PUBLIC / ORBIT · 03:24" }),
+      ),
+    ),
+  );
+
+  function setTotal(total: number): void {
+    count.textContent = total > 0 ? `${total} 幅公开影像` : "广场还没有公开影像";
+  }
+
+  function setFeatured(item: ImageItem | null): void {
+    featured = item;
+    if (!item) {
+      frameInner.replaceChildren(core);
+      frame.setAttribute("aria-label", "广场还没有公开图片");
+      chipTitle.textContent = "等待第一束光";
+      chipSub.textContent = "上传后出现在这里";
+      return;
+    }
+    const img = thumbImage({
+      url: item.url,
+      thumb_url: item.thumb_url,
+      has_thumb: item.has_thumb,
+      tags: item.tags,
+      title: item.title,
+    });
+    img.loading = "eager";
+    img.decoding = "async";
+    img.alt = item.title ?? "广场图片";
+    frameInner.replaceChildren(img);
+    frame.setAttribute("aria-label", `打开 ${item.title ?? "这张图片"}`);
+    chipTitle.textContent = item.title?.trim() || item.tags[0] || "来自广场";
+    chipSub.textContent = `${item.tags.slice(0, 2).join(" / ") || "公开影像"} · ${item.views} 次浏览`;
+  }
+
+  return { root: hero, setFeatured, setTotal };
 }
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -108,15 +226,6 @@ export async function render(ctx: PageContext): Promise<void> {
   ctx.outlet.append(root);
   ctx = { ...ctx, outlet: root };
 
-  root.append(
-    pageHead(
-      "广场",
-      user
-        ? "上传区在上方，广场内容在下方，同屏可见。"
-        : "浏览公开图片。登录后可以上传和下载原图。",
-    ),
-  );
-
   if (!user && site && !site.plaza_public) {
     root.append(
       qtip(
@@ -126,6 +235,38 @@ export async function render(ctx: PageContext): Promise<void> {
       ),
     );
     return;
+  }
+
+  const items: ImageItem[] = [];
+  let jumpToUpload = () => navigate("/upload");
+
+  // 搜索/标签结果页不摆 hero：结果应该直接出现在第一屏。
+  // 普通广场用 hero 带出品牌气质，并把第一张公开图当作「随机一帧」。
+  let heroState: PlazaHeroHandle | null = null;
+  if (!query.q && !query.tag) {
+    heroState = buildPlazaHero(
+      () => jumpToUpload(),
+      () => {
+        if (items.length === 0) {
+          toast("广场还没有公开图片");
+          return;
+        }
+        const pick = items[Math.floor(Math.random() * items.length)]!;
+        openLightbox(items, pick);
+      },
+      (item) => openLightbox(items, item),
+    );
+    root.append(heroState.root);
+  } else {
+    root.append(
+      viewHead(
+        "Plaza / Gallery",
+        "广场",
+        query.q
+          ? `搜索“${query.q}”的公开影像。`
+          : "浏览公开影像。登录后可以上传和下载原图。",
+      ),
+    );
   }
 
   // 网格只建一次，往下追加节点：重建会把已经排好的瀑布流和滚动位置一起丢掉
@@ -150,6 +291,7 @@ export async function render(ctx: PageContext): Promise<void> {
   if (user || guestUpload) {
     const panel = createUploadPanel({
       guest: !user,
+      compact: true,
       onUploaded: () => {
         // 传完把列表刷回第一页：按时间排序时新图在最前面；
         // 随机排序下也刷一次——重新洗牌后新图有机会出现在第一屏，
@@ -159,13 +301,19 @@ export async function render(ctx: PageContext): Promise<void> {
     });
     panel.root.style.marginBottom = "18px";
     root.append(panel.root);
+    jumpToUpload = () => {
+      panel.root.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+    };
     // 相册清单由面板自己拉（带一次重试与占位项）：
     // 页面再拉一次会和它抢同一个下拉，两边先后写值反而会闪
   }
 
   // 搜索只在顶栏那一个输入框里（页面里不再重复），标签筛选也交给它——
   // 后端的关键词匹配本来就同时命中标题与标签
-  const tagRow = h("div.flexline", { style: { marginBottom: "14px" } });
+  const tagRow = h("div.flexline.plaza-toolbar");
   root.append(tagRow, grid, footer);
 
   // 排序下拉。默认「随机」；「最热」按浏览量，后端有 views 统计，所以保留。
@@ -175,13 +323,16 @@ export async function render(ctx: PageContext): Promise<void> {
   }, [{ value: "hot", label: "最热（按浏览量）" }]);
   sortControl.classList.add("f");
   sortControl.style.maxWidth = "190px";
-  tagRow.append(h("span.spacer"), sortControl);
+  const reshuffle = h("button.btn.sm.gho", { type: "button", text: "换一批" });
+  reshuffle.addEventListener("click", () => {
+    update({ sort: "shuffle", seed: String(newShuffleSeed()) });
+  });
+  tagRow.append(h("span.spacer"), reshuffle, sortControl);
 
   // 顶栏搜索框显示当前关键词（从别处带着 ?q= 进来时也对得上）
   const headerSearch = document.querySelector<HTMLInputElement>(".navbar .search input");
   if (headerSearch) headerSearch.value = query.q ?? "";
 
-  const items: ImageItem[] = [];
   let currentPage = 0;
   let totalPages = 1;
   let loading = false;
@@ -248,6 +399,10 @@ export async function render(ctx: PageContext): Promise<void> {
       });
       currentPage = page.meta.page;
       totalPages = Math.max(1, page.meta.total_pages);
+      if (currentPage === 1) {
+        heroState?.setTotal(page.meta.total);
+        heroState?.setFeatured(page.items[0] ?? null);
+      }
 
       if (reset) grid.replaceChildren();
       if (page.items.length === 0) {
@@ -262,7 +417,8 @@ export async function render(ctx: PageContext): Promise<void> {
         for (const item of page.items) {
           grid.append(
             imageTile(item, {
-              // 只给时间：卡片上不再暴露上传者 UID（见 widgets.imageTile 的说明）
+              // 只给用户自己写的标题与时间，不暴露上传者 UID / 原始文件名
+              title: item.title,
               subtitle: relativeTime(item.upload_time),
               // 预览浮层拿累加后的整份列表：翻到哪就能在浮层里前后翻到哪
               onOpen: (clicked) => openLightbox(items, clicked),

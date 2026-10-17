@@ -51,6 +51,11 @@ export interface UploadPanelOptions {
    * 选项的下拉只会让人以为还能改。
    */
   guest?: boolean;
+  /**
+   * 紧凑形态：广场只留一条投放条，设置卡收进上传页。
+   * 选择文件后预览与队列仍会出现，不影响上传本身。
+   */
+  compact?: boolean;
 }
 
 export interface UploadPanelHandle {
@@ -216,8 +221,20 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   }
 
   const hintEl = h("div.tip", { style: { marginTop: "8px" }, text: supportedHint() });
+  if (options.compact) {
+    hintEl.append(
+      document.createTextNode(" · "),
+      h("a", { href: "#/upload", text: "相册、标签与并发在完整上传页设置" }),
+    );
+  }
   const refreshHint = (): void => {
     hintEl.textContent = supportedHint();
+    if (options.compact) {
+      hintEl.append(
+        document.createTextNode(" · "),
+        h("a", { href: "#/upload", text: "相册、标签与并发在完整上传页设置" }),
+      );
+    }
     // 相册清单也可能刚变（新建/删除相册），下拉跟着重画
     if (albumSelect.options.length === 0) void fetchAlbums();
   };
@@ -225,9 +242,9 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   const dropzone = h("div.dropzone");
   dropzone.append(
     h("div.ph", { style: { width: "46px", height: "46px", borderRadius: "10px", margin: "0 auto 8px" }, text: "＋" }),
-    h("div", { style: { fontSize: "13.5px", fontWeight: "600" }, text: "拖拽到此处，或点击选择文件 / 文件夹" }),
+    h("div.drop-title", { style: { fontSize: "13.5px", fontWeight: "600" }, text: "拖拽到此处，或点击选择文件 / 文件夹" }),
     h(
-      "div.tip",
+      "div.tip.drop-paste",
       { style: { marginTop: "3px" } },
       "也可以直接按 ",
       h("span.kbd", { text: "Ctrl" }),
@@ -247,7 +264,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   );
   dropzone.append(dropButtons);
   dropzone.addEventListener("click", (event) => {
-    if ((event.target as HTMLElement).closest("button")) return;
+    if ((event.target as HTMLElement).closest("button, a")) return;
     fileInput.click();
   });
 
@@ -351,17 +368,17 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   visibilitySelect.value = queue.getSettings().visibility;
   concurrencySelect.value = String(queue.getSettings().concurrency);
 
-  const settingsTip = h("span.tip", { style: { margin: "0", marginRight: "auto" }, text: "" });
+  const settingsTip = h("span.tip.settings-tip", { style: { margin: "0", marginRight: "auto" }, text: "" });
   const clearBtn = h("button.btn", { type: "button", text: "清空" });
   const startBtn = h("button.btn.pri", { type: "button", text: "开始上传" });
   const inlineActions = h(
-    "div.flexline.upload-actions-inline",
+    "div.flexline.upload-actions-inline.settings-actions",
     { style: { justifyContent: "flex-end", marginTop: "10px" } },
     clearBtn,
     startBtn,
   );
   const settingsCard = h(
-    "div.card",
+    "div.card.settings-card",
     null,
     h("h4", null, "上传设置"),
     h(
@@ -369,22 +386,22 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
       { style: { marginBottom: "12px" } },
       options.guest
         ? null
-        : h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "目标相册" }), albumSelect),
-      h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "标签（全部共用）" }), tagsInput),
+        : h("div.fld.album-field", { style: { margin: "0" } }, h("label.f", { text: "目标相册" }), albumSelect),
+      h("div.fld.tags-field", { style: { margin: "0" } }, h("label.f", { text: "标签（全部共用）" }), tagsInput),
       // 访客没有「隐私」这回事：图片归在访客相册里，而那个账号登不进来，
       // 设成私有等于传完就找不到人认领。所以访客只有公开一种，不摆选择
       options.guest
         ? h(
-            "div.fld",
+            "div.fld.visibility-field",
             { style: { margin: "0" } },
             h("label.f", { text: "可见性" }),
             h("div.tip", { style: { margin: "0", paddingTop: "10px" }, text: "公开（访客上传只有公开）" }),
           )
-        : h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "可见性" }), visibilitySelect),
-      h("div.fld", { style: { margin: "0" } }, h("label.f", { text: "并发数" }), concurrencySelect),
+        : h("div.fld.visibility-field", { style: { margin: "0" } }, h("label.f", { text: "可见性" }), visibilitySelect),
+      h("div.fld.concurrency-field", { style: { margin: "0" } }, h("label.f", { text: "并发数" }), concurrencySelect),
     ),
     h(
-      "div.flexline",
+      "div.flexline.settings-actions-row",
       { style: { justifyContent: "flex-end" } },
       settingsTip,
       inlineActions,
@@ -560,7 +577,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
 
   const noticesHost = h("div");
 
-  const root = h("div.upload-panel");
+  const root = h("div.upload-panel", { class: options.compact ? "is-compact" : "" });
   root.append(
     noticesHost,
     desktopCard,

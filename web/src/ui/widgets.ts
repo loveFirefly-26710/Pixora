@@ -33,6 +33,30 @@ export function pageHead(title: string, description?: string): HTMLElement {
   );
 }
 
+/**
+ * 主页面可见标题。广场用 hero 自带的 h1，上传与相册用这一块；
+ * 后台页仍然以卡片分节，不强行加一层大标题。
+ */
+export function viewHead(
+  eyebrow: string,
+  title: string,
+  description?: string,
+  extra?: Node | null,
+): HTMLElement {
+  return h(
+    "header.view-head",
+    null,
+    h(
+      "div",
+      null,
+      h("div.view-eyebrow", { text: eyebrow }),
+      h("h1.view-title", { text: title }),
+      description ? h("p.view-desc", { text: description }) : null,
+    ),
+    extra ? h("div.view-head-extra", null, extra) : null,
+  );
+}
+
 /** 带标题的卡片。`extra` 会右对齐放在标题旁。 */
 export function card(title: string | null, ...content: Array<Node | string | null>): HTMLElement {
   const head = title
@@ -408,6 +432,10 @@ export function imageTile(
     showTags?: boolean;
     /** 左上角带勾选框（相册页用：勾选框常驻，不必先点「选择」进模式） */
     checkbox?: boolean;
+    /** 卡片标题：广场传用户自己写的标题，相册传文件名；不传就不占这一行 */
+    title?: string | null;
+    /** 是否显示浏览量；广场显示，相册/回收站不显示 */
+    showViews?: boolean;
   } = {},
 ): HTMLElement {
   const thumb = h("div.ph", { class: `c${(item.id % 6) + 1}` });
@@ -425,6 +453,8 @@ export function imageTile(
 
   const time = options.subtitle ?? relativeTime(item.upload_time);
   const tags = options.showTags === false ? [] : item.tags.slice(0, 3);
+  const title = (options.title ?? item.title ?? "").trim();
+  const showViews = options.showViews !== false && item.views > 0;
   const tile = h(
     "button.tile",
     {
@@ -437,11 +467,13 @@ export function imageTile(
     h(
       "div.meta",
       null,
+      title ? h("div.n", { text: title }) : null,
       h(
         "div.s",
         null,
         ...tags.map((tag) => h("span.tag.b", { text: tag })),
         h("span", { text: time }),
+        showViews ? h("span.v", { text: `浏览 ${item.views}`, "aria-label": `${item.views} 次浏览` }) : null,
       ),
     ),
   );
@@ -494,7 +526,7 @@ export function copyButton(label: string, getUrl: () => string): HTMLElement {
 export function kvRow(label: string, value: Node | string, mono = false): HTMLElement {
   return h(
     "div.flexline",
-    { style: { padding: "6px 0", borderBottom: "1px solid #f3f4f6" } },
+    { style: { padding: "6px 0", borderBottom: "1px solid var(--border)" } },
     h("span", { text: label, style: { color: "var(--muted)", flex: "0 0 132px" } }),
     typeof value === "string" ? h("span", { class: mono ? "mono" : "", text: value }) : value,
   );
