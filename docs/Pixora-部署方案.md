@@ -1,57 +1,81 @@
 # Pixora 部署方案
 
-这份文档把 Pixora 的部署拆成三条路线：纯 Docker、Linux 单二进制、Windows 单二进制，外加可选的「前后端分离」。每条路线都从「准备好这几样东西」讲到「怎么确认装好了」，命令可以直接复制。
+当前版本 0.1.1。本文按部署方式分三条主线：纯 Docker、Linux 单二进制、Windows 单二进制，前后端分离单独一章。每条线都从准备工作写到验收，命令可以直接复制。
 
-第 10 节是实测记录：这台机器上真的跑过哪些组合、各自什么结果、哪些因为环境限制没跑。第 9 节单独说数据库——三种方言都跑过同一套 298 项冒烟，这次修掉的方言差异也列在那里。
+第一次部署建议先走 Docker + SQLite（§4.2），跑通后再换数据库或拆前端。遇到报错先看 §11 的对照表。
 
 ## 0. 怎么用这份文档
 
-先看第 3 节的选型表，挑一条路线，然后按编号往下读。文档里的约定：
+### 0.1 从零到上线的顺序
+
+| 步骤 | 做什么 | 完成标志 | 详见 |
+|---|---|---|---|
+| 1 | 准备服务器与系统 | 能 SSH 登录，磁盘有空间 | §2.1 |
+| 2 | 解析域名 | `dig +short 你的域名` 返回服务器 IP | §2.1 |
+| 3 | 放行端口 | 22、80、443 可从外网访问 | §2.1 |
+| 4 | 生成主密钥 | 得到 64 位十六进制字符串 | §2.2 |
+| 5 | 装 Docker 或下载二进制 | `docker compose version` 可用，或 `pixora` 能执行 | §4.0 / §5 / §6 |
+| 6 | 写配置 | 域名、站点地址、主密钥、数据库密码都换成自己的 | §4.1 |
+| 7 | 启动 | `docker compose ps` 显示 `pixora` 为 healthy | §4.2 |
+| 8 | 走安装向导 | 五步完成，能登录后台 | §7 |
+| 9 | 验收 | 能上传、复制直链并打开，重启后数据还在 | §7 |
+| 10 | 做一次备份 | 备份文件能列出内容 | §4.7 |
+
+### 0.2 文档约定
 
 | 占位 | 换成什么 |
 |---|---|
-| `img.example.com` | 你实际使用的域名 |
-| `<你生成的主密钥>` | 第 2.2 节那条命令的输出 |
-| `<数据库密码>` | 自己设一个强密码 |
-| `ghcr.io/lovefirefly-26710/pixora` | 镜像地址。如果你 fork 了仓库，换成 `ghcr.io/<你的用户名>/pixora` |
+| `img.example.com` | 你的域名 |
+| `https://img.example.com` | 站点对外地址，和域名一致 |
+| `<主密钥>` | `openssl rand -hex 32` 的输出 |
+| `<数据库密码>` | 自己设的强密码，建议用十六进制 |
+| `ghcr.io/lovefirefly-26710/pixora` | 镜像地址；fork 过仓库就换成自己的用户名 |
 
-全文用 `$` 开头的行表示在服务器（Linux/macOS/WSL）上执行，`PS>` 开头表示在 Windows PowerShell 上执行。
+命令默认在 Linux/macOS/WSL 的 shell 里执行，标了 `PS>` 的是 Windows PowerShell。Docker 命令按“当前用户已加入 docker 组”来写；没有加入就前面加 `sudo`。
 
 ## 1. 先认三样东西
 
 | 角色 | 是什么 | 住在哪 |
 |---|---|---|
-| **后端** | 一个 Rust 进程（可执行文件名 `pixora`），负责接口、直链、上传、后台任务 | 你的服务器 / 容器 |
-| **前端** | 一堆静态文件（`index.html`、`main.js`…），用户看到的界面 | 默认嵌在后端二进制里；也可以单独放到静态托管 |
-| **数据** | 数据库（账号、相册、标签）+ 图片文件 | 数据目录（本地磁盘 / 卷），数据库可以换成自建或托管 |
+| 后端 | 一个 Rust 进程（可执行文件 `pixora`），负责接口、直链、上传、后台任务 | 服务器或容器 |
+| 前端 | 静态文件（`index.html`、`main.js` 等），用户看到的界面 | 默认嵌在后端二进制里，也可以单独放静态托管 |
+| 数据 | 数据库（账号、相册、标签、设置）与图片文件 | 数据目录；数据库可以换成自建或托管 |
 
-默认形态里前端被 `rust-embed` 嵌进了后端二进制，所以**只要起一个进程，网站就能用**。只有想把前端也放上 CDN 时，才需要把两者拆开（第 8 节）。
+默认形态下前端被 `rust-embed` 嵌进二进制，启动一个进程网站就能用。只有想把前端放到 CDN 时，才需要拆开（§8）。
 
 ### 名词速查
 
 | 词 | 一句话解释 |
 |---|---|
-| 环境变量 | 写成 `KEY=VALUE` 的配置，进程启动时读取；这个项目所有部署参数都走它 |
+| 环境变量 | `KEY=VALUE` 形式的启动配置，这个项目的部署参数都走它 |
 | 容器 / 镜像 | 镜像是打包好的程序，容器是它的运行实例 |
-| 反向代理 | 站在最前面的那个服务，负责 https 证书与转发（本项目的编排里是 Caddy） |
+| 反向代理 | 站在最前面处理 https 证书与转发的服务，本文的编排里是 Caddy |
 | 直链 | 图片的永久地址，形如 `https://你的域名/images/<哈希>.jpg` |
 | 直链前缀 | 直链里 `images` 那一段，后台可以改，旧链不会失效 |
-| 安装向导 | 第一次打开网站时的五步引导，用来验证数据库、建管理员、写站点配置 |
-| 主密钥 | 加密存储后端凭据与 SMTP 密码的那把钥匙，丢了只能重新填一遍凭据 |
+| 安装向导 | 第一次打开网站时的五步引导：环境检查、数据库自检、管理员、站点与邮件、完成 |
+| 主密钥 | 加密存储后端凭据与 SMTP 密码的钥匙，丢了只能重新填凭据 |
 
 ### 部署顺序
 
-```
-先把后端跑起来 → 打开网站走安装向导 → 能登录、能传图、能看图 → 再考虑把前端放 CDN
-```
-
-顺序反了（先拆前端再调后端）会同时面对跨域和接口两套问题，不好定位。
+先让后端跑起来，走完安装向导，确认能登录、能上传、能打开直链，再考虑拆前端。顺序反过来会同时面对跨域和接口两套问题，不好定位。
 
 ## 2. 开工前准备好这四样
 
-### 2.1 一台机器
+### 2.1 机器、域名与端口
 
-云服务器（1 核 1G 就能跑）、家里的小主机、NAS 都行。系统推荐 Ubuntu 22.04/24.04 或 Debian 12。Windows 上也有一等公民的支持（第 6 节），不是靠 WSL 转的。
+云服务器 1 核 1G 就能跑，推荐 Ubuntu 22.04/24.04 或 Debian 12。Windows 也支持原生部署（§6），不需要 WSL。NAS、小主机同样可以。
+
+域名要做 A（IPv4）或 AAAA（IPv6）记录，指向服务器公网 IP。Caddy 自动申请证书要用到 80 和 443，云厂商的安全组和系统防火墙都要放行。国内云主机用域名对外提供 80/443 服务，通常要先完成备案。
+
+登录服务器先确认三件事：
+
+```bash
+uname -m                       # x86_64 或 aarch64
+dig +short img.example.com     # 应返回你的服务器 IP
+sudo ufw status                # 或 firewall-cmd --list-all
+```
+
+没有 `dig` 就用 `getent hosts img.example.com`。域名还没解析好之前，Caddy 申请证书会失败，先把这一步做完。
 
 ### 2.2 主密钥
 
@@ -59,69 +83,131 @@
 openssl rand -hex 32
 ```
 
-输出 64 位十六进制，就是 `PIXORA_MASTER_KEY`。把它存进密码管理器，并**随数据目录一起备份**。
+输出 64 位十六进制，就是 `PIXORA_MASTER_KEY`。存进密码管理器，并随数据目录一起备份。
 
-它加密的是数据库里的敏感配置：S3/R2 的 AccessKey、WebDAV 密码、SMTP 密码、GitHub Token。换了它，这些值全部解不开，只能进后台一项项重填。图片文件和账号密码不受影响（口令是单向哈希）。
+它加密数据库里的敏感配置：S3/R2 的 AccessKey、WebDAV 密码、SMTP 密码、GitHub Token。换了它，这些值全部解不开，只能进后台重填。图片和账号密码不受影响，口令是单向哈希。
 
-不设这个变量也能启动：首次运行会在数据目录里生成 `master.key` 并照着用。单机自托管够用，但多实例、迁移容器、备份恢复时容易丢，生产环境建议显式注入。
+不设这个变量也能启动：首次运行会在数据目录里生成 `master.key`。单机自托管够用，但多实例、迁移容器、备份恢复时容易丢，生产环境建议显式注入。
 
-### 2.3 站点对外地址 `PIXORA_BASE_URL`
+### 2.3 站点对外地址
 
-写用户浏览器里看到的那个地址，例如：
+写用户浏览器里看到的地址：
 
 ```dotenv
 PIXORA_BASE_URL=https://img.example.com
 ```
 
-只有 IP、没有域名就写 `http://203.0.113.10:8080`。
+只有 IP、没有域名就写 `http://203.0.113.10:8080`。直链、邮件里的链接、OAuth 回跳都按它拼。忘了设置时，反向代理后面会推出来容器内网地址（`http://172.x.x.x/...`），现象是“页面能开，图片全裂”。
 
-**这是最容易漏、症状最明显的一个变量。** 直链、邮件里的链接、OAuth 回跳地址都按它拼。忘了设置时，服务端会按请求头推断，在反向代理后面推出来的是容器内网地址（`http://172.x.x.x/...`），现象是「页面能开，图片全裂」。
+安装向导第 4 步会把这个地址写进数据库。之后**以数据库里的值为准**，环境变量只作为向导的预填值。换域名时要去后台“系统设置”改，不能只改 compose。
 
 ### 2.4 数据目录
 
-一个可以读写的目录，用来放数据库文件（SQLite 时）、图片、主密钥文件。建议：
+一个可读写的目录，用来放 SQLite 文件、图片、主密钥。建议：
 
 - Docker：`./data` 挂到容器里的 `/data`；
-- Linux：`/srv/pixora/data`，属主是运行服务的那个用户；
-- Windows：`C:\pixora\data` 或任何一个普通目录（不要放 `C:\Program Files` 下，权限会打架）。
+- Linux：`/srv/pixora/data`，属主是运行服务的用户；
+- Windows：`C:\pixora\data` 这类普通目录，不要放 `C:\Program Files` 下。
 
-这个目录就是全部身家，备份就备份它（第 4.7 节）。
+这个目录就是全部身家，备份就是备份它（§4.7）。
 
 ## 3. 选一条路线
 
 | 你的情况 | 走哪条 | 看哪节 |
 |---|---|---|
-| 有 Docker，想最快跑起来 | 纯 Docker 单机 | 第 4 节 |
-| 有台 Linux 服务器，不想装 Docker | Linux 单二进制 + systemd | 第 5 节 |
-| 只有 Windows 机器 / Windows 小主机 | Windows 单二进制 + 服务 | 第 6 节 |
-| 后端在自己机器上，想让前端走 CDN | 先按 4/5/6 跑通后端，再拆前端 | 第 8 节 |
-| 数据库已经单独部署了（自建或云上） | Docker 或二进制都行，把连接指向它 | 第 4.5 / 9 节 |
+| 有 Docker，想最快跑起来 | 纯 Docker 单机 | §4 |
+| 有 Linux 服务器，不想装 Docker | Linux 单二进制 + systemd | §5 |
+| 只有 Windows 机器或小主机 | Windows 单二进制 + 服务 | §6 |
+| 想让前端走 CDN | 先按 §4/§5/§6 跑通后端，再拆前端 | §8 |
+| 数据库已经单独部署了 | Docker 或二进制都行，把连接指向它 | §4.5 / §9 |
 
 数据库怎么选：
 
 | 数据库 | 适合 | 验证情况（2026-10） |
 |---|---|---|
-| **SQLite**（默认） | 单机、个人、最省事 | 298 项冒烟全过；依赖最少，不需要单独的数据库进程 |
+| **SQLite**（默认） | 单机、个人、最省事 | 298 项冒烟全过；备份就是拷文件 |
 | PostgreSQL | 想用正经数据库、单机多人 | 298 项冒烟全过（PostgreSQL 17.6） |
-| MySQL | 公司统一用 MySQL | 298 项冒烟全过（MySQL 8.4.0）；MariaDB 共用同一套迁移，这次没单独验 |
+| MySQL | 团队统一用 MySQL | 298 项冒烟全过（MySQL 8.4.0） |
 
-三种都实测过，切换只改 `PIXORA_DB_DRIVER` 与 `PIXORA_DB_DSN`，细节见第 9 节。SQLite 依然是默认：它不依赖额外的进程与备份工具，几十个用户、几万张图完全够用，备份就是拷一个文件。
+三种都实测过，切换只改 `PIXORA_DB_DRIVER` 与 `PIXORA_DB_DSN`，细节见 §9。
+
+几条限制先说清楚：
+
+- **SQLite 只能一个实例用**。不要让两个容器或两个进程指向同一个 `pixora.db`，SQLite 的写锁会把它们互相挡住。要横向扩展就换 PostgreSQL/MySQL。
+- 发行包只有 `linux-x86_64` 与 `windows-x86_64`。ARM Linux 需要从源码构建（README 的“从源码构建”）。
+- 容器镜像默认只出 `linux/amd64`。要 ARM 镜像，手动跑“发行版与镜像”工作流，`platforms` 填 `linux/amd64,linux/arm64`。
+- MariaDB 与 MySQL 共用同一套迁移和驱动，但这次没有单独跑 MariaDB，见 §9。
 
 ## 4. 方案 A：纯 Docker
 
-一个文件跑完整站：下面每份 `docker-compose.yml` 里写着应用、数据库（SQLite 版没有单独的数据库服务）和自动 https 的反向代理。Caddy 的配置内嵌在文件末尾，**没有 `.env`、没有单独的 Caddyfile、也不用先建目录**——Docker 会自己建 `./data`。
+一个文件跑完整站：应用、数据库（SQLite 版没有单独的数据库服务）、自动 https 的反向代理都在一份 compose 里。Caddy 的配置内嵌在文件末尾，不需要 `.env`，也不需要单独的 Caddyfile。
 
-三步：
+### 4.0 装 Docker、拿镜像
 
-1. 把整段 YAML 存成 `docker-compose.yml`；
-2. 改文件里标着「必改」的几处（见 4.1）；
-3. `docker compose up -d`。
-
-需要 Docker Compose 2.23 以上（用了 `configs.content` 内嵌 Caddy 配置）。版本这么查：
+Ubuntu / Debian 用 Docker 官方安装脚本：
 
 ```bash
-docker compose version
+curl -fsSL https://get.docker.com | sudo sh
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+newgrp docker            # 当前终端生效；也可以退出重新登录
+docker run --rm hello-world
+docker compose version   # 需要 2.23 以上
 ```
+
+`docker` 组的成员权限等同于 root，只把可信账号加进去。不想用脚本就按 Docker 官方文档加 apt 源，效果一样。
+
+从 GHCR 拉镜像：
+
+```bash
+docker pull ghcr.io/lovefirefly-26710/pixora:0.1.1
+```
+
+报 `denied` 或 `unauthorized` 时，说明包是私有的，或者当前 Docker 没登录。用一个带 `read:packages` 权限的 GitHub PAT：
+
+```bash
+echo "<PAT>" | docker login ghcr.io -u <GitHub用户名> --password-stdin
+```
+
+包想公开给别人拉，去 GitHub → Packages → 这个包 → Package settings → Change visibility → Public。如果 CI 推镜像时报 `write_package`，是旧仓库留下的同名包在挡路：删掉旧包，或者给当前仓库授权，详见 §4.8。
+
+镜像标签：
+
+| 标签 | 是什么 |
+|---|---|
+| `latest` | 最近一次正式发版，生产可用 |
+| `0.1.1` | 固定版本，生产推荐 |
+| `edge` | 主干最新代码，包含尚未发版的修复 |
+| `master` / `sha-<短哈希>` | 调试与追溯用 |
+
+生产环境建议把 compose 里的 `:latest` 换成具体版本号，升级时再改，出问题好回滚。
+
+部署前先确认要用的标签真的存在（`docker pull ...:0.1.1`）。GHCR 推送失败时 `latest` 会停在上一个版本；这时要么先修好权限，要么临时用 `:edge`，不要拿 0.1.0 跑 PostgreSQL/MySQL。
+
+建目录、下载编排文件：
+
+```bash
+sudo mkdir -p /opt/pixora
+sudo chown "$USER":"$USER" /opt/pixora
+cd /opt/pixora
+
+# SQLite 版
+curl -fsSL https://raw.githubusercontent.com/loveFirefly-26710/Pixora/master/deploy/docker-compose.yml -o docker-compose.yml
+
+# PostgreSQL 版用这个：
+# curl -fsSL https://raw.githubusercontent.com/loveFirefly-26710/Pixora/master/deploy/docker-compose.postgres.yml -o docker-compose.yml
+
+# MySQL 版用这个：
+# curl -fsSL https://raw.githubusercontent.com/loveFirefly-26710/Pixora/master/deploy/docker-compose.mysql.yml -o docker-compose.yml
+```
+
+仓库还没推上去或网络拉不下来时，直接把 §4.2 / §4.3 / §4.4 里对应的整段 YAML 存成 `docker-compose.yml`。改完先用 Compose 自己渲染一遍：
+
+```bash
+docker compose config >/dev/null && echo "编排语法 OK"
+```
+
+应用镜像基于 `scratch`，容器里没有 shell、curl、psql。排障用 `/pixora --health-probe`，或者在宿主机上 curl 域名。
 
 ### 4.1 要改的就这几处
 
@@ -130,9 +216,13 @@ docker compose version
 | `img.example.com` | 你的域名 | `PIXORA_DOMAIN`，Caddy 用它申请证书 |
 | `https://img.example.com` | 站点对外地址，和域名一致 | `PIXORA_BASE_URL` |
 | `REPLACE_WITH_openssl_rand_hex_32` | `openssl rand -hex 32` 的输出 | `PIXORA_MASTER_KEY` |
-| `REPLACE_WITH_A_STRONG_PASSWORD` | 一个强密码 | 只有 PostgreSQL / MySQL 版有，出现 2～3 处，改成同一个值 |
+| `REPLACE_WITH_A_STRONG_PASSWORD` | 一个强密码 | PostgreSQL/MySQL 版才有，出现 2～3 处，改成同一个值 |
 
-主密钥那个占位符故意不是合法的密钥格式：忘了改，应用启动时直接报错，不会拿占位文字当密钥用。
+主密钥的占位符故意不是合法的十六进制：忘了改，应用启动会直接报错，不会拿占位文字当密钥用。
+
+数据库密码建议用 `openssl rand -hex 16` 生成。密码里的 `$` 会被 Compose 当变量插值，`@`、`:` 会把 DSN 拆错；用十六进制可以完全避开这些坑。非要用特殊字符，就把 DSN 里的字符做百分号编码，并把 `$` 写成 `$$`。
+
+安装向导第 4 步的“基础 URL”会覆盖 `PIXORA_BASE_URL`。向导现在会预填环境变量里的地址；如果手动改了，之后以数据库里的值为准。
 
 ### 4.2 A1：SQLite 版（推荐）
 
@@ -153,11 +243,17 @@ docker compose version
 # 需要 Docker Compose 2.23 以上（用 configs.content 内嵌了 Caddy 配置）：
 #   docker compose version
 #
+# 镜像默认用 :latest（最近一次发版）。生产环境建议固定成具体版本号（如 :0.1.1），
+# 升级时再改，出问题好回滚；主干上尚未发版的修复在 :edge 里。
+#
+# 安装向导第 4 步的「基础 URL」会写进数据库，之后以数据库里的值为准。
+# 向导会预填这里的环境变量值；换域名时记得两边一起改。
+#
 # 想从源码构建镜像，见 README 的「从源码构建」一节。
 
 services:
   pixora:
-    # 换成你自己的用户名（fork 过的话）；没发过版的仓库只有 :edge
+    # fork 过仓库就换成自己的用户名。生产建议把 :latest 固定成具体版本号
     image: ghcr.io/lovefirefly-26710/pixora:latest
     restart: unless-stopped
     environment:
@@ -186,6 +282,12 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+    # 默认的 json-file 日志不封顶，长时间跑会把磁盘写满
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2-alpine
@@ -202,12 +304,19 @@ services:
     deploy:
       resources:
         limits: { memory: 48M }
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 # Caddy 的配置就写在这里，不用另外放一个 Caddyfile
 configs:
   caddyfile:
     content: |
-      {$PIXORA_DOMAIN} {
+      # Compose 对 content 里的变量符号也会插值，这里写两遍做转义；
+      # Caddy 实际读到的是单个变量引用，再从容器环境取域名。
+      {$$PIXORA_DOMAIN} {
           encode zstd gzip
           # 上传体积上限，与应用侧的上限保持一致
           request_body {
@@ -224,22 +333,28 @@ configs:
       }
 ```
 
-启动与验证：
+启动与验收：
 
 ```bash
+cd /opt/pixora
+docker compose pull
+docker compose config >/dev/null && echo "编排语法 OK"
 docker compose up -d
-docker compose ps                              # 两个服务都应是 running / healthy
-docker compose logs -f pixora                  # 看到「Pixora 已启动」按 Ctrl+C
-
-# 证书批下来之前，直接问应用本身
-docker compose exec pixora /pixora --health-probe && echo ok
-# 证书就绪之后
-curl -s https://img.example.com/healthz        # {"db":"ok","status":"ok",...}
+docker compose ps
+docker compose logs --tail=100 pixora
+docker compose exec pixora /pixora --health-probe && echo "应用健康"
+curl -s https://img.example.com/healthz
 ```
 
-然后浏览器打开 `https://img.example.com`，走安装向导（第 7 节）。
+预期结果：
 
-> 镜像标签：发过版的版本号才有 `:0.1.0`、`:latest`；主干最新构建是 `:edge`。fork 过仓库就把 `lovefirefly-26710` 换成自己的用户名。
+- `docker compose ps` 里 `pixora` 是 `Up (healthy)`，`caddy` 是 `Up`；
+- 日志里有 `INFO Pixora 已启动 version="0.1.1" ... db="sqlite"`；
+- `/healthz` 返回 `{"db":"ok","status":"ok","uptime_seconds":...}`。
+
+`--health-probe` 只确认进程能响应；数据库是否通，看 `/healthz` 里的 `db` 字段。Caddy 第一次申请证书要几秒到几十秒，失败就看 `docker compose logs caddy`。
+
+证书就绪后打开 `https://img.example.com`，会跳转安装向导（§7）。
 
 ### 4.3 A2：PostgreSQL 版
 
@@ -250,6 +365,8 @@ curl -s https://img.example.com/healthz        # {"db":"ok","status":"ok",...}
 # 数据库密码在文件里出现 2 处（DSN 与 POSTGRES_PASSWORD），改成同一个值。
 #
 # 需要 Docker Compose 2.23 以上（configs.content 内嵌了 Caddy 配置）。
+# 镜像默认用 :latest；生产建议固定成具体版本号（如 :0.1.1）。
+# 安装向导第 4 步的「基础 URL」会写进数据库，之后以数据库里的值为准。
 
 services:
   pixora:
@@ -282,6 +399,11 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   db:
     image: postgres:16-alpine
@@ -304,6 +426,11 @@ services:
     deploy:
       resources:
         limits: { memory: 200M }
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2-alpine
@@ -319,11 +446,18 @@ services:
     deploy:
       resources:
         limits: { memory: 48M }
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 configs:
   caddyfile:
     content: |
-      {$PIXORA_DOMAIN} {
+      # Compose 对 content 里的变量符号也会插值，这里写两遍做转义；
+      # Caddy 实际读到的是单个变量引用，再从容器环境取域名。
+      {$$PIXORA_DOMAIN} {
           encode zstd gzip
           request_body {
               max_size 64MB
@@ -339,7 +473,7 @@ configs:
       }
 ```
 
-启动同 4.2，第一次会先初始化数据库，多等十几秒。备份用 `pg_dump`，见 4.7。
+启动命令同 §4.2。第一次启动会等数据库健康检查通过，再跑迁移，通常多等十几秒。日志里应是 `db="postgres"`，`/healthz` 的 `db` 为 `ok`；迁移没跑完就多等一会儿，失败看 `docker compose logs db` 与 `docker compose logs pixora`。备份与恢复用 `pg_dump` / `pg_restore`，见 §4.7。
 
 ### 4.4 A3：MySQL 版
 
@@ -351,6 +485,8 @@ configs:
 # 三处改成同一个值。
 #
 # 需要 Docker Compose 2.23 以上（configs.content 内嵌了 Caddy 配置）。
+# 镜像默认用 :latest；生产建议固定成具体版本号（如 :0.1.1）。
+# 安装向导第 4 步的「基础 URL」会写进数据库，之后以数据库里的值为准。
 
 services:
   pixora:
@@ -384,6 +520,11 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   db:
     image: mysql:8.4
@@ -409,6 +550,11 @@ services:
     deploy:
       resources:
         limits: { memory: 300M }
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2-alpine
@@ -424,11 +570,18 @@ services:
     deploy:
       resources:
         limits: { memory: 48M }
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 configs:
   caddyfile:
     content: |
-      {$PIXORA_DOMAIN} {
+      # Compose 对 content 里的变量符号也会插值，这里写两遍做转义；
+      # Caddy 实际读到的是单个变量引用，再从容器环境取域名。
+      {$$PIXORA_DOMAIN} {
           encode zstd gzip
           request_body {
               max_size 64MB
@@ -444,17 +597,17 @@ configs:
       }
 ```
 
-字符集固定 `utf8mb4`，否则中文标签、emoji 相册名插不进去。MySQL 比 PostgreSQL 重一些，同配置下多留 100MB 内存。MariaDB 把镜像换成 `mariadb:11`、环境变量换成 `MARIADB_DATABASE` / `MARIADB_USER` / `MARIADB_PASSWORD` / `MARIADB_ROOT_PASSWORD`，迁移共用一套，但同样受第 9 节的限制。
+字符集固定 `utf8mb4`，否则中文标签、emoji 相册名插不进去。MySQL 比 PostgreSQL 重一些，同配置下多留 100MB 内存。启动后确认日志里的 `db="mysql"` 和 `/healthz` 的 `db` 为 `ok`；第一次初始化通常要二三十秒。
+
+MariaDB 把镜像换成 `mariadb:11`，环境变量换成 `MARIADB_DATABASE` / `MARIADB_USER` / `MARIADB_PASSWORD` / `MARIADB_ROOT_PASSWORD`。迁移共用一套 MySQL 的实现，但 MariaDB 这次没有单独验证，见 §9。
 
 ### 4.5 A4：数据库已经单独部署了
 
-数据库不在这个编排里。两种来源：自己在这台机器（或局域网另一台机器、面板里）装的 PostgreSQL / MySQL；云厂商的托管库。做法都是同一套——从 4.2 的 SQLite 版出发（那份里本来就没有数据库服务），把连接指向那个库。二进制部署时更省事：把连接串写进 `/etc/pixora.env` 就行（第 5.3 节）。
+数据库不在这个编排里：可能是同一台机器上用面板装的，可能在局域网另一台机器，也可能是云托管。做法一样——从 §4.2 的 SQLite 版出发，把连接指过去。
 
-#### 先建一个专用库与账号
+先建专用库和账号，不要和别的应用共用一个库。
 
-别和别的应用共用一个库，迁移只管自己这个库里的表。
-
-PostgreSQL（在库所在的那台机器上执行）：
+PostgreSQL（在数据库所在机器执行）：
 
 ```bash
 sudo -u postgres psql <<'SQL'
@@ -472,78 +625,56 @@ GRANT ALL PRIVILEGES ON pixora.* TO 'pixora'@'%';
 FLUSH PRIVILEGES;
 ```
 
-#### 让容器连到它
-
-从 4.2 的 SQLite 版出发，改三处：
+然后改 compose 的三处：
 
 1. `PIXORA_DB_DRIVER` 改成 `postgres` 或 `mysql`；
-2. `PIXORA_DB_DSN` 换成连接串（见下面的示例）；
-3. 给 `pixora` 服务加 `extra_hosts`，这样容器里可以用 `host.docker.internal` 指回宿主机。Docker Desktop（Windows / macOS）天生支持这个名字，Linux 上靠这一行把它映射到网关：
+2. `PIXORA_DB_DSN` 换成下面的连接串；
+3. 给 `pixora` 服务加 `extra_hosts`（只有连宿主机时才需要）。
 
 ```yaml
   pixora:
     environment:
       PIXORA_DB_DRIVER: postgres
-      # 密码就是上面建账号时填的那个
       PIXORA_DB_DSN: postgres://pixora:换成强密码@host.docker.internal:5432/pixora
     extra_hosts:
       - "host.docker.internal:host-gateway"
 ```
 
-地址怎么写，看库在哪：
+地址怎么写：
 
-| 库的位置 | DSN 里的主机 | 要不要 `extra_hosts` |
+| 数据库在哪 | DSN 里的主机 | 要不要 `extra_hosts` |
 |---|---|---|
-| 同一台机器（宿主机的 PG/MySQL） | `host.docker.internal` | 要 |
+| 同一台机器（宿主机） | `host.docker.internal` | 要 |
 | 局域网另一台机器 | 那台的 IP，如 `192.168.1.20` | 不要 |
-| 另一个 compose / 面板里的容器 | 开了端口就用 `host.docker.internal`；或把两个编排接到同一个 Docker 网络，用服务名互访 | 前者要 |
+| 另一个 compose 或面板里的容器 | 开了端口用 `host.docker.internal`；或把两边接到同一个 Docker 网络，用服务名 | 前者要 |
 | 云托管 | 厂商给的主机名 | 不要 |
 
-容器从哪个网段来？默认 bridge 是 `172.17.0.0/16`，compose 自建的网络一般落在 `172.16.0.0/12` 里。下面两小节都按这个网段放行。
+PostgreSQL 侧要放开：
 
-#### PostgreSQL 侧要放开的地方
-
-1. `postgresql.conf` 里 `listen_addresses = '*'`，或者写具体网卡的地址；
-2. `pg_hba.conf` 加一行，允许容器网段用密码登录：
+1. `postgresql.conf` 的 `listen_addresses` 改成 `'*'` 或具体网卡地址；
+2. `pg_hba.conf` 加一行：
 
    ```
    host    all    all    172.16.0.0/12    scram-sha-256
    ```
 
-3. 重启：`sudo systemctl restart postgresql`；
-4. 防火墙放行 5432，范围收在需要的网段：
+3. 重启数据库：`sudo systemctl restart postgresql`；
+4. 防火墙放行 5432，来源收在容器网段：
 
    ```bash
    sudo ufw allow from 172.16.0.0/12 to any port 5432 proto tcp
    ```
 
-在面板（1Panel / 宝塔这类）里装的库，数据库详情页通常有个「允许访问的 IP」，把 `172.16.0.0/12` 加进去，等于上面第 2、4 步。
+MySQL 侧要放开：
 
-跨机器访问建议走 SSL：连接串末尾加 `?sslmode=require`。
-
-#### MySQL 侧要放开的地方
-
-1. `mysqld.cnf` 里 `bind-address = 0.0.0.0`，或者写具体网卡的地址；
-2. 账号授权按来源收紧（上面写的 `'pixora'@'%'` 是放开所有来源；只想让容器网段连就写 `'pixora'@'172.%'`，记得重新授权）；
+1. `mysqld.cnf` 的 `bind-address` 改成 `0.0.0.0` 或具体网卡地址；
+2. 账号来源尽量收紧（`'pixora'@'172.%'`），不要长期用 `%`；
 3. 重启：`sudo systemctl restart mysql`；
 4. 防火墙放行 3306。
 
-跨机器访问同样建议走 SSL：连接串末尾加 `?ssl-mode=REQUIRED`。
+面板（1Panel、宝塔这类）里装的库，数据库详情页通常有“允许访问的 IP”，把 `172.16.0.0/12` 加进去，等于上面的 `pg_hba.conf` 与防火墙两步。跨机器建议走 SSL，连接串末尾加 `?sslmode=require`（PostgreSQL）或 `?ssl-mode=REQUIRED`（MySQL）。
 
-#### 验证
-
-```bash
-docker compose up -d
-docker compose logs pixora | tail -5          # 日志摘要里应是 db="postgres" 或 db="mysql"
-docker compose exec pixora /pixora --health-probe && echo ok
-curl -s https://你的域名/healthz              # {"db":"ok","status":"ok",...}
-```
-
-迁移在第一次启动时自动执行，看到「Pixora 已启动」就说明连接池和建表都过了。连不上时先看 `docker compose logs pixora` 的最后几行，再对照 4.8 里那条「连不上库」。
-
-#### 云托管数据库
-
-只是把 DSN 换成厂商给的那一串，不需要 `extra_hosts`，其它步骤一样。SSL 参数别删：
+云托管只是把 DSN 换成厂商给的那串，不需要 `extra_hosts`，SSL 参数别删：
 
 ```dotenv
 # Neon / Vercel Postgres / Supabase
@@ -554,115 +685,190 @@ postgres://user:pass@pgm-xxx.pg.rds.aliyuncs.com:5432/pixora?sslmode=require
 mysql://user:pass@host:3306/pixora?ssl-mode=REQUIRED
 ```
 
+启动后先看日志最后几行，确认迁移执行完、`Pixora 已启动`，再跑一次 `/healthz`。连不上时按 §4.8 的“连不上单独部署的库”逐项对。
+
 ### 4.6 不用 Caddy
 
 两种情况会走到这里：只有 IP、没有域名；或者前面已经有一层反向代理。
 
-做法：删掉 `caddy` 服务与文件末尾的 `configs:` 整段，给 `pixora` 加一行端口映射——
+删掉 `caddy` 服务与文件末尾的 `configs:` 整段，给 `pixora` 加端口映射：
 
 ```yaml
+    # 直接对外：
     ports: ["8080:8080"]
+    # 前面是本机 Nginx/Caddy，只让本机访问：
+    # ports: ["127.0.0.1:8080:8080"]
 ```
 
-再把 `PIXORA_BASE_URL` 改成实际访问地址：
+`PIXORA_BASE_URL` 改成实际访问地址：
 
 ```dotenv
-# 只有 IP 时
+# 只有 IP
 http://203.0.113.10:8080
 # 平台给了域名（Railway / Render / Koyeb 这类）
 https://pixora-production.up.railway.app
 ```
 
-前面有 Nginx / 平台负载均衡时，`PIXORA_TRUST_PROXY` 保持 `1`。平台给了 https 域名却把地址写成 http，表现是「登录成功，刷新就掉登录」——Cookie 的 Secure 推导跟着 Base URL 走。
+前面有 Nginx、平台负载均衡或 CDN 时，`PIXORA_TRUST_PROXY` 保持 `1`；直接暴露到公网、前面没有代理时设 `0`，否则客户端可以伪造转发头。
+
+平台给了 https 域名却把地址写成 http，表现是“登录成功，刷新就掉登录”，因为 Cookie 的 Secure 推导跟着 Base URL 走。
 
 ### 4.7 升级、备份、恢复
 
 升级：
 
 ```bash
+cd /opt/pixora
 docker compose pull
-docker compose up -d          # 数据库迁移在启动时自动执行
+docker compose up -d
+docker compose logs --tail=50 pixora
 ```
 
-备份：
+数据库迁移在启动时自动执行，只向前不回头。升级前先做备份。生产环境建议在 compose 里固定版本号，而不是一直用 `latest`。
+
+备份 SQLite 版（数据目录 + 图片 + 主密钥）：
 
 ```bash
-# 1) 数据目录（SQLite 库、图片、主密钥）
+cd /opt/pixora
 docker compose stop pixora
-tar -czf pixora-data-$(date +%F).tar.gz data/
+sudo tar -czf "pixora-data-$(date +%F).tar.gz" data
+tar -tzf "pixora-data-$(date +%F).tar.gz" | head      # 确认压缩包能读
 docker compose start pixora
-
-# 2) PostgreSQL
-docker compose exec db pg_dump -U pixora pixora > pixora-$(date +%F).sql
-
-#    MySQL（密码换成你填的那个）
-docker compose exec db mysqldump -u pixora -p'你的密码' pixora > pixora-$(date +%F).sql
 ```
 
-数据库在别的机器或面板里时（4.5 那种接法），上面两条 `docker compose exec db ...` 换成在那台机器上直接跑 `pg_dump` / `mysqldump`。
+恢复 SQLite 版：
 
-恢复就是把 `data/` 解回去、或把 dump 导入空库，再 `docker compose up -d`。`PIXORA_MASTER_KEY` 单独记一份：数据库里的存储凭据与 SMTP 密码是它加密的，丢了只能重填。
+```bash
+cd /opt/pixora
+docker compose stop pixora
+sudo rm -rf data
+sudo tar -xzf pixora-data-2026-10-17.tar.gz
+docker compose start pixora
+docker compose logs --tail=50 pixora
+```
+
+`rm -rf data` 不可逆，先确认备份文件在、能列出内容，再执行。
+
+备份 PostgreSQL：
+
+```bash
+cd /opt/pixora
+docker compose exec -T db pg_dump -U pixora -d pixora -Fc > "pixora-$(date +%F).dump"
+```
+
+恢复 PostgreSQL（应用先停）：
+
+```bash
+cd /opt/pixora
+docker compose stop pixora
+docker compose exec -T db pg_restore -U pixora -d pixora --clean --if-exists < pixora-2026-10-17.dump
+docker compose start pixora
+```
+
+备份 MySQL：
+
+```bash
+cd /opt/pixora
+docker compose exec -T db mysqldump -u pixora -p'<数据库密码>' \
+  --single-transaction --no-tablespaces pixora > "pixora-$(date +%F).sql"
+```
+
+恢复 MySQL：
+
+```bash
+cd /opt/pixora
+docker compose stop pixora
+docker compose exec -T db mysql -u pixora -p'<数据库密码>' pixora < pixora-2026-10-17.sql
+docker compose start pixora
+```
+
+数据库在别的机器或面板里时，把 `docker compose exec db ...` 换成在那台机器上直接跑 `pg_dump` / `pg_restore` / `mysqldump` / `mysql`，主机和账号用 §4.5 里那套。
+
+回滚镜像：把 `image` 改回旧版本号，`docker compose up -d`。如果新版本已经迁移过数据库，旧版本未必认，要连备份一起恢复。
+
+不要用 `docker compose down -v` 清数据；`-v` 会删命名卷。本文的编排用绑定目录，但养成习惯没坏处。
 
 ### 4.8 Docker 这条路的常见坑
 
 | 现象 | 原因与处理 |
 |---|---|
-| 启动报「主密钥格式不对」 | compose 里的 `PIXORA_MASTER_KEY` 还是占位符，换成 `openssl rand -hex 32` 的输出 |
-| `additional properties 'content' not allowed` | Docker Compose 低于 2.23，不认内嵌的 Caddy 配置。升级 compose；或者把 `configs:` 那段删掉，给 caddy 服务加一行 `command: caddy reverse-proxy --from https://你的域名 --to http://pixora:8080`（不用任何配置文件，代价是没有那几行安全响应头） |
-| 容器起来又退出 | `docker compose logs pixora` 看最后几行；最常见是主密钥没换，或者数据目录写不进去 |
+| 启动报“主密钥格式不对” | compose 里的 `PIXORA_MASTER_KEY` 还是占位符，换成 `openssl rand -hex 32` 的输出 |
+| Caddy 起不来，日志里域名是空的，或提示 `{}` | Caddyfile 里的域名变量被 Compose 插值吃掉了。本文的编排写的是 `{$$PIXORA_DOMAIN}`，复制时不要改成单个 `$`；数据库密码里的 `$` 也要写成 `$$` 或用十六进制密码 |
+| `additional properties 'content' not allowed` | Docker Compose 低于 2.23，不认内嵌的 Caddy 配置。升级 compose；或删掉 `configs:` 整段，给 caddy 加 `command: caddy reverse-proxy --from https://你的域名 --to http://pixora:8080`（代价是没有那几行安全响应头） |
+| `pull access denied` / `unauthorized` | GHCR 包是私有的，先 `docker login ghcr.io`，PAT 要有 `read:packages` |
+| CI 推镜像报 `denied: permission_denied: write_package` | 同名 GHCR 包是旧仓库留下的，当前仓库的令牌没有写权限。去 Packages 删掉旧包，或在包设置里给当前仓库授权，然后重跑失败的任务 |
+| `exec format error` | 镜像架构和机器不一致。默认镜像只有 amd64；ARM 机器要手动构建 arm64 镜像，或改用二进制 |
+| 容器起来又退出 | `docker compose logs pixora` 看最后几行；最常见是主密钥没换、数据库连不上、数据目录写不进去 |
 | `80/443 端口被占用` | 宿主机上另有 Nginx/Apache；改 Caddy 的端口，或先停掉别的服务 |
+| 证书申请失败 | 域名没解析到这台机器、80/443 没放行（云安全组也要看），或者同一个域名被别的服务占用 |
 | 浏览器打开是 502 | Caddy 起来了但应用没起来，`docker compose ps` 看 `pixora` 是否 healthy |
-| 连不上单独部署的库 | 按 4.5 逐项对：`host.docker.internal` 有没有配 `extra_hosts`；PG 的 `pg_hba.conf` / `listen_addresses` 放开了没；MySQL 的 `bind-address` 与账号来源；防火墙 5432 / 3306 |
-| 图片裂开、地址是 `172.x.x.x` | `PIXORA_BASE_URL` 没填对 |
+| 连不上单独部署的库 | 按 §4.5 逐项对：`host.docker.internal` 有没有配 `extra_hosts`；PG 的 `pg_hba.conf` / `listen_addresses`；MySQL 的 `bind-address` 与账号来源；防火墙 5432/3306 |
+| 图片裂开、地址是 `172.x.x.x` | `PIXORA_BASE_URL` 没填对，或安装向导里写错了基础 URL |
 | 上传报 413 | 内嵌配置里的 `request_body` 上限被改小了；默认 64MB，与应用侧一致 |
-| `./data` 权限报错 | 镜像基于 `scratch`、以 root 运行，宿主机上一般不用改权限；只有开了 rootless / 用户命名空间时才按映射的 UID 授权 |
+| 日志把磁盘写满 | 本文编排已经给每个服务加了 10MB × 3 的日志轮转；自己改过的话检查 `logging` 段 |
+| `database is locked`（SQLite） | 有两个进程或容器在写同一个 `pixora.db`。SQLite 只能单实例 |
+| `./data` 权限报错 | 镜像以 root 运行，通常不用改；只有 rootless Docker 或用户命名空间才需要按映射的 UID 授权 |
 
 ## 5. 方案 B：Linux 单二进制
 
-发行版提供静态链接（musl）的 Linux 可执行文件，不依赖 glibc，Alpine、群晖、老 CentOS 都能跑。
+发行版提供静态链接（musl）的 Linux 可执行文件，不依赖 glibc，Alpine、群晖、老 CentOS 都能跑。发行包只有 x86_64；ARM Linux 要从源码构建。
 
 ### 5.1 下载与校验
 
-在 [Releases](https://github.com/loveFirefly-26710/Pixora/releases) 下载两个文件和一个校验文件：
+在 [Releases](https://github.com/loveFirefly-26710/Pixora/releases) 下载对应版本。以 0.1.1 为例：
 
 ```bash
-curl -LO https://github.com/loveFirefly-26710/Pixora/releases/download/v0.1.0/pixora-v0.1.0-linux-x86_64.tar.gz
-curl -LO https://github.com/loveFirefly-26710/Pixora/releases/download/v0.1.0/SHA256SUMS.txt
-sha256sum -c SHA256SUMS.txt        # 期望：...: OK
-tar -xzf pixora-v0.1.0-linux-x86_64.tar.gz
-ls pixora/                          # pixora  README.md  .env.example  deploy/
+VERSION=0.1.1
+curl -LO "https://github.com/loveFirefly-26710/Pixora/releases/download/v${VERSION}/pixora-v${VERSION}-linux-x86_64.tar.gz"
+curl -LO "https://github.com/loveFirefly-26710/Pixora/releases/download/v${VERSION}/SHA256SUMS.txt"
+sha256sum -c SHA256SUMS.txt --ignore-missing   # 期望：...: OK
+tar -xzf "pixora-v${VERSION}-linux-x86_64.tar.gz"
+ls pixora/                                      # pixora  README.md  .env.example  deploy/
 ```
 
 ### 5.2 目录与用户
 
 ```bash
-sudo useradd --system --home /srv/pixora --shell /usr/sbin/nologin pixora
+id pixora >/dev/null 2>&1 || \
+  sudo useradd --system --home /srv/pixora --shell /usr/sbin/nologin pixora
 sudo mkdir -p /srv/pixora/data
-sudo mv pixora/pixora /srv/pixora/pixora
+sudo install -m 755 pixora/pixora /srv/pixora/pixora
 sudo chown -R pixora:pixora /srv/pixora
 sudo chmod 750 /srv/pixora/data
 ```
 
 ### 5.3 环境变量文件
 
-把配置集中到 `/etc/pixora.env`（`chmod 600`，属主 root），这样 systemd 单元里不用塞密钥：
+配置集中到 `/etc/pixora.env`，systemd 单元里不塞密钥：
 
 ```bash
-sudo tee /etc/pixora.env > /dev/null <<'EOF'
+sudo tee /etc/pixora.env >/dev/null <<'EOF'
 PIXORA_BIND=127.0.0.1:8080
 PIXORA_DATA_DIR=/srv/pixora/data
 PIXORA_DB_DRIVER=sqlite
 PIXORA_DB_DSN=/srv/pixora/data/pixora.db
 PIXORA_BASE_URL=https://img.example.com
-PIXORA_MASTER_KEY=<你生成的主密钥>
+PIXORA_MASTER_KEY=<主密钥>
+# 前面有 Nginx/Caddy 时填 1；直接暴露到公网填 0
 PIXORA_TRUST_PROXY=1
 PIXORA_WORKERS=2
 RUST_LOG=info
 EOF
+sudo chown root:root /etc/pixora.env
 sudo chmod 600 /etc/pixora.env
 ```
 
-监听 `127.0.0.1` 是为了只让本机的反向代理访问；想直接对外就写 `0.0.0.0:8080`，并自己开防火墙。
+用 PostgreSQL/MySQL 时改这两行：
+
+```dotenv
+PIXORA_DB_DRIVER=postgres
+PIXORA_DB_DSN=postgres://pixora:换成密码@127.0.0.1:5432/pixora
+# 或
+PIXORA_DB_DRIVER=mysql
+PIXORA_DB_DSN=mysql://pixora:换成密码@127.0.0.1:3306/pixora
+```
+
+值里不要带引号；含空格的路径才需要引号。监听 `127.0.0.1` 是为了只让本机反向代理访问；想直接对外就写 `0.0.0.0:8080`，并自己开防火墙。
 
 ### 5.4 systemd 单元
 
@@ -683,7 +889,9 @@ EnvironmentFile=/etc/pixora.env
 ExecStart=/srv/pixora/pixora
 Restart=always
 RestartSec=3
-# 进程崩了要能留下日志
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
 StandardOutput=journal
 StandardError=journal
 
@@ -700,69 +908,90 @@ sudo journalctl -u pixora -f
 
 ### 5.5 反向代理
 
-**Nginx**（`/etc/nginx/sites-available/pixora`，链接到 `sites-enabled`）：
+Nginx（`/etc/nginx/sites-available/pixora`，链接到 `sites-enabled`）：
 
 ```nginx
 server {
     listen 443 ssl http2;
     server_name img.example.com;
 
-    # 略大于应用的单文件上限（默认 20MiB）
+    # 略大于应用的单文件上限（默认 20MiB），与应用侧的 64MiB 请求上限对齐
     client_max_body_size 64m;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
-        # 只信最靠近服务端的一层，客户端伪造的 X-Forwarded-For 会被覆盖
+        # 只信最靠近服务端的一层；客户端伪造的 X-Forwarded-For 会被覆盖
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 300s;
     }
+
+    # 可选：让 Nginx 直接发本地图片，应用只回 X-Accel-Redirect
+    # 先在 /etc/pixora.env 里加 PIXORA_ACCEL_PREFIX=/data-files
+    location /data-files/ {
+        internal;
+        alias /;
+    }
 }
 ```
 
-证书可以用 certbot 申请：`sudo certbot --nginx -d img.example.com`。
+证书用 certbot：`sudo certbot --nginx -d img.example.com`。
 
-**Caddy** 更简单（自动证书），`/etc/caddy/Caddyfile`：
+Caddy 更简单，`/etc/caddy/Caddyfile`：
 
 ```
 img.example.com {
-	reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:8080
 }
 ```
+
+`alias /` 配合 `internal` 只在反向代理内部跳转时生效，外部直接访问 `/data-files/...` 会被拒绝。不用这个功能就整段删掉，`PIXORA_ACCEL_PREFIX` 也留空。
 
 ### 5.6 验证
 
 ```bash
-curl -s http://127.0.0.1:8080/healthz        # {"db":"ok","status":"ok",...}
+curl -s http://127.0.0.1:8080/healthz        # db 应为 ok
 curl -s https://img.example.com/api/v1/site | head -c 200
+sudo journalctl -u pixora -n 50 --no-pager
 ```
 
-浏览器打开 `https://img.example.com`，走安装向导（第 7 节）。
+浏览器打开 `https://img.example.com`，走安装向导（§7）。
 
 ### 5.7 升级与回滚
 
 ```bash
 sudo systemctl stop pixora
-sudo mv /srv/pixora/pixora /srv/pixora/pixora.bak-$(date +%F)
-sudo tar -xzf pixora-新版本-linux-x86_64.tar.gz
-sudo mv pixora/pixora /srv/pixora/pixora
+sudo cp /srv/pixora/pixora /srv/pixora/pixora.bak-$(date +%F)
+sudo install -m 755 pixora/pixora /srv/pixora/pixora
 sudo chown pixora:pixora /srv/pixora/pixora
 sudo systemctl start pixora
+systemctl status pixora --no-pager
 ```
 
-数据库迁移在启动时自动执行、只向前不回头。**回滚二进制之前先备份数据库**：新版本迁过的库，旧版本未必认。
+数据库迁移在启动时自动执行、只向前不回头。回滚二进制之前先备份数据库；新版本迁过的库，旧版本未必认。
+
+### 5.8 Linux 上容易踩的坑
+
+| 现象 | 原因与处理 |
+|---|---|
+| `Permission denied` 写数据目录 | `/srv/pixora/data` 的属主不是 `pixora`，`chown -R pixora:pixora /srv/pixora` |
+| 启动后立刻退出，日志说地址被占用 | 8080 被别的进程占了；`ss -lntp | grep 8080`，换端口并同步改 `PIXORA_BASE_URL` |
+| Nginx 502 | 应用没起来，或 `PIXORA_BIND` 写成了容器/别的地址；`curl http://127.0.0.1:8080/healthz` |
+| CentOS/RHEL 上 Nginx 502 且应用正常 | SELinux 不允许 Nginx 连后端：`sudo setsebool -P httpd_can_network_connect 1` |
+| 环境变量里有空格导致启动失败 | `/etc/pixora.env` 的值不要加引号；含空格才加，且注意 systemd 的解析规则 |
+| 登录成功，刷新掉登录 | 站点是 https 但 `PIXORA_BASE_URL` 写成 http，或反向代理没传 `X-Forwarded-Proto` |
 
 ## 6. 方案 C：Windows 单二进制
 
-发行包里是 `pixora\pixora.exe` 加上 `README.md`、`.env.example`、`deploy\`（Caddyfile 与 compose 样例）。没有运行时依赖，不需要装 Rust、Node 或 VC++ 运行库。
+发行包里是 `pixora\pixora.exe` 加上 `README.md`、`.env.example`、`deploy\`。没有运行时依赖，不需要装 Rust、Node 或 VC++ 运行库。
 
 ### 6.1 下载与解压
 
-在 [Releases](https://github.com/loveFirefly-26710/Pixora/releases) 下载 `pixora-v0.1.0-windows-x86_64.zip` 与 `SHA256SUMS.txt`，然后：
+在 [Releases](https://github.com/loveFirefly-26710/Pixora/releases) 下载 `pixora-v0.1.1-windows-x86_64.zip` 与 `SHA256SUMS.txt`：
 
 ```powershell
-PS> Expand-Archive pixora-v0.1.0-windows-x86_64.zip C:\pixora
+PS> Expand-Archive .\pixora-v0.1.1-windows-x86_64.zip C:\pixora -Force
 PS> Get-FileHash C:\pixora\pixora\pixora.exe -Algorithm SHA256   # 与 SHA256SUMS.txt 对照
 PS> cd C:\pixora\pixora
 ```
@@ -774,24 +1003,25 @@ C:\pixora\pixora\
 ├── pixora.exe
 ├── README.md
 ├── .env.example
-└── deploy\           # Caddyfile 与 docker-compose 样例，纯二进制部署用不上
+└── deploy\           # Caddyfile 与 compose 样例，纯二进制部署用不上
 ```
 
 ### 6.2 先跑起来看看
 
-最小启动（不配数据库、不配反向代理），数据落到当前目录的 `data\`：
+最小启动，数据落到 `C:\pixora\data`：
 
 ```powershell
 PS> $env:PIXORA_BIND = "127.0.0.1:8080"
 PS> $env:PIXORA_BASE_URL = "http://127.0.0.1:8080"
+PS> $env:PIXORA_DATA_DIR = "C:\pixora\data"
 PS> .\pixora.exe
 ```
 
 预期输出（截取）：
 
 ```
-INFO Pixora 已启动 version="0.1.0" listen=127.0.0.1:8080 data_dir=./data db="sqlite"
-     storage_default=local master_key=首次启动自动生成，已写入 ./data\master.key web=已嵌入二进制
+INFO Pixora 已启动 version="0.1.1" listen=127.0.0.1:8080 data_dir=C:\pixora\data db="sqlite"
+     storage_default=local master_key=首次启动自动生成，已写入 C:\pixora\data\master.key web=已嵌入二进制
 WARN 主密钥是自动生成的（…）：单机自托管够用，生产环境建议改用 PIXORA_MASTER_KEY 注入并纳入备份
 ```
 
@@ -799,15 +1029,10 @@ WARN 主密钥是自动生成的（…）：单机自托管够用，生产环境
 
 ```powershell
 PS> Invoke-RestMethod http://127.0.0.1:8080/healthz
-db               status uptime_seconds
---               ------ --------------
-ok               ok                  3
-
 PS> (Invoke-RestMethod http://127.0.0.1:8080/api/v1/site).data.base_url
-http://127.0.0.1:8080
 ```
 
-健康探针也可以单独跑（容器编排与监控脚本用它）：
+健康探针可以单独跑（容器编排与监控脚本用它）：
 
 ```powershell
 PS> .\pixora.exe --health-probe; echo $LASTEXITCODE
@@ -830,24 +1055,30 @@ PS> .\pixora.exe --health-probe; echo $LASTEXITCODE
 Windows 上把普通程序注册成服务，最省事的是 [NSSM](https://nssm.cc/)：
 
 1. 下载 NSSM，解压得到 `nssm.exe`，放到 `C:\pixora\nssm.exe`；
-2. 以管理员身份打开 PowerShell：
+2. 以管理员身份打开 PowerShell，建日志目录、注册服务并设置环境变量：
 
 ```powershell
+PS> New-Item -ItemType Directory -Force C:\pixora\logs | Out-Null
 PS> C:\pixora\nssm.exe install Pixora "C:\pixora\pixora\pixora.exe"
 PS> C:\pixora\nssm.exe set Pixora AppDirectory "C:\pixora\pixora"
 PS> C:\pixora\nssm.exe set Pixora AppEnvironmentExtra `
       PIXORA_BIND=0.0.0.0:8080 `
       PIXORA_BASE_URL=http://192.168.1.10:8080 `
       PIXORA_DATA_DIR=C:\pixora\data `
-      PIXORA_MASTER_KEY=<你生成的主密钥>
+      PIXORA_TRUST_PROXY=0 `
+      PIXORA_MASTER_KEY=你的64位十六进制密钥
 PS> C:\pixora\nssm.exe set Pixora AppStdout "C:\pixora\logs\pixora.log"
 PS> C:\pixora\nssm.exe set Pixora AppStderr "C:\pixora\logs\pixora.log"
+PS> C:\pixora\nssm.exe set Pixora AppRotateFiles 1
+PS> C:\pixora\nssm.exe set Pixora AppRotateOnline 1
+PS> C:\pixora\nssm.exe set Pixora AppRotateBytes 10485760
+PS> C:\pixora\nssm.exe set Pixora AppExit Default Restart
 PS> Start-Service Pixora
 ```
 
-`sc.exe` 也能注册服务，但它要求 exe 自己实现服务协议，这个二进制不是服务程序，直接用会报「服务没有及时响应启动或控制请求」。所以要么用 NSSM，要么用任务计划程序（`Register-ScheduledTask`，触发器选「计算机启动时」，勾选「不管用户是否登录都要运行」）。
+`sc.exe` 也能注册服务，但它要求 exe 自己实现服务协议，这个二进制不是服务程序，直接用会报“服务没有及时响应启动或控制请求”。要么用 NSSM，要么用任务计划程序（`Register-ScheduledTask`，触发器选“计算机启动时”，勾选“不管用户是否登录都要运行”）。
 
-查看/停止：
+查看与停止：
 
 ```powershell
 PS> Get-Service Pixora
@@ -862,10 +1093,10 @@ PS> C:\pixora\nssm.exe stop Pixora
 ```powershell
 PS> $env:PIXORA_BIND = "0.0.0.0:8080"
 PS> $env:PIXORA_BASE_URL = "http://192.168.1.10:8080"    # 换成本机内网 IP
-PS> New-NetFirewallRule -DisplayName "Pixora 8080" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow
+PS> New-NetFirewallRule -DisplayName "Pixora 8080" -Direction Inbound -Protocol TCP -LocalPort 8080 -Profile Private -Action Allow
 ```
 
-然后用 `http://192.168.1.10:8080` 打开。**直链与登录都按 `PIXORA_BASE_URL` 拼**，改成 IP 后要重启服务让它生效。
+然后用 `http://192.168.1.10:8080` 打开。直链与登录都按 `PIXORA_BASE_URL` 拼，改成 IP 后要重启服务让它生效。
 
 想对外提供 https，就在 IIS 或 Caddy for Windows 前面挂一层反向代理，`PIXORA_BASE_URL` 写那个 https 地址，并保留 `PIXORA_TRUST_PROXY=1`。
 
@@ -880,35 +1111,45 @@ PS> Copy-Item C:\pixora\new\pixora.exe C:\pixora\pixora\pixora.exe -Force
 PS> C:\pixora\nssm.exe start Pixora
 ```
 
-备份三样：`data\`、`master.key`（在 data 里）、`PIXORA_MASTER_KEY`（如果走环境变量注入）。
+备份三样：`data\`、`master.key`（在 data 里）、`PIXORA_MASTER_KEY`（如果走环境变量注入）。不要在服务运行时复制 `pixora.db`，先停服务。
 
 ### 6.7 Windows 上容易踩的坑
 
 | 现象 | 原因与处理 |
 |---|---|
-| 启动报 `unable to open database file`，且数据目录里没有 `master.key` | 数据目录所在位置不可写（例如放在 `C:\Program Files` 下，或安全软件拦了写文件）。换到 `C:\pixora\data` 这类普通目录，并给当前用户写权限 |
-| 从 Git Bash 里启动，各种诡异 | Git Bash 会把 `TEMP` 设成 `/tmp` 这类 MSYS 路径，原生程序解析不了。用 PowerShell 或 cmd 启动，别在 MSYS 里跑 |
-| 服务启动后立刻停止 | NSSM 的 `AppDirectory` 没设，工作目录不对；或环境变量没通过 `AppEnvironmentExtra` 传进去 |
-| 浏览器提示证书不安全 | 直接在 http 下访问是正常的；要 https 就前面挂反代并配域名 |
+| 启动报 `unable to open database file`，数据目录里也没有 `master.key` | 数据目录不可写（放在 `C:\Program Files` 下，或安全软件拦了写文件）。换到 `C:\pixora\data` 这类普通目录，并给当前用户写权限 |
+| 从 Git Bash 里启动，各种诡异 | Git Bash 会把 `TEMP` 设成 `/tmp` 这类 MSYS 路径，原生程序解析不了。用 PowerShell 或 cmd 启动 |
+| 服务启动后立刻停止 | NSSM 的 `AppDirectory` 没设，或环境变量没通过 `AppEnvironmentExtra` 传进去；看 `C:\pixora\logs\pixora.log` |
+| 浏览器提示证书不安全 | 直接 http 访问是正常的；要 https 就前面挂反向代理并配域名 |
 | 端口被占用 | 8080 常被别的开发工具占用，换 `PIXORA_BIND=0.0.0.0:8081` 并同步改 `PIXORA_BASE_URL` |
+| 文件被杀毒软件锁住 | 把 `C:\pixora` 加入白名单，尤其是 `data\` 和日志目录 |
 
-如果你是在源码目录里折腾，注意**别把 exe 和 data 放在 cargo 的 `target\` 下面**——那是构建系统的工作区，权限和清理规则都不适合放运行数据（本机验证时就撞过这个坑）。把 exe 拷到一个普通目录再跑。
+在源码目录里折腾时，别把 exe 和 data 放在 cargo 的 `target\` 下面——那是构建系统的工作区，权限和清理规则都不适合放运行数据。
 
 ## 7. 安装向导：所有路线都要走一遍
 
-浏览器打开 `PIXORA_BASE_URL`，会跳到 `/#/install`，五步：
+地址是 `https://你的域名/#/install`，未安装时打开首页也会自动跳过去。五步：
 
-1. **环境检查**：数据目录能不能写、数据库连接串是否配置、主密钥来源（环境变量 / 密钥文件 / 自动生成）。这一页还会显示「已检测到 N 张表」。
-2. **数据库**：这一步是**连接自检**，不是配置。数据库在进程启动时就由 `PIXORA_DB_DRIVER` / `PIXORA_DB_DSN` 定好了。选上你实际用的类型、点「测试连接」，成功就下一步。如果你填的类型和进程实际连的不一致，它会直说「改完环境变量并重启才会切换」。
+1. **环境检查**：数据目录能不能写、数据库驱动与连接串来源、主密钥来源（环境变量 / 密钥文件 / 自动生成）。页面上会显示“已检测到 N 张表”。
+2. **数据库**：这是**连接自检**，不是配置。数据库在进程启动时就由 `PIXORA_DB_DRIVER` / `PIXORA_DB_DSN` 定好了。选你实际用的类型，点“测试连接”。如果填的类型和进程实际连的不一致，它会提示“改完环境变量并重启才会切换”。
 3. **管理员**：填邮箱与密码。这个账号是最高权限：改不了角色、不能被处置、不能被删除。密码有强度要求。
-4. **站点与邮件**：站点名、对外地址、SMTP。没配 SMTP 也能用，只是注册验证码、找回密码的邮件发不出去——验证码会写进服务端日志，开发/自用时去日志里拿。
-5. **完成**：标记已安装，安装接口从此整体下线（再访问返回 404）。这是有意的：否则任何人都能重跑向导重设管理员。
+4. **站点与邮件**：站点名、基础 URL、直链前缀、SMTP。基础 URL 会预填 `PIXORA_BASE_URL`，保持它等于对外地址；保存后以数据库里的值为准。SMTP 可以整段留空，之后在后台再配；没配 SMTP 时，验证码会写进服务端日志。
+5. **完成**：标记已安装，安装接口从此整体下线（再访问返回 404）。这是有意的，否则任何人都能重跑向导重设管理员。
 
-装完就能用：登录 → 传图 → 复制直链。到这一步后端部分就结束了。
+装完立即做四项验收：
+
+| 检查 | 怎么做 | 通过标准 |
+|---|---|---|
+| 登录 | 用第 3 步的管理员账号登录 | 能进后台，刷新后仍是登录状态 |
+| 上传 | 上传一张图片 | 返回直链，复制到新标签页能打开 |
+| 直链域名 | 看直链开头 | 是 `https://你的域名/...`，不是内网地址 |
+| 重启不丢 | `docker compose restart pixora`（二进制则 `systemctl restart pixora`） | 账号、图片、设置都还在，`/healthz` 的 `db` 为 ok |
+
+到这一步后端部分就结束了。要拆前端再看 §8。
 
 ## 8. 前后端分开部署（可选）
 
-这一步能拿到两个好处：前端静态资源走 CDN 边缘节点、后端那台机器只扛接口。代价是多一处要维护的配置。
+这一步能拿到两个好处：前端静态资源走 CDN 边缘节点，后端那台机器只扛接口。代价是多一处要维护的配置。先把 §4/§5/§6 的后端和 §7 的向导跑通，再拆。
 
 ### 8.1 两条接法
 
@@ -925,17 +1166,17 @@ PS> C:\pixora\nssm.exe start Pixora
 
 前端产物来自两处，任选其一：
 
-- **CI 构建**：推主干之后，`CI` 工作流会上传 `web-dist` 产物，下载解压就是静态站；
+- **CI 构建**：推主干后，CI 工作流会上传 `web-dist` 产物，下载解压就是静态站；
 - **本地构建**：
 
 ```bash
 cd web
 npm ci
-PIXORA_API_BASE=https://img-api.example.com npm run build   # 边缘反代接法就留空
+PIXORA_API_BASE=https://img-api.example.com npm run build   # 边缘反代接法留空
 # 产物在 web/dist/
 ```
 
-`PIXORA_API_BASE` 会被写进产物根目录的 `config.js`，前端在运行时读取它。各平台填变量位置：
+`PIXORA_API_BASE` 会写进产物根目录的 `config.js`，前端运行时读取。各平台填变量的位置：
 
 | 平台 | 变量名 | 填在哪儿 |
 |---|---|---|
@@ -945,17 +1186,19 @@ PIXORA_API_BASE=https://img-api.example.com npm run build   # 边缘反代接法
 | GitHub Pages | 同上 | 仓库 Settings → Secrets and variables → Actions → **Variables** 页 |
 | 本地 / 自建 CI | 同上 | 构建命令前加：`PIXORA_API_BASE=https://… npm run build` |
 
-不想在平台后台改也行：部署完直接编辑线上的 `config.js`，刷新即生效（运行时读取，不用重新构建）。
+不想在平台后台改也行：部署完直接编辑线上的 `config.js`，刷新即生效。仓库里的 `deploy/static/` 放着各平台的配置样例。
 
 ### 8.3 Vercel
 
-Vercel 只能放前端：它的函数是 JS 运行时，跑不了这个需要常驻进程的二进制。后端按第 4/5/6 节放在你自己的服务器上。
+Vercel 只能放前端：它的函数是 JS 运行时，跑不了这个需要常驻进程的二进制。后端按 §4/§5/§6 放在自己的服务器上。
 
 1. 把仓库推到 GitHub，用 GitHub 账号登录 [vercel.com](https://vercel.com)；
 2. **Add New → Project → Import**，选这个仓库；
-3. 构建配置有两种填法。省事的一种：把仓库里的 `deploy/static/vercel.json` 复制到仓库根目录，它已经写明安装命令、构建命令与输出目录，导入后什么都不用填；不想复制就在项目设置里手填 **Install Command** `npm --prefix web ci`、**Build Command** `npm --prefix web run build`、**Output Directory** `web/dist`，Root Directory 留空；
-4. **跨域接法**：在 Environment Variables 里加 `PIXORA_API_BASE=https://后端地址`，然后 Deploy；
-5. **边缘反代接法**：把 `vercel.json` 的 `rewrites` 换成下面这份（填你的后端地址），提交后 Vercel 自动重新部署：
+3. 构建配置二选一：
+   - 省事：把仓库里的 `deploy/static/vercel.json` 复制到仓库根目录，导入后什么都不用填。这份默认是同源/跨域接法，边缘反代要按下面第 5 步改 `rewrites`；
+   - 手填：**Install Command** `npm --prefix web ci`、**Build Command** `npm --prefix web run build`、**Output Directory** `web/dist`，Root Directory 留空；
+4. **跨域接法**：Environment Variables 里加 `PIXORA_API_BASE=https://后端地址`，然后 Deploy；
+5. **边缘反代接法**：把 `vercel.json` 的 `rewrites` 换成下面这份（填后端地址），提交后自动重新部署：
 
 ```json
 {
@@ -980,7 +1223,7 @@ Vercel 只能放前端：它的函数是 JS 运行时，跑不了这个需要常
 }
 ```
 
-把两处 `img-api.example.com` 换成你的后端地址；`/images/` 换成你在后台设的直链前缀（默认就是 `images`）。最后一条是 SPA 回落：让 `/some-page` 这类陌生路径也进前端。
+把两处 `img-api.example.com` 换成后端地址；`/images/` 换成后台设的直链前缀（默认就是 `images`）。最后一条是 SPA 回落。
 
 命令行等价：
 
@@ -995,7 +1238,7 @@ npx vercel --prod          # 在仓库根目录执行，会读 vercel.json
 PIXORA_CORS_ORIGINS=https://你的项目.vercel.app
 ```
 
-改完重启后端。放行名单是精确匹配（含 https、端口），`*` 会被忽略。
+改完重启后端。名单精确匹配（含 https、端口），`*` 会被忽略。
 
 ### 8.4 Cloudflare
 
@@ -1016,13 +1259,13 @@ PIXORA_CORS_ORIGINS=https://你的项目.vercel.app
 3. Save and Deploy，拿到 `https://<项目名>.pages.dev`；
 4. 自定义域名在项目 → Custom domains 里加。
 
-命令行等价（本地构建好再发）：
+命令行等价：
 
 ```bash
 npx wrangler pages deploy web/dist --project-name pixora
 ```
 
-**别往产物里放 `404.html`**：Pages 的机制是「没有 `404.html` 时，没命中静态文件的路径自动回 `index.html`（200）」，前端路由正好接住；一旦存在 `404.html`，它就按真 404 处理。
+别往产物里放 `404.html`：Pages 的机制是“没有 404.html 时，没命中静态文件的路径自动回 index.html（200）”，前端路由正好接住；一旦存在 `404.html`，它就按真 404 处理。
 
 **B. Worker 反代（反代接法才需要）**
 
@@ -1046,7 +1289,7 @@ npx wrangler deploy
 
 **C. R2 存图片**（后端在哪都能用）
 
-R2 是 S3 兼容的，后台「存储管理」加一个 S3 后端：
+R2 是 S3 兼容的，后台“存储管理”加一个 S3 后端：
 
 | 字段 | 值 |
 |---|---|
@@ -1056,14 +1299,14 @@ R2 是 S3 兼容的，后台「存储管理」加一个 S3 后端：
 | Bucket | 你建的桶名 |
 | AccessKey / Secret | R2 的 API 令牌（对象读写权限） |
 
-**想把后端也放 Cloudflare**：用 Containers 跑这个镜像。三条硬约束先记住——容器只跑 x86_64、磁盘每次冷启动都是新的（所以图片必须进 R2、数据必须用托管库）、镜像要推到 Cloudflare 自己的 registry（GHCR 不能直接拉，得先 `docker pull` 再 `npx wrangler containers push`）。
+想把后端也放 Cloudflare：用 Containers 跑这个镜像。三条约束——容器只跑 x86_64、磁盘每次冷启动都是新的（图片必须进 R2、数据库必须用托管库）、镜像要推到 Cloudflare 自己的 registry（GHCR 不能直接拉，得先 `docker pull` 再 `npx wrangler containers push`）。
 
 ### 8.5 EdgeOne Makers
 
 EdgeOne Pages 现在叫 EdgeOne Makers，账号与命令行都兼容。
 
 1. 控制台从 Git 导入仓库：构建命令 `npm --prefix web ci && npm --prefix web run build`，输出目录 `web/dist`，Node 版本 20；跨域接法加环境变量 `PIXORA_API_BASE`；
-2. 想让它自动读配置，把仓库里的 `deploy/static/edgeone.json` 复制到仓库根目录（`edgeone.json` 只认根目录），里面已经写好构建配置、SPA 回落与缓存头；不复制就在控制台手填上面那三行：
+2. 想让它自动读配置，把仓库里的 `deploy/static/edgeone.json` 复制到仓库根目录（`edgeone.json` 只认根目录），里面已经写好构建配置、SPA 回落与缓存头；不复制就在控制台手填上面三行：
 
 ```json
 {
@@ -1096,26 +1339,26 @@ npx edgeone pages deploy ./web/dist -n pixora -t "$EDGEONE_API_TOKEN"
 
 ### 8.6 GitHub Pages
 
-纯静态、免费，适合「前端就用仓库发」的场景。仓库里带了工作流，三步：
+纯静态、免费，适合“前端就用仓库发”的场景。仓库里带了工作流，三步：
 
 1. Settings → Pages → Source 选 **GitHub Actions**；
 2. Settings → Secrets and variables → Actions → **Variables** 新增两个：`PIXORA_DEPLOY_FRONTEND=true` 和 `PIXORA_API_BASE=https://后端地址`；
-3. Actions →「前端静态站点」→ Run workflow，target 选 `github-pages`。
+3. Actions →“前端静态站点”→ Run workflow，target 选 `github-pages`。
 
 工作流会把 `index.html` 复制一份成 `404.html`——Pages 没有 SPA 回落，陌生路径会命中这个 404 页面，但页面内容还是前端本体，哈希路由照常接管。
 
-**一条硬限制**：Pages 的项目站点挂在 `https://<用户名>.github.io/<仓库名>/` 子路径下，而前端产物引用的是绝对路径（`/main.js`、`/config.js`），子路径下这些资源会 404（第 10 节的实测里专门验了这一点）。要么绑自定义域名，要么把仓库命名为 `<用户名>.github.io` 发到根路径。
+一条硬限制：Pages 的项目站点挂在 `https://<用户名>.github.io/<仓库名>/` 子路径下，而前端产物引用的是绝对路径（`/main.js`、`/config.js`），子路径下这些资源会 404。要么绑自定义域名，要么把仓库命名为 `<用户名>.github.io` 发到根路径。
 
 ### 8.7 后端还能放哪儿
 
-前端放静态托管之后，后端只要满足「能长跑一个进程、能给一个地址」就行：
+前端放静态托管之后，后端只要满足“能长跑一个进程、能给一个地址”就行：
 
 | 去处 | 怎么放 | 注意 |
 |---|---|---|
-| 自己的云服务器 / 小主机 / NAS | 第 4 或第 5 节 | 最稳，数据在自己手里 |
+| 自己的云服务器 / 小主机 / NAS | §4 或 §5 | 最稳，数据在自己手里 |
 | Railway / Render / Fly.io / Koyeb / Zeabur | 用本仓库镜像，挂一个持久卷 | 没卷就别用 SQLite 与本地图片，改托管库 + R2 |
-| Oracle 免费 ARM 实例 | 直接用多架构镜像（`linux/arm64`） | 一年免费额度足够 |
-| Cloudflare Containers | 见 8.4 C 小节 | 必须配 R2 + 托管库，且只跑 x86_64 |
+| Oracle 免费 ARM 实例 | 手动构建 arm64 镜像，或从源码编译 | 发行镜像默认只有 amd64 |
+| Cloudflare Containers | 见 §8.4 C 小节 | 必须配 R2 + 托管库，且只跑 x86_64 |
 | 群晖 / 威联通 NAS | 容器管理界面里填 compose | 数据目录指到 NAS 的存储池 |
 
 平台特有的端口变量（有的叫 `PORT`、有的要你在面板里填容器端口）直接对应 `PIXORA_BIND`。没有持久磁盘的平台一定要把数据库指向托管库，否则容器一重建数据就没了。
@@ -1127,7 +1370,7 @@ npx edgeone pages deploy ./web/dist -n pixora -t "$EDGEONE_API_TOKEN"
 curl -sI https://img-api.example.com/api/v1/site | head -1      # 期望 200
 
 # 2) 前端的接口通道通（边缘反代接法才有这条）
-curl -sI https://你的前端域名/api/v1/site | head -1              # 期望 200
+curl -sI https://你的前端域名/api/v1/site | head -1             # 期望 200
 
 # 3) 跨域接法：预检要放行前端来源
 curl -s -D - -o /dev/null -X OPTIONS \
@@ -1144,32 +1387,36 @@ curl -s -D - -o /dev/null -X OPTIONS \
 
 | 数据库 | 验证版本 | 迁移 | 冒烟 | 服务端 5xx |
 |---|---|---|---|---|
-| SQLite | 内置 | 9/9 | ✅ 298/298 | 0 |
-| PostgreSQL | 17.6 | 9/9，26 张表 | ✅ 298/298 | 0 |
-| MySQL | 8.4.0 | 9/9 | ✅ 298/298 | 0 |
+| SQLite | 内置 | 9/9 | 298/298 | 0 |
+| PostgreSQL | 17.6 | 9/9，26 张表 | 298/298 | 0 |
+| MySQL | 8.4.0 | 9/9 | 298/298 | 0 |
 
-SQLite 是默认，也是依赖最少的一条；PostgreSQL / MySQL 按 4.3 / 4.4 填连接串就行，数据库已经单独部署的接法见 4.5。
+SQLite 是默认，也是依赖最少的一条；PostgreSQL / MySQL 按 §4.3 / §4.4 填连接串，数据库已经单独部署的接法见 §4.5。
+
+MariaDB 共用 MySQL 的驱动与迁移，这次没有单独跑，不能算“已验证”。用 MariaDB 时建议先在自己的环境跑一遍 §9 末尾的方言用例和冒烟。
 
 ### 这次修掉的方言差异
 
 之前 CI 只跑 SQLite，另外两条方言的迁移与查询一直没被走过（建表就失败）。这次装了便携版 PostgreSQL 17.6 与 MySQL 8.4.0 逐条跑，修了这些：
 
-**迁移（建表阶段）**
-
-- PostgreSQL：部分唯一索引的 `WHERE is_default` 要布尔表达式（改成 `= 1`）；`must_change_password` 与几处 int4 列统一成 `BIGINT`（代码统一按 `i64` 读写）；`user_identities` 的时间列从 `TIMESTAMPTZ` 改回文本。
-- MySQL：生成列的基列上不能挂级联外键（1215；改成 `RESTRICT`，删账号时由应用显式清频率策略行）；`TEXT` 列不能进索引（1170；时间列统一 `VARCHAR(32)`）；`BOOLEAN` 改 `BIGINT`（Any 驱动认不出 `TINYINT`）；`DATETIME(3)` 改回文本。
-
-**查询（运行期）**
-
-- `SUM(...)` 在 PostgreSQL 返回 `NUMERIC`、MySQL 返回 `DECIMAL`，Any 驱动都解不成 i64：新增 `Dialect::sum_i64()`，按方言包 `CAST(... AS BIGINT)` / `CAST(... AS SIGNED)`。
-- 两参数 `MAX(a, b)` 只有 SQLite 认：PostgreSQL 与 MySQL 改用 `GREATEST`。
-- `ON CONFLICT ... DO UPDATE SET count = count + ?` 在 PostgreSQL 上列名有歧义（新行也在作用域里）：改成 `rate_counters.count + ?`。
-- MySQL 的 `TEXT` 在 Any 里被报成 BLOB，按 `String` 解会失败：仓储层的文本读取加了「按字节读再转 UTF-8」的兜底。
-- MySQL 的 `LAST_INSERT_ID()` 是连接级的：插入与取 id 原来分两次走连接池，可能落到不同连接；改成同一条连接上完成。
-- MySQL 的 `key` 是保留字：`storage_objects` 的几条语句加反引号。
-- MySQL 不认 `CAST(... AS BIGINT)`：平均大小的查询按方言给 `SIGNED`。
-- `ESCAPE '\'` 在 MySQL 的字符串字面量里会把结束引号转义掉：SQL 改写层对 MySQL 直接去掉这个子句（MySQL 的 LIKE 默认就用反斜杠转义）。
-- MySQL 的唯一冲突报的是 SQLSTATE（23000）、数字码只在消息里：`is_unique_violation()` 增加按消息（`Duplicate entry`）识别。
+| 层 | 问题 | 处理 |
+|---|---|---|
+| PG 迁移 | 部分唯一索引的 `WHERE is_default` 要布尔表达式 | 改成 `= 1` |
+| PG 迁移 | `must_change_password` 等 int4 列与代码的 i64 不一致 | 统一成 `BIGINT` |
+| PG 迁移 | `user_identities` 的时间列是 `TIMESTAMPTZ` | 改回文本 |
+| PG 查询 | `SUM(bigint)` 返回 `NUMERIC`，Any 驱动解不成 i64 | `Dialect::sum_i64()` 按方言包 `CAST` |
+| PG 查询 | 两参数 `MAX(a, b)` 只有 SQLite 认 | 改用 `GREATEST` |
+| PG 查询 | `ON CONFLICT ... count = count + ?` 列名歧义 | 限定成 `rate_counters.count` |
+| PG 查询 | 布尔值直接写入 `BIGINT` 列 | 转成 `i64` |
+| MySQL 迁移 | 生成列的基列上不能挂级联外键（1215） | 改 `RESTRICT`，删账号时显式清策略行 |
+| MySQL 迁移 | `TEXT` 列不能进索引（1170） | 时间列统一 `VARCHAR(32)` |
+| MySQL 迁移 | `BOOLEAN` / `TINYINT` 在 Any 里解不出来 | 改 `BIGINT` |
+| MySQL 查询 | `TEXT` 被 Any 报成 BLOB，按 `String` 解失败 | 文本读取加“按字节读再转 UTF-8”兜底 |
+| MySQL 查询 | `LAST_INSERT_ID()` 是连接级的 | 插入与取 id 在同一条连接上完成 |
+| MySQL 查询 | `key` 是保留字 | `storage_objects` 的语句加反引号 |
+| MySQL 查询 | 不认 `CAST(... AS BIGINT)` | 按方言给 `SIGNED` |
+| MySQL 查询 | `ESCAPE '\'` 会把字符串的结束引号转义掉 | SQL 改写层对 MySQL 去掉这个子句 |
+| MySQL 查询 | 唯一冲突只给 SQLSTATE 23000 | 增加按 `Duplicate entry` 消息识别 |
 
 ### 自己怎么验
 
@@ -1183,7 +1430,7 @@ PIXORA_TEST_DB_DSN="mysql://user:pass@127.0.0.1/pixora" \
 # 逗号分隔可以一次跑完
 ```
 
-端到端冒烟（先按 4/5/6 起一台服务，再跑 `scripts/smoke-new.sh`）：默认读 `target/smoke/pixora.db`；跑在别的方言上时，给一条「从 stdin 读 SQL、输出制表符分隔结果」的客户端命令：
+端到端冒烟（先按 §4/§5/§6 起一台服务，再跑 `scripts/smoke-new.sh`）：默认读 `target/smoke/pixora.db`；跑在别的方言上时，给一条“从 stdin 读 SQL、输出制表符分隔结果”的客户端命令：
 
 ```bash
 SMOKE_DB_CLIENT='psql postgres://user:pass@127.0.0.1/pixora -tA' \
@@ -1197,47 +1444,58 @@ MySQL 那条记得带 `--default-character-set=utf8mb4`：客户端默认按系�
 
 ### 换库与迁移
 
-三种方言的表结构一致，数据本身不通用。换库按「导出 → 建新库 → 改环境变量 → 重启」走，图片文件不用动；建表在启动时自动执行。同一个库升级版本也是启动时自动迁移。
+三种方言的表结构一致，数据本身不通用，也没有一键换库工具。换库按“先在测试库演练 → 用数据库自带工具按表搬数据 → 改环境变量 → 重启”走，图片文件不用动；建表在启动时自动执行。同一个库升级版本也是启动时自动迁移。最省事的做法还是继续用原来的库。
 
 ## 10. 本次实测记录
 
 环境：Windows 11（10.0.22631）、x86_64；便携版 PostgreSQL 17.6（EDB 二进制包）、MySQL 8.4.0（Community zip），分别跑在 127.0.0.1 的 55432 / 33306 端口，独立数据目录；没有 Docker 守护进程，也没有 WSL。所有服务实例都放在仓库外的 `E:\Develop\db\` 下，不碰仓库里的 `data/`。
 
+下表是实际跑过的内容。发行包那两行用的是 v0.1.0（本次数据库修复前的最后一版）；0.1.1 的二进制与镜像由推送后的工作流构建，发布后建议按 §5.1 再校验一次 SHA256。
+
 | 场景 | 怎么验的 | 结果 |
 |---|---|---|
-| 发行包完整性 | 下载 `v0.1.0` 的 linux/win 两个包与 `SHA256SUMS.txt`，`sha256sum -c` | ✅ 两个包都 OK |
-| Windows 二进制（发行包） | 解压 zip → 全新数据目录启动 → `/healthz`、`/api/v1/site`、`--health-probe` | ✅ 自动生成主密钥、healthz 返回 `{"db":"ok"}`、探针退出码 0 |
-| SQLite 端到端 | 起服务 → 安装向导 → CI 同款冒烟 `scripts/smoke-new.sh` | ✅ **298 项全过** |
-| 单元与集成测试 | `cargo test --workspace` | ✅ 279 项全过 |
-| PostgreSQL 17.6 | 建库 → 启动 → 迁移 → 冒烟（`SMOKE_DB_CLIENT` 指向 psql） | ✅ 迁移 9 条/26 张表、冒烟 298/298、服务端 0 个 5xx |
-| MySQL 8.4.0 | 建库 → 启动 → 迁移 → 冒烟（客户端带 utf8mb4） | ✅ 迁移 9 条、冒烟 298/298、服务端 0 个 5xx |
-| 方言用例 | `PIXORA_TEST_DB_DSN=pg,mysql cargo test -p pixora-repo --test dialects` | ✅ 两种方言一起通过 |
-| 前后端分离：Cloudflare Pages 式跨域 | 静态站 8098（含 SPA 回落）+ 后端 8099（`PIXORA_CORS_ORIGINS` 放行 8098），用真实 Cookie 走完向导、登录、上传、取直链 | ✅ 首页/回落/预检/凭据 Cookie（`SameSite=None; Secure`）/跨域上传全部通过；名单外来源拿不到跨域头 |
-| 前后端分离：Vercel / EdgeOne 式边缘反代 | 站点 8097 把 `/api/*`、`/images/*` 转发到 8099，浏览器只看到 8097 | ✅ 向导、登录（`SameSite=Lax`）、上传、直链（按站点地址拼）、取图全部通过 |
-| 前后端分离：GitHub Pages 子路径 | 把产物放到 `/Pixora/` 下，用 `404.html` 做回落 | ✅ 子路径下能开、陌生路径命中 404 页面但内容是前端；`/main.js` 在根上 404 —— 印证了 8.6 的限制 |
-| 三份 compose（单文件内嵌 Caddy 配置） | 解析成功后逐项检查：服务清单、`depends_on` 指向、`healthcheck.test`、端口与卷形状、`configs` 引用是否都有定义、四个占位符是否齐全 | ✅ 三份都通过；**容器实跑未做**（这台机器没有 Docker 守护进程，`docker compose config` 也没跑成：compose 独立二进制在这台机器上下载反复断流） |
+| 发行包完整性（v0.1.0） | 下载 v0.1.0 的 linux/win 两个包与 `SHA256SUMS.txt`，`sha256sum -c` | 两个包都 OK |
+| Windows 二进制（v0.1.0） | 解压 zip → 全新数据目录启动 → `/healthz`、`/api/v1/site`、`--health-probe` | 自动生成主密钥、healthz 返回 `db: ok`、探针退出码 0 |
+| SQLite 端到端 | 起服务 → 安装向导 → CI 同款冒烟 `scripts/smoke-new.sh` | 298 项全过 |
+| 单元与集成测试 | `cargo test --workspace` | 279 项全过 |
+| PostgreSQL 17.6 | 建库 → 启动 → 迁移 → 冒烟（`SMOKE_DB_CLIENT` 指向 psql） | 迁移 9 条/26 张表、冒烟 298/298、服务端 0 个 5xx |
+| MySQL 8.4.0 | 建库 → 启动 → 迁移 → 冒烟（客户端带 utf8mb4） | 迁移 9 条、冒烟 298/298、服务端 0 个 5xx |
+| 方言用例 | `PIXORA_TEST_DB_DSN=pg,mysql cargo test -p pixora-repo --test dialects` | 两种方言一起通过 |
+| 前后端分离：Cloudflare Pages 式跨域 | 静态站 8098（含 SPA 回落）+ 后端 8099（`PIXORA_CORS_ORIGINS` 放行 8098），用真实 Cookie 走完向导、登录、上传、取直链 | 首页/回落/预检/凭据 Cookie（`SameSite=None; Secure`）/跨域上传全部通过；名单外来源拿不到跨域头 |
+| 前后端分离：Vercel / EdgeOne 式边缘反代 | 站点 8097 把 `/api/*`、`/images/*` 转发到 8099，浏览器只看到 8097 | 向导、登录（`SameSite=Lax`）、上传、直链、取图全部通过 |
+| 前后端分离：GitHub Pages 子路径 | 把产物放到 `/Pixora/` 下，用 `404.html` 做回落 | 子路径下能开、陌生路径命中 404 页面但内容是前端；`/main.js` 在根上 404，印证了 §8.6 的限制 |
+| 三份 compose | 用 Docker Compose v5.6.0 CLI 执行 `config` 渲染，检查服务清单、`depends_on`、健康检查、端口与卷、`configs` 引用、占位符 | 三份都通过；**容器实跑未做**（本机没有 Docker 守护进程） |
+| Caddy 配置 | 从 compose 渲染出 Caddyfile，用 Caddy 2.11.7 `validate` | 三份都是 `Valid configuration` |
 
 没能在这台机器上验的，以及原因：
 
-- **Docker 容器实跑**：没有 Docker Desktop（也没装 WSL2/Hyper-V），只有编排文件的静态校验。镜像本身的构建在 CI 里跑通过（`发行版与镜像` 工作流的 `image` job），所以「镜像能编出来」是验证过的，「按 compose 起三个容器」没有。
-- **Linux 二进制执行**：没有 WSL 或 Linux 环境，无法在这台 Windows 上直接跑 musl 产物。发行包里那个 Linux 二进制是同一份代码、同一次构建产出的，Windows 那份的运行行为已经验证；Linux 的准备步骤（systemd、Nginx）按发行包里的二进制位置写好，但没有在 Linux 上实际启动过。
-- **平台真实部署**（Vercel / Cloudflare / EdgeOne / GitHub Pages）：没有这些平台的账号与令牌，因此用本机模拟器复刻了它们的路由规则（SPA 回落、`/api` 转发、`404.html`），把前后端链路完整跑通；真正点「Deploy」那一步没有做。
+- **Docker 容器实跑**：没有 Docker Desktop，也没有 WSL2/Hyper-V。编排用真实 Compose CLI 渲染通过，Caddyfile 也用 Caddy 校验通过；但“按 compose 起三个容器、Caddy 真的申请证书”没有在这台机器上做。镜像构建步骤在 CI 里跑过，上次卡在 GHCR 的写权限（§4.8），是否已推到 Registry 要看 Actions 结果。
+- **Linux 二进制执行**：没有 WSL 或 Linux 环境，无法直接跑 musl 产物。Linux 的准备步骤按发行包里的二进制位置写好，但没有在 Linux 上实际启动过。
+- **平台真实部署**（Vercel / Cloudflare / EdgeOne / GitHub Pages）：没有这些平台的账号与令牌，因此用本机模拟器复刻了它们的路由规则（SPA 回落、`/api` 转发、`404.html`），把前后端链路完整跑通；真正点 Deploy 那一步没有做。
+
+0.1.0 的镜像和二进制早于这次的 PostgreSQL/MySQL 修复；0.1.1 起包含。用非 SQLite 数据库时不要拉 0.1.0。
 
 ## 11. 排障
 
 | 现象 | 多半是 |
 |---|---|
-| 直链地址是 `http://172.x.x.x/...` 或容器内网地址 | 没设 `PIXORA_BASE_URL` |
-| 登录成功，一刷新又变未登录 | 站点是 https 但 Cookie 没带 `Secure`；或跨域接法却没配 `PIXORA_CORS_ORIGINS` |
-| 前端口页面写着「服务暂时不可用」 | 后端没起来，或浏览器到后端被拦（跨域没配、域名写错） |
+| 直链地址是 `http://172.x.x.x/...` 或容器内网地址 | 没设 `PIXORA_BASE_URL`，或安装向导里基础 URL 写错了 |
+| 登录成功，一刷新又变未登录 | 站点是 https 但 Cookie 没带 Secure；或跨域接法却没配 `PIXORA_CORS_ORIGINS` |
+| 前端页面写着“服务暂时不可用” | 后端没起来，或浏览器到后端被拦（跨域没配、域名写错） |
 | 跨域请求报 `failed to fetch` | 前端域名没写进 `PIXORA_CORS_ORIGINS`（要带 `https://`，端口写全） |
 | 静态托管上页面能开、图片全裂 | 后端没设 `PIXORA_BASE_URL`，或跨域接法没填 `PIXORA_API_BASE` |
 | 前端 404 / 白屏，控制台报 `/main.js` 404 | 站点挂在子路径下（如 `/<仓库名>/`），产物引用的是绝对路径 |
-| 注册页说「注册入口已暂停」 | 管理员关了注册；或磁盘占用触发了「容量触顶自动关闭」，去「配额与容量」看 |
+| 注册页说“注册入口已暂停” | 管理员关了注册；或磁盘占用触发了“容量触顶自动关闭”，去“配额与容量”看 |
 | 验证码收不到 | SMTP 没配好（服务端日志会写原因）；开发时验证码也写进日志 |
-| 上传报「域名收不到邮件」 | 收件域名查不到 MX 记录，注册类发信被拦（`antispam.mx_check` 可关） |
-| 容器起来又退出 | `docker compose logs pixora` 看最后几行；常见是主密钥还是占位符，或者数据目录写不进去 |
+| 上传报“域名收不到邮件” | 收件域名查不到 MX 记录，注册类发信被拦（`antispam.mx_check` 可关） |
+| 容器起来又退出 | `docker compose logs pixora` 看最后几行；常见是主密钥还是占位符，或数据库连不上 |
+| Caddy 日志里域名是空的 / 启动即退出 | 编排里的 `{$$PIXORA_DOMAIN}` 被改成了单个 `$`，或者数据库密码里的 `$` 被 Compose 插值了 |
+| 证书申请失败 | 域名没解析、80/443 没放行、云安全组没开，或域名被别的服务占用 |
+| `pull denied` / `unauthorized` | GHCR 包私有或未登录；PAT 要 `read:packages`；CI 推不上去看 §4.8 |
+| `exec format error` | 镜像架构与机器不符；ARM 要手动构建 arm64 |
 | Windows 下报 `unable to open database file` | 数据目录不可写（放到普通目录，别放 `Program Files` / `target\`）；也别从 Git Bash 启动 |
+| SQLite 报 `database is locked` | 有两个进程/容器在写同一个库；SQLite 只能单实例 |
+| 磁盘满了 | 看 `docker system df` 与数据目录；编排已加日志轮转，图片要自己清理或上对象存储 |
 | `Cache-Control` 看起来不对 | 直链是 `immutable` 一年，带 `?thumb=1` 的是缩略图；私有图片是 `private, max-age=300` |
 
 ## 12. 附录
@@ -1252,8 +1510,8 @@ MySQL 那条记得带 `--default-character-set=utf8mb4`：客户端默认按系�
 | `PIXORA_DATA_DIR` | `./data` | 数据目录（SQLite 文件、图片、主密钥） |
 | `PIXORA_MASTER_KEY` | 空 | 加密凭据的主密钥；不给就首次启动自动生成到数据目录 |
 | `PIXORA_MASTER_KEY_FILE` | 数据目录里的 `master.key` | 密钥文件的路径 |
-| `PIXORA_BASE_URL` | 空（按请求推断） | 站点对外地址；反代后面**必须**设 |
-| `PIXORA_TRUST_PROXY` | `1` | 信任几层代理的转发头；设大了等于允许伪造 |
+| `PIXORA_BASE_URL` | 空（按请求推断） | 站点对外地址；反向代理后面**必须**设 |
+| `PIXORA_TRUST_PROXY` | `1` | 信任几层代理的转发头；直接暴露公网时设 `0` |
 | `PIXORA_CORS_ORIGINS` | 空 | 跨域前端来源，逗号分隔；精确匹配，不接受 `*` |
 | `PIXORA_COOKIE_SAMESITE` | 配了 CORS 就 `none`，否则 `lax` | 会话 Cookie 的跨站策略 |
 | `PIXORA_SECURE_COOKIES` | 按 `BASE_URL` 是否 https | 本地 http 调试可显式设 false |
@@ -1275,15 +1533,24 @@ data/
 └── users/              硬链接镜像树（按账号组织，可选，删了不影响数据）
 ```
 
-备份清单：`data/` 整个目录 + `PIXORA_MASTER_KEY`（如果走环境变量）。对象存储上的图片不在本地，交给厂商的版本控制或生命周期规则。
+用 PostgreSQL/MySQL 时，数据库数据在 `pgdata/` 或 `mysqldata/`，备份用 §4.7 的 dump；`data/` 里只剩图片和主密钥。对象存储上的图片不在本地，交给厂商的版本控制或生命周期规则。
+
+备份清单：`data/` 整个目录 + `PIXORA_MASTER_KEY`（如果走环境变量）+ 数据库 dump（如果用外部库）。
 
 ### 12.3 版本与发版
 
 版本号只写在 `Cargo.toml` 的 `[workspace.package]` 里。改版本号：
 
 ```bash
-sh scripts/bump-version.sh 0.2.0     # 连同 Cargo.lock 与 web/package.json 一起改
-git add -A && git commit -m "chore: 0.2.0" && git push
+sh scripts/bump-version.sh 0.1.2     # 连同 Cargo.lock、web/package.json、web/package-lock.json 一起改
+git add -A && git commit -m "chore: 0.1.2" && git push
 ```
 
-推主干后，`发行版与镜像` 工作流会读版本号：GitHub 上没有这个版本的 Release 时，出两个平台的二进制、建 `v<版本号>` 标签、发 Release，镜像带 `:<版本号>` 与 `:latest`；已经发过的版本只刷新镜像的 `:edge` / 主干名 / `:sha-<短哈希>`。
+推主干后，“发行版与镜像”工作流会读版本号：
+
+- GitHub 上没有这个版本的 Release 时，出两个平台的二进制、建 `v<版本号>` 标签、发 Release，镜像带 `:<版本号>` 与 `:latest`；
+- 已经发过的版本只刷新镜像的 `:edge` / 主干名 / `:sha-<短哈希>`。
+
+镜像默认只构建 `linux/amd64`。要 ARM 镜像，在 Actions 里手动运行这个工作流，`platforms` 填 `linux/amd64,linux/arm64`。
+
+GHCR 包默认私有；首次推上去后，去 Packages → 这个包 → Package settings 改可见性，或者给使用方发一个有 `read:packages` 的 PAT。

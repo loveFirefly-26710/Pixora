@@ -33,7 +33,7 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 - **登录方式**：邮箱（必需）+ GitHub / Google / QQ / 微信 / 手机号验证码，用户可自行绑定与解绑，管理员能统一启停。
 - **管理后台**：用户与配额、存储后端与容量、频率限制（含按用户覆盖）、IP 黑名单、内容审核、邮件模板、服务条款、系统日志。
 - **存储后端**：本地目录、数据库 BLOB、S3 兼容（Cloudflare R2 / 阿里云 OSS / 腾讯云 COS / MinIO / B2）、WebDAV、GitHub 仓库、Telegram 频道。
-- **部署形态**：单二进制（前端嵌在里面）、Docker 镜像（多架构）、前后端分开部署到静态托管 + API。
+- **部署形态**：单二进制（前端嵌在里面）、Docker 镜像（默认 amd64，需要时手动出 arm64）、前后端分开部署到静态托管 + API。
 
 <img src="docs/screenshots/login.webp" alt="登录页" width="720">
 
@@ -67,7 +67,7 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 
 Pixora 由三部分组成：**后端**（一个 Rust 进程，负责接口、直链、上传与后台任务）、**前端**（静态文件，默认嵌在后端二进制里）、**数据**（数据库与图片，都在数据目录里）。默认形态只要起一个进程，网站就能用。
 
-完整的部署方案单独成文：[**docs/Pixora-部署方案.md**](docs/Pixora-部署方案.md)。那份文档从「开工前准备好四样东西」讲到三种装法的每一步，包含三套完整 compose、Vercel / Cloudflare / EdgeOne / GitHub Pages 的前后端分离步骤，以及本机实测的记录。
+完整的部署方案单独成文：[**docs/Pixora-部署方案.md**](docs/Pixora-部署方案.md)。文档开头有一张从零到上线的清单，三种装法都给到每一步的命令、预期结果和排障对照；还包含三套完整 compose、Vercel / Cloudflare / EdgeOne / GitHub Pages 的前后端分离步骤，以及本机实测的记录。当前版本 0.1.1。
 
 | 你想怎么装 | 看哪儿 |
 |---|---|
@@ -81,9 +81,13 @@ Pixora 由三部分组成：**后端**（一个 Rust 进程，负责接口、直
 把仓库 `deploy/docker-compose.yml` 的内容存成一个 `docker-compose.yml`，改里面标着「必改」的三处——域名、站点地址、主密钥（`openssl rand -hex 32` 的输出）——然后：
 
 ```bash
+docker compose pull
 docker compose up -d
-docker compose logs -f pixora        # 看到「Pixora 已启动」就说明起来了
+docker compose ps                    # pixora 应为 Up (healthy)
+docker compose logs --tail=50 pixora # 看到「Pixora 已启动」就说明起来了
 ```
+
+镜像默认用 `:latest`；生产建议固定成具体版本号（如 `:0.1.1`），升级时再改。PostgreSQL/MySQL 请用 0.1.1 及以上：0.1.0 的镜像建表就会失败。
 
 不需要 `.env`，也不用先建目录：数据落在同目录的 `./data`，Docker 会自己建；Caddy 的配置内嵌在编排文件末尾（`configs.content`），自动申请 https 证书。Compose 需要 2.23 以上（`docker compose version` 查）。
 
@@ -93,7 +97,7 @@ docker compose logs -f pixora        # 看到「Pixora 已启动」就说明起�
 
 ### 数据库
 
-默认 SQLite，数据文件就在数据目录里，备份就是拷目录。三种方言都跑过同一套 298 项端到端冒烟（SQLite、PostgreSQL 17.6、MySQL 8.4.0 全过），切换只改连接串；配置在[部署方案 §4.3 / §4.4](docs/Pixora-部署方案.md)，数据库已经单独部署了的接法（宿主机、局域网、面板、云上）见[§4.5](docs/Pixora-部署方案.md)，修复过哪些方言差异见[§9](docs/Pixora-部署方案.md)。
+默认 SQLite，数据文件就在数据目录里，备份就是拷目录。三种方言都跑过同一套 298 项端到端冒烟（SQLite、PostgreSQL 17.6、MySQL 8.4.0 全过），切换只改连接串；配置在[部署方案 §4.3 / §4.4](docs/Pixora-部署方案.md)，数据库已经单独部署了的接法（宿主机、局域网、面板、云上）见[§4.5](docs/Pixora-部署方案.md)，修复过哪些方言差异见[§9](docs/Pixora-部署方案.md)。这些修复从 0.1.1 开始进发行包和镜像。
 
 ### 常见问题
 
@@ -173,7 +177,7 @@ migrations/           三个方言各一套建表脚本
 deploy/               Dockerfile、docker-compose、Caddyfile、.env.example
   └── static/         Vercel / Cloudflare / EdgeOne 的静态前端配置样例
 docs/                 技术方案、部署方案、接口契约、ADR、界面原型、截图
-.github/workflows/    CI、Docker 多架构镜像、发行版二进制、前端静态站点
+.github/workflows/    CI、Docker 镜像（可按需多架构）、发行版二进制、前端静态站点
 scripts/              冒烟测试（bash / PowerShell）与素材生成
 ```
 
@@ -327,11 +331,11 @@ PIXORA_TEST_DB_DSN="mysql://root:pass@127.0.0.1/pixora" \
 ### 版本号放在哪、怎么发版
 
 版本号只有一个来源：`Cargo.toml` 里 `[workspace.package]` 的 `version`。二进制启动日志里那句
-`version="0.1.0"`、发版的标签、容器镜像的标签，全都按它算。
+`version="0.1.1"`、发版的标签、容器镜像的标签，全都按它算。
 
 ```bash
-sh scripts/version.sh              # 看当前版本号（0.1.0）
-sh scripts/bump-version.sh 0.2.0   # 改成 0.2.0：Cargo.toml、Cargo.lock、web/package.json 一起改
+sh scripts/version.sh              # 看当前版本号（0.1.1）
+sh scripts/bump-version.sh 0.2.0   # 改成 0.2.0：Cargo.toml、Cargo.lock、web/package.json、package-lock 一起改
 git add -A && git commit -m "chore: 版本号 0.2.0"
 git push                           # 推上去 → 自动建 v0.2.0 标签、发 Release、推镜像
 ```
