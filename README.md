@@ -8,7 +8,9 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 
 设计文档在 [`docs/Pixora-技术方案.md`](docs/Pixora-技术方案.md)，主题方案在
 [`docs/Pixora-主题美化方案.md`](docs/Pixora-主题美化方案.md)，接口契约在
-[`docs/api-contract.md`](docs/api-contract.md)，界面原型在 [`docs/ui-preview.html`](docs/ui-preview.html)。
+[`docs/api-contract.md`](docs/api-contract.md)，安全与性能审计在
+[`docs/安全与性能审计-2026-10-17.md`](docs/安全与性能审计-2026-10-17.md)，
+界面原型在 [`docs/ui-preview.html`](docs/ui-preview.html)。
 
 ## 它解决什么问题
 
@@ -28,7 +30,7 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 - **上传**：拖拽 / 选文件夹 / 粘贴剪贴板；浏览器先算哈希去重，缩略图在本地生成；并发数与目标相册、标签可以整批设置。
 - **广场**：未登录可浏览公开图片，标签筛选、排序、灯箱查看（可缩放拖动、显示缩放百分比）；自动漫游间隔后台可调，前台可暂停。
 - **相册**：公开 / 私有；相册页支持网格与列表、拖拽排序、批量移动与标签。
-- **直链**：`/{前缀}/{sha256}.{ext}`，前缀可在后台改且旧链仍有效；`?thumb=1` 走缩略图，`?download=1` 带原始文件名下载。
+- **直链**：`/{前缀}/{sha256}.{ext}`，前缀可在后台改且旧链仍有效；`?thumb=2` 走缩略图，`?download=1` 带原始文件名下载。
 - **回收站**：删除先进回收站，保留期内可恢复，到期由后台任务彻底删除。
 - **账号**：邮箱 + 密码、邮箱验证码、二次验证（TOTP，口令 + 恢复码）、会话与 API Token 管理、暂停/封禁申诉入口。
 - **登录方式**：邮箱（必需）+ GitHub / Google / QQ / 微信 / 手机号验证码，用户可自行绑定与解绑，管理员能统一启停。
@@ -46,23 +48,52 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 <td width="50%"><img src="docs/screenshots/albums.webp" alt="相册页"><br><sub>相册：公开或私有，网格或列表，批量操作</sub></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/screenshots/viewer.webp" alt="图片查看器"><br><sub>查看器：尺寸、大小、SHA-256、所属相册，一键复制直链或下载</sub></td>
-<td width="50%"><img src="docs/screenshots/recycle.webp" alt="回收站"><br><sub>回收站：删除先软删，保留期内可恢复</sub></td>
+<td width="50%"><img src="docs/screenshots/account-security.webp" alt="账号安全"><br><sub>安全：TOTP、恢复码、会话设备、换绑邮箱</sub></td>
+<td width="50%"><img src="docs/screenshots/admin-ip.webp" alt="IP 黑名单"><br><sub>IP 规则：全站 / 注册 / 登录 / 上传分场景拦截，白名单优先</sub></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/screenshots/admin-storage.webp" alt="存储管理"><br><sub>存储：切换后端、容量口径、直链前缀、缩略图重算</sub></td>
 <td width="50%"><img src="docs/screenshots/admin-quota.webp" alt="配额与容量"><br><sub>配额：系统总额分配、触顶自动关闭注册</sub></td>
+<td width="50%"><img src="docs/screenshots/admin-users.webp" alt="用户管理"><br><sub>用户：角色、状态、用量、批量配额、免登录切换</sub></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/screenshots/admin-users.webp" alt="用户管理"><br><sub>用户：角色、状态、用量、批量配额、免登录切换</sub></td>
 <td width="50%"><img src="docs/screenshots/admin-settings.webp" alt="系统设置"><br><sub>设置：站点、注册、会话、防盗链、内容审核</sub></td>
+<td width="50%"><img src="docs/screenshots/mobile-plaza.webp" alt="手机端广场"><br><sub>移动端：同一套前端，底部标签栏与触屏手势</sub></td>
 </tr>
 </table>
 
-手机端（同一套前端自适应，底部标签栏 + 全部入口）：
+> 截图来自当前版本的真实页面，主题为「夜航」；浅色主题「萤昼」在右上角切换，跟随系统时会自动选择。
 
-<img src="docs/screenshots/mobile-plaza.webp" alt="手机端广场" width="330">
-<img src="docs/screenshots/mobile-account.webp" alt="手机端账号页" width="330">
+## 使用
+
+### 从第一次登录开始
+
+1. **装完向导**：用第 3 步创建的管理员账号登录。登录后先到「账号 → 安全」开启二次验证，恢复码只显示一次，离线保存。
+2. **上传第一张图**：进「上传」，拖文件、选文件夹或直接 `Ctrl/Cmd + V` 粘贴。目标相册、标签、公开/私有、并发数可以整批设置；队列会逐张发，刷新页面不会丢已上传的记录。
+3. **拿直链**：在相册里点图片打开查看器，复制直链或下载。`?thumb=2` 是缩略图，`?download=1` 会带原始文件名；域名在后台「系统设置 → 站点」里改，旧链不会失效。
+4. **分享与 API**：公开图片会进广场；私有图片只有本人和管理员能通过直链查看。需要在 PicGo、PicList 或脚本里上传时，到「账号 → API Token」建一个 Token，范围默认是 `upload + read`，要改删再加 `write`。
+5. **后台**：用户与配额、存储后端、频率限制、IP 黑名单、内容审核、邮件模板、服务条款都在左侧管理区。管理员默认不受频率限制，但仍受账号状态与 CSRF 约束。
+
+API 上传示例（Token 只在创建时显示一次）：
+
+```bash
+curl -X POST https://img.example.com/api/v1/upload \
+  -H "Authorization: Bearer px_live_xxxxxxxx" \
+  -F "file=@photo.jpg" \
+  -F "visibility=public" \
+  -F "tags=旅行,夜景"
+```
+
+返回里的 `url` 是原图直链，`thumb_url` 是缩略图；`dedup=true` 表示服务器已有相同内容，没有重复占盘。完整的接口说明见 [`docs/api-contract.md`](docs/api-contract.md)。
+
+### 安全与性能
+
+- 口令用 Argon2id 哈希；会话 Cookie 是 HttpOnly + SameSite=Lax，HTTPS 下自动加 Secure。
+- 所有写操作校验 CSRF；管理员接口额外判角色，跨用户查看会写审计日志。
+- 上传按魔数识别真实格式，限制单文件、像素、长宽与缩略图像素；SVG 入库前净化，直链再带沙箱 CSP。
+- API 与上传分别限流；IP 规则支持全站 / 注册 / 登录 / 上传，命中计数有节流，白名单优先。
+- 直链只暴露哈希，私有图片按「有没有公开引用」和请求者身份判定；公开图长缓存，私有图不进共享缓存。
+- 设置读取有短缓存，会话活动时间按分钟节流，随机图不再做全表随机排序。
+- 最近一次安全与性能审计的修复项、残留风险和上线检查清单在 [`docs/安全与性能审计-2026-10-17.md`](docs/安全与性能审计-2026-10-17.md)。
 
 ## 部署
 
@@ -97,7 +128,7 @@ docker compose logs --tail=50 pixora # 看到「Pixora 已启动」就说明起�
 
 ### 数据库
 
-默认 SQLite，数据文件就在数据目录里，备份就是拷目录。三种方言都跑过同一套 298 项端到端冒烟（SQLite、PostgreSQL 17.6、MySQL 8.4.0 全过），切换只改连接串；配置在[部署方案 §4.3 / §4.4](docs/Pixora-部署方案.md)，数据库已经单独部署了的接法（宿主机、局域网、面板、云上）见[§4.5](docs/Pixora-部署方案.md)，修复过哪些方言差异见[§8](docs/Pixora-部署方案.md)。这些修复从 0.1.1 开始进发行包和镜像。
+默认 SQLite，数据文件就在数据目录里，备份就是拷目录。三种方言都跑过端到端冒烟；SQLite 当前 299 项全过，PostgreSQL 17.6 与 MySQL 8.4.0 上次实测 298 项（本次审计只复跑了 SQLite）。切换只改连接串；配置在[部署方案 §4.3 / §4.4](docs/Pixora-部署方案.md)，数据库已经单独部署了的接法（宿主机、局域网、面板、云上）见[§4.5](docs/Pixora-部署方案.md)，修复过哪些方言差异见[§8](docs/Pixora-部署方案.md)。这些修复从 0.1.1 开始进发行包和镜像。
 
 ### 常见问题
 
@@ -384,9 +415,9 @@ CI 里的冒烟是「起真服务、走真 HTTP」那一套，和本地 `scripts
   自动化测试覆盖不到。
 - 缩略图与哈希的 WASM 解码器（HEIC/TIFF/JXL）按需加载，本项目没有内置解码器：
   这些格式的缩略图由客户端的原生解码能力决定，解不动就退化成「不带缩略图」。
-- **数据库方言**：SQLite / PostgreSQL / MySQL 三种都跑过同一套 298 项端到端冒烟；
+- **数据库方言**：SQLite 当前 299 项端到端冒烟全过；PostgreSQL 17.6 与 MySQL 8.4.0 上次实测 298 项，本次审计没有复跑这两套库。
   MariaDB 共用 MySQL 的迁移与查询，这次没有单独验证。
-- 多实例部署需要额外的共享设施（限流计数与会话表），当前按单实例设计。
+- 多实例部署需要额外的共享设施（限流计数、会话、GC 锁都按单实例设计），当前按单实例设计。
 - 前端只嵌在二进制里，与接口同源部署；不支持把前端单独发到静态托管或 JS 边缘运行时。
 
 ## 许可

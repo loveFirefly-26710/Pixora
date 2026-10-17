@@ -20,6 +20,7 @@
 | 8 | 走安装向导 | 五步完成，能登录后台 | §7 |
 | 9 | 验收 | 能上传、复制直链并打开，重启后数据还在 | §7 |
 | 10 | 做一次备份 | 备份文件能列出内容 | §4.7 |
+| 11 | 安全验收 | 响应头齐、`/install/*` 返回 404、管理员开启 TOTP、申诉邮箱已填 | §12 |
 
 ### 0.2 文档约定
 
@@ -124,11 +125,11 @@ PIXORA_BASE_URL=https://img.example.com
 
 | 数据库 | 适合 | 验证情况（2026-10） |
 |---|---|---|
-| **SQLite**（默认） | 单机、个人、最省事 | 298 项冒烟全过；备份就是拷文件 |
-| PostgreSQL | 想用正经数据库、单机多人 | 298 项冒烟全过（PostgreSQL 17.6） |
-| MySQL | 团队统一用 MySQL | 298 项冒烟全过（MySQL 8.4.0） |
+| **SQLite**（默认） | 单机、个人、最省事 | 299 项冒烟全过；备份就是拷文件 |
+| PostgreSQL | 想用正经数据库、单机多人 | 上次实测 298 项全过（PostgreSQL 17.6）；本次审计未复跑 |
+| MySQL | 团队统一用 MySQL | 上次实测 298 项全过（MySQL 8.4.0）；本次审计未复跑 |
 
-三种都实测过，切换只改 `PIXORA_DB_DRIVER` 与 `PIXORA_DB_DSN`，细节见 §8。
+三种都实测过，切换只改 `PIXORA_DB_DRIVER` 与 `PIXORA_DB_DSN`，细节见 §8。审计后新增的 SVG、限流和安全头检查先在 SQLite 上跑通；发布前如果准备上 PostgreSQL/MySQL，建议用 §8 的命令再跑一遍这套冒烟。
 
 几条限制先说清楚：
 
@@ -218,6 +219,8 @@ docker compose config >/dev/null && echo "编排语法 OK"
 | `REPLACE_WITH_A_STRONG_PASSWORD` | 一个强密码 | PostgreSQL/MySQL 版才有，出现 2～3 处，改成同一个值 |
 
 主密钥的占位符故意不是合法的十六进制：忘了改，应用启动会直接报错，不会拿占位文字当密钥用。
+
+SQLite 版 compose 里 `PIXORA_TRUST_PROXY` 默认是 `1`，因为前面有 Caddy。直接暴露公网、前面没有反向代理时改成 `0`，否则客户端可以伪造 `X-Forwarded-For` 绕过 IP 黑名单和限流。HTTPS 下 `PIXORA_SECURE_COOKIES` 不填也会按 `PIXORA_BASE_URL` 自动开；如果站点从 HTTPS 改成 HTTP 调试，记得显式设成 `false`，并清掉浏览器里的旧 Cookie。
 
 数据库密码建议用 `openssl rand -hex 16` 生成。密码里的 `$` 会被 Compose 当变量插值，`@`、`:` 会把 DSN 拆错；用十六进制可以完全避开这些坑。非要用特殊字符，就把 DSN 里的字符做百分号编码，并把 `$` 写成 `$$`。
 
@@ -796,6 +799,8 @@ docker compose logs --tail=50 pixora
 
 数据库迁移在启动时自动执行，只向前不回头。升级前先做备份。生产环境建议在 compose 里固定版本号，而不是一直用 `latest`。
 
+拉新镜像不需要删除 GHCR 上的包，也不需要先在服务器上删旧镜像。`docker compose pull` 会拿到 compose 里写的标签，`docker compose up -d` 发现镜像 ID 变了就会重建容器；旧的本地镜像留着可以回滚，想清理再 `docker image prune`。如果 compose 固定的是 `:0.1.3`，要把标签改成新版本；用 `:latest` 的话，只有正式 Release 发布后它才会移动，平时推主干只更新 `:edge` / `:master` / `:sha-<短哈希>`。
+
 备份 SQLite 版（数据目录 + 图片 + 主密钥）：
 
 ```bash
@@ -878,6 +883,8 @@ docker compose start pixora
 | 日志把磁盘写满 | 本文编排已经给每个服务加了 10MB × 3 的日志轮转；自己改过的话检查 `logging` 段 |
 | `database is locked`（SQLite） | 有两个进程或容器在写同一个 `pixora.db`。SQLite 只能单实例 |
 | `./data` 权限报错 | 镜像以 root 运行，通常不用改；只有 rootless Docker 或用户命名空间才需要按映射的 UID 授权 |
+| 推了主干但 `:latest` 没变 | 版本号没改，这一版已经发过 Release；工作流只更新 `:edge` / `:master` / `:sha-<短哈希>`。要发新版，先 `sh scripts/bump-version.sh` 再推 |
+| 想“删掉镜像重新构建” | 不需要删 GHCR 包。删包会连权限与可见性一起重置；正常升级只需推新标签，服务器上 `docker compose pull` 即可 |
 
 ## 5. 方案 B：Linux 单二进制
 
@@ -921,12 +928,17 @@ PIXORA_BASE_URL=https://img.example.com
 PIXORA_MASTER_KEY=<主密钥>
 # 前面有 Nginx/Caddy 时填 1；直接暴露到公网填 0
 PIXORA_TRUST_PROXY=1
+# HTTPS 站点保持 true；只在本地 http 调试时改 false
+PIXORA_SECURE_COOKIES=true
+PIXORA_COOKIE_SAMESITE=lax
 PIXORA_WORKERS=2
 RUST_LOG=info
 EOF
 sudo chown root:root /etc/pixora.env
 sudo chmod 600 /etc/pixora.env
 ```
+
+`PIXORA_TRUST_PROXY` 的具体层数要和实际链路一致：只挂一层 Nginx 就填 1，直连公网就填 0。填大了比填小了更危险——客户端可以自己往 `X-Forwarded-For` 里塞地址，把 IP 黑名单和限流绕过去。
 
 用 PostgreSQL/MySQL 时改这两行：
 
@@ -1206,28 +1218,32 @@ PS> C:\pixora\nssm.exe start Pixora
 4. **站点与邮件**：站点名、基础 URL、直链前缀、SMTP。基础 URL 会预填 `PIXORA_BASE_URL`，保持它等于对外地址；保存后以数据库里的值为准。SMTP 可以整段留空，之后在后台再配；没配 SMTP 时，验证码会写进服务端日志。
 5. **完成**：标记已安装，安装接口从此整体下线（再访问返回 404）。这是有意的，否则任何人都能重跑向导重设管理员。
 
-装完立即做四项验收：
+装完立即做六项验收：
 
 | 检查 | 怎么做 | 通过标准 |
 |---|---|---|
 | 登录 | 用第 3 步的管理员账号登录 | 能进后台，刷新后仍是登录状态 |
 | 上传 | 上传一张图片 | 返回直链，复制到新标签页能打开 |
 | 直链域名 | 看直链开头 | 是 `https://你的域名/...`，不是内网地址 |
+| 安装入口关闭 | `curl -I https://你的域名/api/v1/install/status` | 返回 404，不能再跑向导 |
+| 安全响应头 | `curl -I https://你的域名/healthz` | 有 `x-content-type-options`、`x-frame-options`、`referrer-policy`、`permissions-policy`、`content-security-policy` |
 | 重启不丢 | `docker compose restart pixora`（二进制则 `systemctl restart pixora`） | 账号、图片、设置都还在，`/healthz` 的 `db` 为 ok |
+
+登录后到「账号 → 安全」开启 TOTP，保存恢复码；到「系统设置 → 邮件」填好 SMTP 与申诉邮箱；到「服务条款」发布当前版本。这三步不做，出问题时只能进服务器改库或看日志。
 
 到这一步就结束了。前端已经嵌在同一个进程里，不需要再单独部署。
 
 ## 8. 数据库支持现状
 
-三种方言都跑过同一套端到端冒烟（298 项），结果一致：
+三种方言都跑过端到端冒烟；SQLite 当前 299 项全过，PostgreSQL 与 MySQL 上次实测 298 项：
 
 | 数据库 | 验证版本 | 迁移 | 冒烟 | 服务端 5xx |
 |---|---|---|---|---|
-| SQLite | 内置 | 9/9 | 298/298 | 0 |
-| PostgreSQL | 17.6 | 9/9，26 张表 | 298/298 | 0 |
-| MySQL | 8.4.0 | 9/9 | 298/298 | 0 |
+| SQLite | 内置 | 9/9 | 299/299 | 0 |
+| PostgreSQL | 17.6 | 9/9，26 张表 | 298/298（审计后未复跑） | 0 |
+| MySQL | 8.4.0 | 9/9 | 298/298（审计后未复跑） | 0 |
 
-SQLite 是默认，也是依赖最少的一条；PostgreSQL / MySQL 按 §4.3 / §4.4 填连接串，数据库已经单独部署的接法见 §4.5。
+SQLite 是默认，也是依赖最少的一条；PostgreSQL / MySQL 按 §4.3 / §4.4 填连接串，数据库已经单独部署的接法见 §4.5。审计后新增的 SVG 净化、API 限流和安全响应头检查已在 SQLite 上覆盖；发布前如果要用 PostgreSQL/MySQL，建议按本节末尾的命令再跑一遍。
 
 MariaDB 共用 MySQL 的驱动与迁移，这次没有单独跑，不能算“已验证”。用 MariaDB 时建议先在自己的环境跑一遍 §8 末尾的方言用例和冒烟。
 
@@ -1292,8 +1308,8 @@ MySQL 那条记得带 `--default-character-set=utf8mb4`：客户端默认按系�
 |---|---|---|
 | 发行包完整性（v0.1.0） | 下载 v0.1.0 的 linux/win 两个包与 `SHA256SUMS.txt`，`sha256sum -c` | 两个包都 OK |
 | Windows 二进制（v0.1.0） | 解压 zip → 全新数据目录启动 → `/healthz`、`/api/v1/site`、`--health-probe` | 自动生成主密钥、healthz 返回 `db: ok`、探针退出码 0 |
-| SQLite 端到端 | 起服务 → 安装向导 → CI 同款冒烟 `scripts/smoke-new.sh` | 298 项全过 |
-| 单元与集成测试 | `cargo test --workspace` | 270 项全过 |
+| SQLite 端到端 | 起服务 → 安装向导 → CI 同款冒烟 `scripts/smoke-new.sh` | 299 项全过（2026-10-18 复跑） |
+| 单元与集成测试 | `cargo test --workspace` | 全部通过 |
 | PostgreSQL 17.6 | 建库 → 启动 → 迁移 → 冒烟（`SMOKE_DB_CLIENT` 指向 psql） | 迁移 9 条/26 张表、冒烟 298/298、服务端 0 个 5xx |
 | MySQL 8.4.0 | 建库 → 启动 → 迁移 → 冒烟（客户端带 utf8mb4） | 迁移 9 条、冒烟 298/298、服务端 0 个 5xx |
 | 方言用例 | `PIXORA_TEST_DB_DSN=pg,mysql cargo test -p pixora-repo --test dialects` | 两种方言一起通过 |
@@ -1330,7 +1346,7 @@ MySQL 那条记得带 `--default-character-set=utf8mb4`：客户端默认按系�
 | Windows 下报 `unable to open database file` | 数据目录不可写（放到普通目录，别放 `Program Files` / `target\`）；也别从 Git Bash 启动 |
 | SQLite 报 `database is locked` | 有两个进程/容器在写同一个库；SQLite 只能单实例 |
 | 磁盘满了 | 看 `docker system df` 与数据目录；编排已加日志轮转，图片要自己清理或上对象存储 |
-| `Cache-Control` 看起来不对 | 直链是 `immutable` 一年，带 `?thumb=1` 的是缩略图；私有图片是 `private, max-age=300` |
+| `Cache-Control` 看起来不对 | 直链是 `immutable` 一年，带 `?thumb=2` 的是缩略图；私有图片是 `private, max-age=300` |
 
 ## 11. 附录
 
@@ -1354,6 +1370,10 @@ MySQL 那条记得带 `--default-character-set=utf8mb4`：客户端默认按系�
 | `PIXORA_ACCEL_PREFIX` | 空 | 让 Nginx 直接发文件的 `X-Accel-Redirect` 前缀 |
 | `PIXORA_DEV_RETURN_CODES` | `false` | 开发用：把验证码放进接口响应（生产别开） |
 | `RUST_LOG` | `info` | 日志级别 |
+
+`PIXORA_TRUST_PROXY` 只决定“设置里没写过时用几层”；后台「IP 黑名单 → 策略设置」里保存过 `trust_proxy` / `proxy_hops` 之后，以数据库里的值为准。两处不要写成互相矛盾的配置。
+
+`PIXORA_SECURE_COOKIES` 不填时按 `PIXORA_BASE_URL` 是否 `https://` 自动决定；反向代理终止 TLS、但应用看到的是 http 时，务必显式设 `true`，否则 Cookie 不带 Secure。
 
 ### 11.2 数据目录里有什么
 
@@ -1386,3 +1406,28 @@ git add -A && git commit -m "chore: 0.1.4" && git push
 镜像默认只构建 `linux/amd64`。要 ARM 镜像，在 Actions 里手动运行这个工作流，`platforms` 填 `linux/amd64,linux/arm64`。
 
 GHCR 包默认私有；首次推上去后，去 Packages → 这个包 → Package settings 改可见性，或者给使用方发一个有 `read:packages` 的 PAT。
+
+## 12. 上线前安全检查
+
+这份清单来自 2026-10-17 的代码审计，部署完成后逐项过一遍。审计细节与残留风险见 [`docs/安全与性能审计-2026-10-17.md`](安全与性能审计-2026-10-17.md)。
+
+| 检查项 | 怎么确认 | 不通过的处理 |
+|---|---|---|
+| 主密钥已备份 | `PIXORA_MASTER_KEY` 在密码管理器里，且随数据目录备份 | 重新生成并重填 SMTP、存储后端凭据；不要只备份数据库 |
+| 站点地址是公开地址 | 浏览器打开直链，域名与 `PIXORA_BASE_URL` 一致 | 改环境变量或后台「站点 → 基础 URL」 |
+| 代理层数正确 | 有反向代理时 `PIXORA_TRUST_PROXY=1`，直连公网时 `0`；后台 IP 策略与之一致 | 改环境变量并重启；后台策略同步 |
+| Cookie 安全 | HTTPS 下响应头 `Set-Cookie` 带 `Secure`；会话 Cookie 带 `HttpOnly`、`SameSite=Lax` | 设 `PIXORA_SECURE_COOKIES=true` |
+| 安装入口关闭 | `/api/v1/install/status` 返回 404 | 完成向导收尾；不要保留未安装实例在公网 |
+| 管理员二次验证 | 账号 → 安全，TOTP 已开启，恢复码已离线保存 | 立即开启；恢复码只显示一次 |
+| 申诉邮箱 | 系统设置 → 邮件 → 申诉邮箱非空，暂停/封禁通知模板可读 | 填运营者真实可收信的地址 |
+| 服务条款 | 后台已发布当前版本；正文里的占位符已替换 | 发布前不要把 `【运营者名称】` 之类原样上线 |
+| 安全响应头 | `curl -I https://你的域名/healthz` 能看到五个头（§7） | 如果是自建反代，确认没有把应用的响应头覆盖掉 |
+| 限流可用 | 用 API Token 连续请求，超过每分钟额度返回 429 与 `Retry-After` | 检查用户策略是否被设成 `unlimited`，管理员默认豁免 |
+| IP 规则 | 加一条测试 CIDR，确认命中后返回 403；删除后恢复 | 确认 `scope=all` 规则现在覆盖浏览与直链 |
+| 直链权限 | 私有图片换浏览器/无 Cookie 打开应 404；公开图正常 | 检查图片可见性与相册可见性是否分开设置 |
+| 备份可恢复 | 在测试目录恢复一次 `data/` 与数据库 dump，能登录、能看图 | 备份不可读等于没有备份 |
+| 日志无敏感信息 | 日志里没有 DSN 密码、SMTP 密码、主密钥、Token 明文 | 调整 `RUST_LOG`，不要把请求体打进日志 |
+| 多实例 | 只有一个实例跑 SQLite 与 GC；限流/会话共享方案已确认 | 改用 PostgreSQL/MySQL 并补数据库级锁，或保持单实例 |
+| 资源上限 | 128M 内存下没有开启远端存储大文件 + 服务端缩略图兜底 | 提高到 256M，或把单文件上限降到 10MiB |
+
+上线后建议每周看一眼：磁盘占用、`/healthz` 的 `db`、上传队列深度、邮件发件箱积压、IP 自动封禁记录。审计报告里列出的未修复项（多实例 GC、条款服务端强制、API 小时额度等）需要按实际部署规模决定是否补。
