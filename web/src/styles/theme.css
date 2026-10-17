@@ -1395,6 +1395,33 @@ tr.pick td {
   color: var(--primary);
 }
 
+.auto-roam {
+  gap: 8px;
+}
+
+.auto-roam .auto-label {
+  white-space: nowrap;
+}
+
+.auto-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--faint);
+  transition: background 0.2s, box-shadow 0.2s;
+}
+
+.auto-roam.on .auto-dot {
+  background: var(--primary);
+  box-shadow: 0 0 10px var(--primary);
+  animation: theme-flicker 2.8s ease-in-out infinite;
+}
+
+.auto-roam[aria-pressed="false"] {
+  color: var(--muted);
+}
+
 .plaza-hero-meta {
   display: flex;
   align-items: center;

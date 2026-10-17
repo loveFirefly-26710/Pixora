@@ -94,6 +94,7 @@ interface SettingsDraft {
   baseUrl: HTMLInputElement;
   plazaPublic: boolean;
   plazaColumns: HTMLSelectElement;
+  plazaAutoRefresh: HTMLInputElement;
   recycleRetention: HTMLInputElement;
   requireLogin: boolean;
   registerEnabled: boolean;
@@ -173,6 +174,12 @@ function intOf(input: HTMLInputElement): number {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
 
+/** 自动刷新间隔：0 = 关闭；正数进 5–3600 秒。后端还会再钳一次。 */
+function autoRefreshSeconds(input: HTMLInputElement): number {
+  const value = Math.min(3600, intOf(input));
+  return value > 0 ? Math.max(5, value) : 0;
+}
+
 /** 容量输入：不带单位按默认单位解释。 */
 function sizeOf(input: HTMLInputElement, unit: string): number {
   const text = input.value.trim();
@@ -214,6 +221,13 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     baseUrl: textInput({ value: data.site.base_url, mono: true }),
     plazaPublic: data.site.plaza_public,
     plazaColumns: select(GRID_COLUMN_OPTIONS, String(data.site.plaza_grid_columns ?? 3)),
+    plazaAutoRefresh: textInput({
+      value: String(data.site.plaza_auto_refresh_seconds ?? 30),
+      type: "number",
+      mono: true,
+      min: "0",
+      max: "3600",
+    }),
     recycleRetention: textInput({
       value: String(data.site.recycle_retention_days ?? 30),
       type: "number",
@@ -394,6 +408,11 @@ function siteCard(draft: SettingsDraft, data: AdminSettings): HTMLElement {
       "广场每行列数",
       draft.plazaColumns,
       "决定广场预览图的大小：列数越少，单张图越大。窄屏（手机）会自动少放几列，不受这里影响。",
+    ),
+    field(
+      "广场自动刷新间隔",
+      unitInput(draft.plazaAutoRefresh, "秒"),
+      "自动漫游每隔多少秒换一批公开图片。填 0 关闭；最短 5 秒，最长 3600 秒。预览浮层打开或标签页隐藏时暂停。",
     ),
     field(
       "回收站保留天数",
@@ -1281,6 +1300,7 @@ async function save(
       base_url: draft.baseUrl.value.trim().replace(/\/+$/, ""),
       plaza_public: draft.plazaPublic,
       plaza_grid_columns: Number(draft.plazaColumns.value) || 3,
+      plaza_auto_refresh_seconds: autoRefreshSeconds(draft.plazaAutoRefresh),
       recycle_retention_days: Math.min(365, Math.max(0, intOf(draft.recycleRetention))),
       require_login_to_upload: draft.requireLogin,
       register_enabled: draft.registerEnabled,

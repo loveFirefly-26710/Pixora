@@ -21,7 +21,9 @@ use axum::Json;
 use pixora_core::admin::Disposition;
 use pixora_core::audit::actions;
 use pixora_core::quota::QuotaInput;
-use pixora_core::settings::{defaults as settings_defaults, keys, normalize_prefix};
+use pixora_core::settings::{
+    defaults as settings_defaults, keys, normalize_auto_refresh_seconds, normalize_prefix,
+};
 use pixora_core::stats::BackendView;
 use pixora_core::{AppError, AppState};
 use pixora_repo::model::{now, RateLimitPolicy};
@@ -1791,6 +1793,7 @@ pub async fn settings_get(
                 .unwrap_or(false),
             "email_domains": site.email_domains.to_value(),
             "plaza_grid_columns": site.plaza_grid_columns,
+            "plaza_auto_refresh_seconds": site.plaza_auto_refresh_seconds,
             "recycle_retention_days": state
                 .settings
                 .retention_days()
@@ -1892,7 +1895,7 @@ pub async fn settings_put(
         let site = serde_json::Value::Object(site.clone());
         // 这个值要在下面单独处理：注册开关一动，就得联动自动关闭的覆盖标记
         let register_enabled_value = field_opt_bool(&site, "register_enabled");
-        let writes: [(&str, Option<String>); 8] = [
+        let writes: [(&str, Option<String>); 9] = [
             (keys::SITE_NAME, field_opt_str(&site, "name")),
             (keys::SITE_BASE_URL, field_opt_str(&site, "base_url")),
             (
@@ -1927,6 +1930,11 @@ pub async fn settings_put(
                         )
                         .to_string()
                 }),
+            ),
+            (
+                keys::PLAZA_AUTO_REFRESH_SECONDS,
+                field_opt_i64(&site, "plaza_auto_refresh_seconds")
+                    .map(|value| normalize_auto_refresh_seconds(value).to_string()),
             ),
             (
                 keys::RECYCLE_RETENTION_DAYS,
