@@ -730,8 +730,7 @@ ENTRYPOINT ["/pixora"]
 | `PIXORA_BIND` | `0.0.0.0:8080` | 监听地址 |
 | `PIXORA_BASE_URL` | 自动探测 | 生成直链用的基础地址，反代场景必须显式设置 |
 | `PIXORA_TRUST_PROXY` | `1` | 可信代理层数，用于取真实 IP |
-| `PIXORA_CORS_ORIGINS` | 空 | 放行的前端来源，前后端分开部署时填（见 9.5） |
-| `PIXORA_COOKIE_SAMESITE` | 配了 CORS 就 `none`，否则 `lax` | 会话 Cookie 的跨站策略 |
+| `PIXORA_COOKIE_SAMESITE` | `lax` | 会话 Cookie 的 SameSite：`lax` 或 `strict` |
 | `PIXORA_SECURE_COOKIES` | 按 `BASE_URL` 是否 https | 本地 http 调试时可以显式设 false |
 | `PIXORA_DB_MAX_CONNECTIONS` | SQLite 4 / 其它 10 | 连接池上限 |
 | `PIXORA_ACCEL_PREFIX` | 空 | `X-Accel-Redirect` 前缀，让 Nginx 直接发文件 |
@@ -745,27 +744,13 @@ ENTRYPOINT ["/pixora"]
 
 ### 9.4 首次启动
 
-首次启动跑一个交互式安装向导：填数据库连接、管理员账号、站点域名、邮件 SMTP、默认存储方式。校验通过后写配置、建表、创建管理员，然后锁定安装入口。
+首次启动跑一个交互式安装向导：管理员账号、站点域名、邮件 SMTP、默认存储方式。数据库那一步是连接自检，不是配置；实际的库由 `PIXORA_DB_DRIVER` / `PIXORA_DB_DSN` 在启动时决定，改完环境变量并重启才会切换。校验通过后写配置、建表、创建管理员，然后锁定安装入口。
 
 存储路径不在向导里填，由 `PIXORA_DATA_DIR` 注入。本地直接跑时默认取当前目录下的 `./data`。
 
-### 9.5 前后端分开部署
+### 9.5 自动化
 
-前端产物是一堆静态文件，可以单独发到 Vercel / Cloudflare Pages / EdgeOne Makers；
-后端（那个 Rust 进程）留在容器或虚拟机上。两种接法：
-
-- **边缘反代**：平台把 `/api/*` 与直链转发给后端，浏览器眼里只有一个源，不需要跨域配置；
-- **跨域直连**：前端直接调后端域名，后端用 `PIXORA_CORS_ORIGINS` 放行来源，
-  Cookie 自动切到 `SameSite=None; Secure`，OAuth 授权完按同一份名单跳回前端站点。
-
-前端的接口地址由站点根目录的 `config.js` 决定（构建时可用 `PIXORA_API_BASE` 写入），
-所以同一份产物能指向不同的后端。配置样例在 `deploy/static/`。
-
-### 9.6 自动化
-
-`.github/workflows/` 下四个工作流：CI（类型检查 + 测试 + 端到端冒烟 + Windows 编译检查）、
-Docker 镜像（多架构推到 GHCR）、发行版二进制（打 `v*` 标签出 Linux/Windows 可执行文件）、
-前端静态站点（可选，发到上面那几个平台）。推送标签即发版，不需要手工打包。
+`.github/workflows/` 下两个工作流：CI（类型检查 + 测试 + 端到端冒烟 + Windows 编译检查）、发行版与镜像（按版本号发 Release、出 Linux/Windows 可执行文件、推容器镜像）。推送标签即发版，不需要手工打包。
 
 ## 10. 迭代计划
 

@@ -12,7 +12,6 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod app;
 mod assets;
-mod cors;
 mod direct;
 mod http;
 mod routes;
@@ -56,10 +55,6 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let base_url_missing = config.base_url.is_none();
     let web_dir = config.web_dir.clone();
 
-    // 跨域与跨站 Cookie：配了才提，没配时保持沉默（自托管默认不需要）
-    let cors_origins = config.cors_origins.clone();
-    let samesite = config.samesite;
-
     let state = AppState::bootstrap(config).await?;
 
     // 后台任务：API 与 Worker 同进程，不引入 Redis 或独立 worker 容器
@@ -95,19 +90,6 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!(
             "未设置 PIXORA_BASE_URL：直链会按请求推断；反向代理场景下必须显式设置，否则直链地址是错的"
         );
-    }
-    if !cors_origins.is_empty() {
-        tracing::info!(
-            origins = %cors_origins.join(", "),
-            samesite = samesite.as_str(),
-            "已放行跨域前端：接口会按来源回 Access-Control-* 头，Cookie 用 SameSite={}",
-            samesite.as_str()
-        );
-        if base_url_missing {
-            tracing::warn!(
-                "配了跨域来源但没配 PIXORA_BASE_URL：直接链与站点资产地址会指向内网，务必补上"
-            );
-        }
     }
     if weak_key {
         tracing::warn!(

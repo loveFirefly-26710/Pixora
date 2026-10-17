@@ -606,7 +606,6 @@ mod tests {
             web_dir: None,
             accel_prefix: None,
             secure_cookies: false,
-            cors_origins: Vec::new(),
             samesite: crate::config::SameSite::Lax,
             dev_return_codes: false,
             log_level: "error".into(),

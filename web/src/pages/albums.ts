@@ -53,7 +53,7 @@ function titleOf(item: ImageItem): string {
   return item.title ?? item.original_name ?? shortHash(item.sha256, item.ext);
 }
 
-/** 下载走 `?download=1`，服务端会带 Content-Disposition；download 属性在跨域时会被浏览器忽略。 */
+/** 下载走 `?download=1`，服务端会带 Content-Disposition，浏览器直接按附件保存。 */
 function downloadUrl(item: ImageItem): string {
   return `${item.url}${item.url.includes("?") ? "&" : "?"}download=1`;
 }

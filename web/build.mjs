@@ -6,7 +6,7 @@
 // 部署时只有一个可执行文件，不需要挂载静态目录。
 
 import { build, context } from "esbuild";
-import { cp, mkdir, rm, readdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,27 +34,10 @@ const entries = [
 ];
 
 /**
- * 运行时配置 `config.js`。
+ * 静态文件：首页、图标与 manifest。
  *
- * 默认写成空对象（前后端同源，相对路径就能用）。构建时给了 `PIXORA_API_BASE`
- * 就写进 `api_base`——想把前端发到 Vercel / Cloudflare Pages / EdgeOne 的
- * 构建流水线里，直接在那里设这个环境变量即可。
- *
- * 产物里也留一份同名的文件，部署之后还能在平台上直接改，不必重新构建。
+ * 前端只跟后端同源部署，接口走相对路径。
  */
-async function writeRuntimeConfig() {
-  const apiBase = (process.env.PIXORA_API_BASE ?? "").trim().replace(/\/+$/, "");
-  const value = apiBase ? `{"api_base":${JSON.stringify(apiBase)}}` : "{}";
-  const body =
-    `// Pixora 运行时配置。与后端同源时留空；前端托管在别处时把 api_base 改成
-` +
-    `// 后端地址（例如 https://img-api.example.com），保存后刷新页面即生效。
-` +
-    `window.__PIXORA__ = ${value};
-`;
-  await writeFile(path.join(outdir, "config.js"), body, "utf8");
-}
-
 async function copyStatic() {
   await mkdir(outdir, { recursive: true });
   await cp(path.join(root, "src/index.html"), path.join(outdir, "index.html"));
@@ -62,7 +45,6 @@ async function copyStatic() {
     const from = path.join(root, "src", asset);
     if (existsSync(from)) await cp(from, path.join(outdir, asset));
   }
-  await writeRuntimeConfig();
 }
 
 async function run() {

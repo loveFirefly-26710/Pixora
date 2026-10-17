@@ -42,9 +42,7 @@ RUN cd web && npm ci
 
 # 再拷源码（前端源码变化不影响依赖层的缓存）
 COPY web ./web
-# 想把这份镜像里的前端指向别的后端时，构建时给这个参数（默认同源）
-ARG PIXORA_API_BASE=""
-RUN cd web && PIXORA_API_BASE="$PIXORA_API_BASE" npm run build
+RUN cd web && npm run build
 
 RUN cargo build --release --target "$(cat /tmp/musl-target)"
 

@@ -6,8 +6,6 @@
  * 失败统一抛 `ApiError`（带 code / message / detail / status）。
  */
 
-import { CREDENTIALS, apiUrl } from "./config";
-
 export type ApiErrorCode =
   | "BAD_REQUEST"
   | "UNAUTHORIZED"
@@ -94,8 +92,11 @@ export class ApiError extends Error {
 
 const PREFIX = "/api/v1";
 
-/** 接口前缀。跨域部署时前面会带上 `config.js` 里配的后端地址。 */
-const API_ROOT = apiUrl(PREFIX);
+/** 同源部署，Cookie 只发给本站。 */
+const CREDENTIALS: RequestCredentials = "same-origin";
+
+/** 接口前缀；同源直接用相对路径。 */
+const API_ROOT = PREFIX;
 
 /** CSRF 令牌存在内存里，并用一个非 HttpOnly Cookie 备份，刷新后能还原。 */
 let csrfToken: string | null = null;
@@ -323,7 +324,7 @@ async function refreshCsrfToken(): Promise<void> {
   const cookie = readCookie("pixora_csrf");
   if (cookie) setCsrfToken(cookie);
   try {
-    const response = await fetch(apiUrl(`${PREFIX}/me`), { credentials: CREDENTIALS });
+    const response = await fetch(`${PREFIX}/me`, { credentials: CREDENTIALS });
     const payload = await response.json().catch(() => null);
     absorbCsrf(payload?.data);
   } catch {
