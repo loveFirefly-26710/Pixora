@@ -22,7 +22,8 @@ import { loginMethodsCard } from "./login-methods-card";
 import type { PageContext } from "../core/router";
 import { toastError, toastOk } from "../core/toast";
 import { currentUser, loadMe, loadSite } from "../core/state";
-import { BUILTIN_AVATAR, refreshNav } from "../ui/shell";
+import { BUILTIN_AVATAR } from "../ui/brand";
+import { refreshNav } from "../ui/shell";
 import type { AdminSettings, RateLimitAdmin } from "../core/types";
 import {
   apiRateCard,
@@ -905,7 +906,7 @@ function mailCard(draft: SettingsDraft): HTMLElement {
  * 默认头像：没设过头像的账号（含新注册的）都用它。
  *
  * 与背景图同一条路：可以填地址，也可以直接上传（存进库、带版本号）。
- * 留空就是内置那张轮廓头像——所以这一栏空着也是「有效设置」，不是没配置。
+ * 留空就是内置的萤火翼标头像——所以这一栏空着也是「有效设置」，不是没配置。
  * 这一栏自带保存按钮：换了头像要立刻看到效果，不必回页面底部点「保存设置」。
  */
 function defaultAvatarCard(reload: () => void, draft: SettingsDraft, data: AdminSettings): HTMLElement {
@@ -941,7 +942,7 @@ function defaultAvatarCard(reload: () => void, draft: SettingsDraft, data: Admin
         method: "PUT",
         json: { appearance: { default_avatar: value || null } },
       });
-      toastOk(value ? "默认头像地址已生效" : "已清空，改用内置那张轮廓头像");
+      toastOk(value ? "默认头像地址已生效" : "已清空，改用内置的萤火翼标头像");
       await reloadSiteIdentity();
       reload();
     } catch (err) {
@@ -957,7 +958,7 @@ function defaultAvatarCard(reload: () => void, draft: SettingsDraft, data: Admin
   removeBtn.addEventListener("click", async () => {
     const ok = await confirmDialog({
       title: "移除默认头像",
-      message: "清掉之后，没设过头像的账号显示内置那张轮廓头像；账号自己设过的头像不受影响。",
+      message: "清掉之后，没设过头像的账号显示内置的萤火翼标头像；账号自己设过的头像不受影响。",
       confirmText: "移除",
       danger: true,
     });
@@ -980,7 +981,7 @@ function defaultAvatarCard(reload: () => void, draft: SettingsDraft, data: Admin
       field(
         "默认头像地址",
         draft.defaultAvatar,
-        "没设过头像的账号（含新注册的）都用它；留空就是内置那张轮廓头像。也可以直接上传一张。",
+        "没设过头像的账号（含新注册的）都用它；留空就是内置的萤火翼标头像。也可以直接上传一张。",
       ),
       h("div", { style: { flex: "0 0 76px", paddingBottom: "13px" } }, preview),
       h(

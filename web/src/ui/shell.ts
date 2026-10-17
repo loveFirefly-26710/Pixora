@@ -16,7 +16,7 @@ import { request } from "../core/api";
 import { absUrl } from "../core/config";
 import { toast, toastError } from "../core/toast";
 import { currentTheme, toggleTheme } from "../core/theme";
-import { brandLockup, MOON_ICON, SUN_ICON } from "./brand";
+import { BUILTIN_AVATAR, brandLockup, MOON_ICON, SUN_ICON } from "./brand";
 
 export interface NavItem {
   path: string;
@@ -234,7 +234,7 @@ function userMenu(user: NonNullable<ReturnType<typeof getState>["user"]>): HTMLE
 }
 
 /**
- * 头像内容：自己设过就用那张，没设过用站点默认头像，都没有才回落到邮箱首字母。
+ * 头像内容：自己设过就用那张，没设过用站点默认头像，都没配就用内置翼标。
  *
  * 上传的图是站内相对路径（或本站资产的带版本地址），外链是完整地址，
  * 两种情况 `src` 都能直接用。
@@ -244,36 +244,29 @@ function userMenu(user: NonNullable<ReturnType<typeof getState>["user"]>): HTMLE
  */
 const warnedAvatars = new Set<string>();
 
-/** 首字母方块：现在只剩「站点默认头像也挂了」这一档会用到。 */
-function avatarLetterNode(size: "md" | "sm"): HTMLElement {
-  const user = getState().user;
-  return h("span", {
-    class: size === "sm" ? "sm" : "",
-    text: (user?.email[0] ?? "U").toUpperCase(),
-  });
+/** 站点没配默认头像、或配的地址加载失败时，落回这张随包发布的图。 */
+function builtinAvatarNode(size: "md" | "sm"): HTMLElement {
+  return h("img.avatar-img", { class: size === "sm" ? "sm" : "", src: BUILTIN_AVATAR, alt: "" });
 }
 
 /**
- * 头像加载失败时的落点：**默认头像**，而不是首字母。
+ * 头像加载失败时的落点：**默认头像**。
  *
- * 顺序是「站点默认 → 内置那张」。内置那张是随前端打包的 data URI，不会再失败，
- * 所以首字母几乎走不到——它只留给「站点把默认头像配成了一个坏地址」这种情形。
+ * 顺序是「站点默认 → 内置翼标」。内置那张是随前端打包的 data URI，不会再失败，
+ * 所以这里不需要再退到邮箱首字母。
  */
 function avatarFallbackNode(size: "md" | "sm"): HTMLElement {
   // 站点默认头像可能是后端上传的那张（站内相对路径），同源直接用
   const site = absUrl(getState().site?.default_avatar).trim();
-  // 站点没配默认头像就用内置那张：它是个 data URI，不会再失败
-  if (!site) {
-    return h("img.avatar-img", { class: size === "sm" ? "sm" : "", src: BUILTIN_AVATAR, alt: "" });
-  }
+  if (!site) return builtinAvatarNode(size);
   return h("img.avatar-img", {
     class: size === "sm" ? "sm" : "",
     src: site,
     alt: "",
     on: {
-      // 站点把默认头像也配成了坏地址：这里没有再退的余地，用首字母收尾
+      // 站点把默认头像也配成了坏地址：改用内置翼标
       error: (event: Event) => {
-        (event.target as HTMLImageElement).replaceWith(avatarLetterNode(size));
+        (event.target as HTMLImageElement).replaceWith(builtinAvatarNode(size));
       },
     },
   });
@@ -281,46 +274,27 @@ function avatarFallbackNode(size: "md" | "sm"): HTMLElement {
 
 export function avatarNode(size: "md" | "sm"): HTMLElement {
   const user = getState().user;
-  const url = user ? avatarUrl(user) : "";
-  if (user && url) {
-    const node = h("img.avatar-img", {
-      class: size === "sm" ? "sm" : "",
-      src: url,
-      alt: "",
-      // 图挂了（外链失效、路径过期、对方不允许外链）时别留一个破图标：
-      // 换成默认头像，并提示一次「是哪儿出了问题」。用 `on: {}` 挂监听——
-      // 写成普通属性会被 setAttribute 成一段字符串
-      on: {
-        error: (event: Event) => {
-          const img = event.target as HTMLImageElement;
-          // 换成默认头像（它自己再挂的话由 avatarFallbackNode 兜到首字母）
-          img.replaceWith(avatarFallbackNode(size));
-          if (!warnedAvatars.has(url)) {
-            warnedAvatars.add(url);
-            toast("头像加载失败，已改用默认头像");
-          }
-        },
+  const url = avatarUrl(user);
+  // 图挂了（外链失效、路径过期、对方不允许外链）时别留一个破图标：
+  // 换成默认头像，并提示一次「是哪儿出了问题」。用 `on: {}` 挂监听——
+  // 写成普通属性会被 setAttribute 成一段字符串
+  return h("img.avatar-img", {
+    class: size === "sm" ? "sm" : "",
+    src: url,
+    alt: "",
+    on: {
+      error: (event: Event) => {
+        const img = event.target as HTMLImageElement;
+        // 换成默认头像；站点默认那张也挂的话，它自己的监听会再换成内置翼标
+        img.replaceWith(avatarFallbackNode(size));
+        if (!warnedAvatars.has(url)) {
+          warnedAvatars.add(url);
+          toast("头像加载失败，已改用默认头像");
+        }
       },
-    });
-    return node;
-  }
-  return avatarLetterNode(size);
+    },
+  });
 }
-
-/**
- * 内置默认头像：一张随前端一起打包的 SVG（灰底 + 头像轮廓）。
- *
- * 以前没头像就回落到「邮箱首字母方块」——能用，但一排字母块看着像界面没做完。
- * 有了它，**什么都没配的站点也有默认头像**：账号自己的 → 站点默认（后台可换）
- * → 内置这张。首字母只剩「头像图挂了」时的最后一档。
- */
-const DEFAULT_AVATAR_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
-  '<rect width="64" height="64" fill="#0b201f"/>' +
-  '<circle cx="32" cy="25" r="11" fill="#4b7a70"/>' +
-  '<path d="M10 62c0-13 10-20 22-20s22 7 22 20z" fill="#4b7a70"/>' +
-  "</svg>";
-export const BUILTIN_AVATAR = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(DEFAULT_AVATAR_SVG)}`;
 
 /**
  * 一个账号最终显示的头像地址：自己的 → 站点默认（后端下发）→ 内置的那张。
