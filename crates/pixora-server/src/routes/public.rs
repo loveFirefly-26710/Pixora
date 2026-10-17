@@ -14,14 +14,14 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use pixora_core::AppState;
 use pixora_core::AppError;
-use pixora_repo::repo::images::ImageFilter;
+use pixora_core::AppState;
 use pixora_repo::model::TermsVersion;
+use pixora_repo::repo::images::ImageFilter;
 
 use crate::http::{
-    error_response, finish, finish_page, parse_i64, parse_str,
-    request_context, rfc3339, Authenticated,
+    error_response, finish, finish_page, parse_i64, parse_str, request_context, rfc3339,
+    Authenticated,
 };
 
 use super::{bad_request, field_i64, PeerAddr};
@@ -38,7 +38,8 @@ pub async fn site(
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
     // 未登录是正常路径，不是错误；只有「带着坏凭据」才报错
-    let auth = match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await {
+    let auth = match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await
+    {
         Ok(auth) => auth,
         Err(err) => return crate::http::error_response(err),
     };
@@ -50,7 +51,9 @@ pub async fn site(
         _ => None,
     };
     let csrf_cookie = match (&auth, &guest_limits) {
-        (None, Some(_)) if crate::http::cookie_value(&headers, crate::http::CSRF_COOKIE).is_none() => {
+        (None, Some(_))
+            if crate::http::cookie_value(&headers, crate::http::CSRF_COOKIE).is_none() =>
+        {
             pixora_crypto::token::new_csrf_token()
                 .ok()
                 .map(|token| crate::http::csrf_cookie(&state, &token))
@@ -58,11 +61,7 @@ pub async fn site(
         _ => None,
     };
 
-    let site = match state
-        .settings
-        .site(state.config.base_url.as_deref())
-        .await
-    {
+    let site = match state.settings.site(state.config.base_url.as_deref()).await {
         Ok(site) => site,
         Err(err) => return crate::http::error_response(err),
     };
@@ -123,7 +122,7 @@ pub async fn site(
         "thumb_server_fallback": upload.thumb_server_fallback,
         "appeal_email": mail.appeal_email,
         "background": background,
-        // 站点默认头像：账号自己没设头像时前端回落到它，再没有就回落到首字母方块
+        // 站点默认头像：账号自己没设头像时前端回落到它，再没有就回落到内置翼标
         "default_avatar": default_avatar,
         // 本站支持哪些登录方式：登录页/注册页照着它渲染按钮，
         // 没启用的（或凭据没配全的）不出现——摆一个点了报错的按钮最糟
@@ -151,10 +150,7 @@ pub async fn site(
 
     // 上面那份 body 是 finish() 拼好的，这里只需要再挂一个 Set-Cookie
     match csrf_cookie {
-        Some(cookie) => crate::http::with_cookies(
-            response,
-            crate::http::cookie_headers(cookie),
-        ),
+        Some(cookie) => crate::http::with_cookies(response, crate::http::cookie_headers(cookie)),
         None => response,
     }
 }
@@ -205,15 +201,12 @@ pub async fn plaza(
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await {
+    let auth = match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await
+    {
         Ok(auth) => auth,
         Err(err) => return crate::http::error_response(err),
     };
-    let site = match state
-        .settings
-        .site(state.config.base_url.as_deref())
-        .await
-    {
+    let site = match state.settings.site(state.config.base_url.as_deref()).await {
         Ok(site) => site,
         Err(err) => return crate::http::error_response(err),
     };
@@ -240,7 +233,7 @@ pub async fn plaza(
 /// `GET /api/v1/site/avatar` — 公开。站点默认头像本体（上传进库的那张）。
 ///
 /// 与背景图同一条路：地址里带 `?v=<更新时间>`，可以放心长缓存。没上传过时
-/// 返回 404，前端回落到首字母方块。
+/// 返回 404，前端回落到内置翼标头像。
 pub async fn site_avatar(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     serve_site_asset(
         &state,
@@ -275,7 +268,9 @@ async fn serve_site_asset(
     {
         let mut response = axum::http::StatusCode::NOT_MODIFIED.into_response();
         if let Ok(value) = axum::http::HeaderValue::from_str(&etag) {
-            response.headers_mut().insert(axum::http::header::ETAG, value);
+            response
+                .headers_mut()
+                .insert(axum::http::header::ETAG, value);
         }
         return response;
     }
@@ -285,10 +280,14 @@ async fn serve_site_asset(
         .unwrap_or("application/octet-stream");
     let mut response = (axum::http::StatusCode::OK, bytes).into_response();
     if let Ok(value) = axum::http::HeaderValue::from_str(mime) {
-        response.headers_mut().insert(axum::http::header::CONTENT_TYPE, value);
+        response
+            .headers_mut()
+            .insert(axum::http::header::CONTENT_TYPE, value);
     }
     if let Ok(value) = axum::http::HeaderValue::from_str(&etag) {
-        response.headers_mut().insert(axum::http::header::ETAG, value);
+        response
+            .headers_mut()
+            .insert(axum::http::header::ETAG, value);
     }
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
@@ -298,6 +297,17 @@ async fn serve_site_asset(
         axum::http::header::X_CONTENT_TYPE_OPTIONS,
         axum::http::HeaderValue::from_static("nosniff"),
     );
+    if mime == "image/svg+xml" {
+        // 站点资产上传时已经净化过，这里再补一层沙箱：万一净化有漏网，
+        // 直接打开 `/site/background` 或 `/site/avatar` 也不会执行脚本。
+        response.headers_mut().insert(
+            "Content-Security-Policy",
+            axum::http::HeaderValue::from_static(
+                "sandbox; default-src 'none'; script-src 'none'; object-src 'none'; \
+                 img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'",
+            ),
+        );
+    }
     response
 }
 
@@ -305,10 +315,7 @@ async fn serve_site_asset(
 ///
 /// 地址里带 `?v=<更新时间>`，所以可以放心长缓存：换图之后 URL 就变了。
 /// 没有上传过背景图时返回 404，前端会退回无背景图的样子。
-pub async fn site_background(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn site_background(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     serve_site_asset(
         &state,
         &headers,
@@ -325,7 +332,8 @@ pub async fn terms(
     peer: PeerAddr,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await {
+    let auth = match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await
+    {
         Ok(auth) => auth,
         Err(err) => return crate::http::error_response(err),
     };
@@ -501,15 +509,29 @@ pub async fn random_image(
         Err(err) => return error_response(err),
     };
     if !site.plaza_public {
-        if let Err(err) = crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await {
-            return error_response(err);
+        match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await {
+            // 未登录时这里是 Ok(None)，不是 Err；只看 Err 会让关闭广场后
+            // `/random` 继续对外发图，等于给开关留了个后门。
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return error_response(AppError::Forbidden(
+                    "站点已关闭广场公开浏览，登录后可以使用随机图".into(),
+                ))
+            }
+            Err(err) => return error_response(err),
         }
     }
 
     let filter = ImageFilter {
         public_only: true,
-        tag: params.get("tag").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
-        query: params.get("q").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+        tag: params
+            .get("tag")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        query: params
+            .get("q")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
         owner_id: match params.get("uid") {
             Some(uid) => match state.repo.find_user_by_uid(uid.trim()).await {
                 Ok(Some(user)) => Some(user.id),
@@ -546,11 +568,7 @@ pub async fn random_image(
     // 302 而不是 301：随机结果不该被永久缓存下来。
     // 不用 `Redirect::temporary`——它是 307，虽然这里只有 GET、语义上都对，
     // 但契约文档与客户端都按「302 跳转」理解，让实现和文档一致更省事。
-    let mut response = (
-        StatusCode::FOUND,
-        [(header::LOCATION, url)],
-    )
-        .into_response();
+    let mut response = (StatusCode::FOUND, [(header::LOCATION, url)]).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),

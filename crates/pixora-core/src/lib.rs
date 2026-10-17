@@ -4,8 +4,8 @@
 //! 邮件发送器都在这里。刻意不做全局单例：显式传 `Arc<AppState>`，
 //! 测试里可以随时装一个只跑 SQLite + 本地目录的实例出来。
 
-pub mod admin;
 pub mod account_log;
+pub mod admin;
 pub mod albums;
 pub mod antispam;
 pub mod audit;
@@ -71,6 +71,15 @@ pub struct AppState {
     /// 系统 DNS 解析器，惰性建一份全局共用（自带 TTL 缓存）。发信前查收件
     /// 域名的 MX 记录用它，见 `antispam`。
     resolver: tokio::sync::RwLock<Option<hickory_resolver::TokioResolver>>,
+    /// 口令哈希/校验的并发闸门。
+    ///
+    /// Argon2id 每次要 19 MiB 内存与一段 CPU；不限制并发时，一波登录就能
+    /// 把容器内存和 tokio worker 一起拖住。哈希本身放到 `spawn_blocking`，
+    /// 这里只控制同时跑几份。
+    password_slots: tokio::sync::Semaphore,
+    /// 内容哈希 → 分片锁。上传去重与 GC 删除同一份实体时串行化，
+    /// 避免「GC 刚把文件删了，上传又给旧行加了一条引用」。
+    blob_locks: Vec<tokio::sync::Mutex<()>>,
     pub started_at: DateTime<Utc>,
     pub db_driver: DbDriver,
 }
@@ -106,7 +115,11 @@ impl AppState {
         }
 
         let limits = Arc::new(RateLimits::new(repo.clone()));
-        let ip_guard = Arc::new(IpGuard::new(repo.clone(), settings.clone()));
+        let ip_guard = Arc::new(IpGuard::new(
+            repo.clone(),
+            settings.clone(),
+            config.trust_proxy,
+        ));
 
         let db_driver = config.db_driver;
         let state = Arc::new(Self {
@@ -121,6 +134,8 @@ impl AppState {
             gc_notify: tokio::sync::Notify::new(),
             http,
             resolver: tokio::sync::RwLock::new(None),
+            password_slots: tokio::sync::Semaphore::new(2),
+            blob_locks: (0..256).map(|_| tokio::sync::Mutex::new(())).collect(),
             started_at: Utc::now(),
             db_driver,
         });
@@ -128,10 +143,13 @@ impl AppState {
         state.reload_mailer().await;
         // 灌一次内置的一次性邮箱域名清单（幂等）。不灌的话「反临时邮箱」的
         // 第一层拦截是空的，只剩 MX 校验在干活。
-        if let Err(err) = state.seed_disposable_domains(&crate::antispam::BUILTIN_DOMAINS
-            .iter()
-            .map(|item| item.to_string())
-            .collect::<Vec<_>>())
+        if let Err(err) = state
+            .seed_disposable_domains(
+                &crate::antispam::BUILTIN_DOMAINS
+                    .iter()
+                    .map(|item| item.to_string())
+                    .collect::<Vec<_>>(),
+            )
             .await
         {
             tracing::warn!(error = %err, "内置一次性邮箱清单写入失败，反垃圾第一层暂不可用");
@@ -190,9 +208,7 @@ impl AppState {
 
         if mail.smtp_host.trim().is_empty() || mail.from_email.trim().is_empty() {
             *self.mailer.write().expect("邮件器锁不该中毒") = None;
-            *self.problem_mut() = Some(
-                "SMTP 服务器与发信邮箱都要填，邮件功能才会启用".to_string(),
-            );
+            *self.problem_mut() = Some("SMTP 服务器与发信邮箱都要填，邮件功能才会启用".to_string());
             return;
         }
 
@@ -234,9 +250,7 @@ impl AppState {
     }
 
     fn problem_mut(&self) -> std::sync::RwLockWriteGuard<'_, Option<String>> {
-        self.mailer_problem
-            .write()
-            .expect("邮件器原因锁不该中毒")
+        self.mailer_problem.write().expect("邮件器原因锁不该中毒")
     }
 
     /// 站点地址。设置里有就用设置的，其次环境变量，最后从监听地址推断。
@@ -278,6 +292,46 @@ impl AppState {
             return Ok(());
         }
         Err(AppError::forbidden(format!("{what}不属于当前账号")))
+    }
+
+    /// 按内容哈希取一把分片锁。上传的「查重 → 落盘 → 建引用」与 GC 的
+    /// 「复查 → 删文件 → 删行」必须在同一把锁里，否则新引用可能挂到
+    /// 一个刚被删掉的文件上。
+    pub fn blob_lock(&self, sha256: &str) -> &tokio::sync::Mutex<()> {
+        let index =
+            sha256.as_bytes().first().copied().unwrap_or(0) as usize % self.blob_locks.len();
+        &self.blob_locks[index]
+    }
+
+    /// 口令哈希。放到阻塞线程池并限制并发，避免 Argon2 把 async worker 占住。
+    pub async fn hash_password(&self, plain: &str) -> Result<String> {
+        let _permit = self
+            .password_slots
+            .acquire()
+            .await
+            .map_err(|_| AppError::internal("口令处理队列已关闭"))?;
+        let plain = plain.to_string();
+        tokio::task::spawn_blocking(move || pixora_crypto::password::hash_password(&plain))
+            .await
+            .map_err(|err| AppError::internal(format!("口令哈希任务失败：{err}")))?
+            .map_err(AppError::from)
+    }
+
+    /// 口令校验。口径与 [`Self::hash_password`] 相同。
+    pub async fn verify_password(&self, plain: &str, stored: &str) -> Result<bool> {
+        let _permit = self
+            .password_slots
+            .acquire()
+            .await
+            .map_err(|_| AppError::internal("口令处理队列已关闭"))?;
+        let plain = plain.to_string();
+        let stored = stored.to_string();
+        tokio::task::spawn_blocking(move || {
+            pixora_crypto::password::verify_password(&plain, &stored)
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("口令校验任务失败：{err}")))?
+        .map_err(AppError::from)
     }
 
     pub async fn shutdown(&self) {

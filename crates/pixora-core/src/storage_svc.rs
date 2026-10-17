@@ -81,12 +81,7 @@ pub struct StorageService {
 }
 
 impl StorageService {
-    pub fn new(
-        repo: Repo,
-        settings: Settings,
-        config: Config,
-        http: Arc<reqwest::Client>,
-    ) -> Self {
+    pub fn new(repo: Repo, settings: Settings, config: Config, http: Arc<reqwest::Client>) -> Self {
         Self {
             repo,
             settings,
@@ -224,18 +219,20 @@ impl StorageService {
             driver_names::GITHUB => {
                 let parsed: pixora_storage::github::GitHubConfig = serde_json::from_value(config)
                     .map_err(|err| {
-                        AppError::bad_request(format!("GitHub 后端配置不完整：{err}"))
-                    })?;
+                    AppError::bad_request(format!("GitHub 后端配置不完整：{err}"))
+                })?;
                 Arc::new(GitHubDriver::new(parsed, self.http.clone()).with_instance(instance))
             }
             driver_names::WEBDAV => {
-                let parsed: WebDavConfig = serde_json::from_value(config)
-                    .map_err(|err| AppError::bad_request(format!("WebDAV 后端配置不完整：{err}")))?;
+                let parsed: WebDavConfig = serde_json::from_value(config).map_err(|err| {
+                    AppError::bad_request(format!("WebDAV 后端配置不完整：{err}"))
+                })?;
                 Arc::new(WebDavDriver::new(parsed, self.http.clone()).with_instance(instance))
             }
             driver_names::TELEGRAM => {
-                let parsed: TelegramConfig = serde_json::from_value(config)
-                    .map_err(|err| AppError::bad_request(format!("Telegram 后端配置不完整：{err}")))?;
+                let parsed: TelegramConfig = serde_json::from_value(config).map_err(|err| {
+                    AppError::bad_request(format!("Telegram 后端配置不完整：{err}"))
+                })?;
                 Arc::new(TelegramDriver::new(parsed)?.with_instance(instance))
             }
             driver_names::S3 => {
@@ -285,9 +282,11 @@ impl StorageService {
         driver_name: &str,
         backend_id: Option<i64>,
     ) -> Result<Arc<dyn StorageDriver>> {
-        self.registry.resolve(driver_name, backend_id).ok_or_else(|| {
-            AppError::StorageUnavailable(format!("存储后端 {driver_name} 未装配或已删除"))
-        })
+        self.registry
+            .resolve(driver_name, backend_id)
+            .ok_or_else(|| {
+                AppError::StorageUnavailable(format!("存储后端 {driver_name} 未装配或已删除"))
+            })
     }
 
     /// 写入对象，远端失败自动回退本地。
@@ -321,37 +320,43 @@ impl StorageService {
 
         // 远端优先：失败且可重试就落本地
         let driver_name = default.name();
-        match read_fully(reader, size).await {
-            Ok(bytes) => match default.put(key, Box::new(std::io::Cursor::new(bytes.clone())), size, mime).await {
-                Ok(stored) => Ok((
+        let bytes: Arc<[u8]> = Arc::from(read_fully(reader, size).await?);
+        match default
+            .put(
+                key,
+                Box::new(std::io::Cursor::new(bytes.clone())),
+                size,
+                mime,
+            )
+            .await
+        {
+            Ok(stored) => Ok((
+                ResolvedDriver {
+                    driver: default,
+                    key: stored.key,
+                },
+                None,
+            )),
+            Err(err) if err.is_retryable() => {
+                tracing::warn!(driver = driver_name, error = %err, "远端存储失败，回退本地");
+                let local = self.local_driver()?;
+                let stored = local
+                    .put(key, Box::new(std::io::Cursor::new(bytes)), size, mime)
+                    .await
+                    .map_err(AppError::from)?;
+                Ok((
                     ResolvedDriver {
-                        driver: default,
+                        driver: local,
                         key: stored.key,
                     },
-                    None,
-                )),
-                Err(err) if err.is_retryable() => {
-                    tracing::warn!(driver = driver_name, error = %err, "远端存储失败，回退本地");
-                    let local = self.local_driver()?;
-                    let stored = local
-                        .put(key, Box::new(std::io::Cursor::new(bytes)), size, mime)
-                        .await
-                        .map_err(AppError::from)?;
-                    Ok((
-                        ResolvedDriver {
-                            driver: local,
-                            key: stored.key,
-                        },
-                        Some(format!(
-                            "远端后端 {} 暂时不可用（{}），这张图已存到服务器本地",
-                            driver_name,
-                            brief(&err.to_string())
-                        )),
-                    ))
-                }
-                Err(err) => Err(AppError::from(err)),
-            },
-            Err(err) => Err(err),
+                    Some(format!(
+                        "远端后端 {} 暂时不可用（{}），这张图已存到服务器本地",
+                        driver_name,
+                        brief(&err.to_string())
+                    )),
+                ))
+            }
+            Err(err) => Err(AppError::from(err)),
         }
     }
 
@@ -473,7 +478,12 @@ impl StorageService {
     }
 
     /// 本地文件系统路径。有它就能让 Caddy 直接发文件，进程不碰数据。
-    pub async fn local_path(&self, driver_name: &str, backend_id: Option<i64>, key: &str) -> Option<PathBuf> {
+    pub async fn local_path(
+        &self,
+        driver_name: &str,
+        backend_id: Option<i64>,
+        key: &str,
+    ) -> Option<PathBuf> {
         let driver = self.resolve(driver_name, backend_id).ok()?;
         driver.local_path(key)
     }
@@ -668,6 +678,12 @@ async fn read_fully(
         .read_to_end(&mut buffer)
         .await
         .map_err(|err| AppError::internal(format!("读取上传流失败：{err}")))?;
+    if buffer.len() as u64 != expected {
+        return Err(AppError::internal(format!(
+            "读取上传流时长度不一致：声明 {expected} 字节，实际 {} 字节",
+            buffer.len()
+        )));
+    }
     Ok(buffer)
 }
 

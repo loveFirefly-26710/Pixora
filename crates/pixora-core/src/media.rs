@@ -52,7 +52,8 @@ const fn rule(ext: &'static str, mime: &'static str, needs_wasm_thumb: bool) -> 
 /// 默认开启的扩展名（与设计稿的清单一致：jpg/png/gif/webp/avif/heic/tiff/bmp/svg 默认开，
 /// jxl 与 ico 默认关）。
 pub const DEFAULT_ENABLED: &[&str] = &[
-    "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif", "tiff", "tif", "bmp", "apng", "svg",
+    "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif", "tiff", "tif", "bmp", "apng",
+    "svg",
 ];
 
 pub fn rule_for_ext(ext: &str) -> Option<&'static FormatRule> {
@@ -61,7 +62,9 @@ pub fn rule_for_ext(ext: &str) -> Option<&'static FormatRule> {
 }
 
 pub fn mime_for_ext(ext: &str) -> &'static str {
-    rule_for_ext(ext).map(|rule| rule.mime).unwrap_or("application/octet-stream")
+    rule_for_ext(ext)
+        .map(|rule| rule.mime)
+        .unwrap_or("application/octet-stream")
 }
 
 /// 归一化扩展名：小写、去掉前导点、`jpeg`/`jpg` 视为同一类。
@@ -118,10 +121,7 @@ pub fn sniff(bytes: &[u8]) -> Option<Sniffed> {
     // PNG: 89 50 4E 47 0D 0A 1A 0A
     if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
         // APNG 与 PNG 的区别在 acTL 块，这里只影响展示名
-        let is_apng = bytes
-            .windows(4)
-            .take(64)
-            .any(|window| window == b"acTL");
+        let is_apng = bytes.windows(4).take(64).any(|window| window == b"acTL");
         return Some(if is_apng {
             Sniffed {
                 mime: "image/apng",
@@ -243,7 +243,10 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
             continue;
         }
         if rest_trimmed.starts_with("<?") {
-            rest = rest_trimmed.split_once("?>").map(|(_, tail)| tail).unwrap_or("");
+            rest = rest_trimmed
+                .split_once("?>")
+                .map(|(_, tail)| tail)
+                .unwrap_or("");
             continue;
         }
         return rest_trimmed.starts_with("<svg");
@@ -309,10 +312,7 @@ fn gif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < 10 {
         return None;
     }
-    Some((
-        le_u16(&bytes[6..8])? as u32,
-        le_u16(&bytes[8..10])? as u32,
-    ))
+    Some((le_u16(&bytes[6..8])? as u32, le_u16(&bytes[8..10])? as u32))
 }
 
 /// WebP: VP8X / VP8L / VP8 三种块各有各的写法。
@@ -324,7 +324,8 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         b"VP8X" => {
             // 24 位小端，存的是「宽减一」
             let width = 1 + (bytes[24] as u32 | (bytes[25] as u32) << 8 | (bytes[26] as u32) << 16);
-            let height = 1 + (bytes[27] as u32 | (bytes[28] as u32) << 8 | (bytes[29] as u32) << 16);
+            let height =
+                1 + (bytes[27] as u32 | (bytes[28] as u32) << 8 | (bytes[29] as u32) << 16);
             Some((width, height))
         }
         b"VP8L" => {
@@ -337,7 +338,10 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             if bytes.len() < 30 {
                 return None;
             }
-            Some((le_u16(&bytes[26..28])? as u32, le_u16(&bytes[28..30])? as u32))
+            Some((
+                le_u16(&bytes[26..28])? as u32,
+                le_u16(&bytes[28..30])? as u32,
+            ))
         }
         _ => None,
     }
@@ -361,11 +365,19 @@ fn tiff_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     let little_endian = bytes.starts_with(b"II");
     let read_u16 = |offset: usize| -> Option<u16> {
         let raw = le_u16(bytes.get(offset..offset + 2)?)?;
-        Some(if little_endian { raw } else { u16::from_be(raw) })
+        Some(if little_endian {
+            raw
+        } else {
+            u16::from_be(raw)
+        })
     };
     let read_u32 = |offset: usize| -> Option<u32> {
         let raw = le_u32(bytes.get(offset..offset + 4)?)?;
-        Some(if little_endian { raw } else { u32::from_be(raw) })
+        Some(if little_endian {
+            raw
+        } else {
+            u32::from_be(raw)
+        })
     };
 
     let ifd_offset = read_u32(4)? as usize;
@@ -402,7 +414,11 @@ fn ico_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < entry + 2 {
         return None;
     }
-    let width = if bytes[entry] == 0 { 256 } else { bytes[entry] as u32 };
+    let width = if bytes[entry] == 0 {
+        256
+    } else {
+        bytes[entry] as u32
+    };
     let height = if bytes[entry + 1] == 0 {
         256
     } else {
@@ -444,10 +460,12 @@ fn jxl_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if start + 8 > bytes.len() {
         return None;
     }
-    let height = 1 + (bytes[start] as u32 >> 4) as u32
+    let height = 1
+        + (bytes[start] as u32 >> 4) as u32
         + ((bytes[start + 1] as u32) << 4)
         + ((bytes[start + 2] as u32 & 0x0F) << 12);
-    let width = 1 + ((bytes[start + 2] as u32) >> 4)
+    let width = 1
+        + ((bytes[start + 2] as u32) >> 4)
         + ((bytes[start + 3] as u32) << 4)
         + ((bytes[start + 4] as u32 & 0x0F) << 12);
     Some((width, height))
@@ -513,7 +531,10 @@ fn parse_len(value: &str) -> Option<u32> {
         return None;
     }
     let cleaned = trimmed.strip_suffix("px").unwrap_or(trimmed).trim();
-    cleaned.parse::<f64>().ok().map(|value| value.round() as u32)
+    cleaned
+        .parse::<f64>()
+        .ok()
+        .map(|value| value.round() as u32)
 }
 
 fn be_u16(bytes: &[u8]) -> Option<u16> {
@@ -616,6 +637,7 @@ pub fn sanitize_svg(input: &[u8]) -> Vec<u8> {
             Some(end) => {
                 let tag = rest[..=end].to_string();
                 let name = tag_name(&tag.to_ascii_lowercase()).unwrap_or_default();
+                let local_name = name.rsplit(':').next().unwrap_or(&name);
                 let is_closing = tag.starts_with("</");
 
                 if let Some(cleaned) = filter_svg_tag(&tag) {
@@ -624,12 +646,13 @@ pub fn sanitize_svg(input: &[u8]) -> Vec<u8> {
 
                 // 脚本正文要连同标签一起丢掉：只删标签会留下
                 // `fetch('http://…')` 这样的残句，虽然不再执行，但仍是脏数据。
-                if name == "script" && !is_closing {
-                    rest = skip_until_close(&rest[end + 1..], "script");
+                // 本地名判断让 `<svg:script>` 这种带命名空间前缀的写法也走到这里。
+                if local_name == "script" && !is_closing {
+                    rest = skip_until_close(&rest[end + 1..], local_name);
                     continue;
                 }
-                if name == "style" && !is_closing {
-                    let (body, tail) = split_at_close(&rest[end + 1..], "style");
+                if local_name == "style" && !is_closing {
+                    let (body, tail) = split_at_close(&rest[end + 1..], local_name);
                     output.push_str(&clean_style(&body));
                     rest = tail;
                     continue;
@@ -646,32 +669,41 @@ pub fn sanitize_svg(input: &[u8]) -> Vec<u8> {
     output.into_bytes()
 }
 
+/// 找到指定元素的结束标签，返回 (标签起点, 标签之后)。
+///
+/// 按本地名匹配，`</script>` 与 `</svg:script>` 都算；找不到返回 `None`。
+fn find_close_tag(input: &str, name: &str) -> Option<(usize, usize)> {
+    let lower = input.to_ascii_lowercase();
+    let mut search = 0;
+    while let Some(relative) = lower[search..].find("</") {
+        let start = search + relative;
+        let after = &lower[start + 2..];
+        let name_end = after
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == ':'))
+            .unwrap_or(after.len());
+        let candidate = &after[..name_end];
+        let local = candidate.rsplit(':').next().unwrap_or(candidate);
+        if local.eq_ignore_ascii_case(name) {
+            let end = input[start..].find('>')?;
+            return Some((start, start + end + 1));
+        }
+        search = start + 2;
+    }
+    None
+}
+
 /// 跳到指定元素的结束标签之后，整段内容丢掉。
 fn skip_until_close<'a>(input: &'a str, name: &str) -> &'a str {
-    let needle = format!("</{name}");
-    match input.to_ascii_lowercase().find(&needle) {
-        Some(position) => {
-            // 结束标签本身可能带空格或属性（XML 里不允许，但容错起见）
-            match input[position..].find('>') {
-                Some(end) => &input[position + end + 1..],
-                None => "",
-            }
-        }
+    match find_close_tag(input, name) {
+        Some((_, after)) => &input[after..],
         None => "",
     }
 }
 
 /// 把内容切到结束标签之前，返回 (内容, 结束标签之后)。
 fn split_at_close<'a>(input: &'a str, name: &str) -> (String, &'a str) {
-    let needle = format!("</{name}");
-    match input.to_ascii_lowercase().find(&needle) {
-        Some(position) => {
-            let body = input[..position].to_string();
-            match input[position..].find('>') {
-                Some(end) => (body, &input[position + end + 1..]),
-                None => (body, ""),
-            }
-        }
+    match find_close_tag(input, name) {
+        Some((start, after)) => (input[..start].to_string(), &input[after..]),
         None => (input.to_string(), ""),
     }
 }
@@ -697,7 +729,12 @@ fn clean_style(body: &str) -> String {
 /// 单个标签的过滤规则。返回 `None` 表示整段删除。
 fn filter_svg_tag(tag: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
-    let name = tag_name(&lower)?;
+    // 保留原始大小写：SVG 的 `linearGradient`、`viewBox` 都是大小写敏感的，
+    // 统一转小写会把合法图形弄坏。
+    let name = tag_name(tag)?;
+    let name_lower = name.to_ascii_lowercase();
+    // 带命名空间前缀的 `<svg:script>` 也要按本地名识别，否则换个前缀就绕过。
+    let local_name = name_lower.rsplit(':').next().unwrap_or(&name_lower);
 
     // 这些标签整体删掉：能执行脚本、能加载外部内容、能嵌入外部文档
     const FORBIDDEN: &[&str] = &[
@@ -713,7 +750,10 @@ fn filter_svg_tag(tag: &str) -> Option<String> {
         "set",
         "handler",
     ];
-    if FORBIDDEN.iter().any(|item| item.eq_ignore_ascii_case(&name)) {
+    if FORBIDDEN
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(local_name))
+    {
         return None;
     }
 
@@ -736,7 +776,9 @@ fn filter_svg_tag(tag: &str) -> Option<String> {
         }
         // 外部引用：远程图片、远程字体、远程样式表都不要
         if matches!(attr_lower.as_str(), "href" | "xlink:href" | "src" | "data")
-            && (value_lower.starts_with("http") || value_lower.starts_with("//"))
+            && (value_lower.starts_with("http")
+                || value_lower.starts_with("//")
+                || value_lower.starts_with("data:image/svg"))
         {
             continue;
         }
@@ -750,7 +792,7 @@ fn filter_svg_tag(tag: &str) -> Option<String> {
         }
 
         cleaned.push(' ');
-        cleaned.push_str(&attr_lower);
+        cleaned.push_str(&attr_name);
         if !value.is_empty() {
             cleaned.push_str("=\"");
             cleaned.push_str(&value.replace('"', "&quot;"));
@@ -845,7 +887,9 @@ mod tests {
         let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
         assert_eq!(sniff(&png).unwrap().mime, "image/png");
 
-        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, 0x4A, 0x46, 0x49, 0x46, 0, 1];
+        let jpeg = [
+            0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, 0x4A, 0x46, 0x49, 0x46, 0, 1,
+        ];
         assert_eq!(sniff(&jpeg).unwrap().ext, "jpg");
     }
 
@@ -866,8 +910,18 @@ mod tests {
         heic.extend_from_slice(&[0u8; 8]);
         assert_eq!(sniff(&heic).unwrap().ext, "heic");
 
-        assert_eq!(sniff(b"<?xml version=\"1.0\"?><svg width=\"10\"/>").unwrap().ext, "svg");
-        assert_eq!(sniff(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>").unwrap().mime, "image/svg+xml");
+        assert_eq!(
+            sniff(b"<?xml version=\"1.0\"?><svg width=\"10\"/>")
+                .unwrap()
+                .ext,
+            "svg"
+        );
+        assert_eq!(
+            sniff(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>")
+                .unwrap()
+                .mime,
+            "image/svg+xml"
+        );
     }
 
     #[test]
@@ -900,7 +954,8 @@ mod tests {
 
     #[test]
     fn reads_svg_dimensions_from_width_or_viewbox() {
-        let with_size = br#"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"></svg>"#;
+        let with_size =
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"></svg>"#;
         assert_eq!(dimensions(with_size, "image/svg+xml"), Some((120, 80)));
 
         let with_viewbox = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"></svg>"#;
@@ -930,7 +985,8 @@ mod tests {
             <rect width="10" height="10" onclick="alert(2)" fill="red"/>
             <image href="http://evil.example/x.png"/>
             <a xlink:href="javascript:alert(3)"><text>点我</text></a>
-        </svg>"#.as_bytes();
+        </svg>"#
+            .as_bytes();
         let cleaned = String::from_utf8(sanitize_svg(dirty)).unwrap();
 
         assert!(!cleaned.to_lowercase().contains("<script"));
@@ -949,12 +1005,27 @@ mod tests {
         let dirty = r#"<?xml version="1.0"?>
         <!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
         <!-- <script>alert(1)</script> -->
-        <svg xmlns="http://www.w3.org/2000/svg"><text>&xxe;</text></svg>"#.as_bytes();
+        <svg xmlns="http://www.w3.org/2000/svg"><text>&xxe;</text></svg>"#
+            .as_bytes();
         let cleaned = String::from_utf8(sanitize_svg(dirty)).unwrap();
         assert!(!cleaned.to_lowercase().contains("doctype"));
         assert!(!cleaned.to_lowercase().contains("entity"));
         assert!(!cleaned.to_lowercase().contains("script"));
         assert!(cleaned.contains("<svg"));
+    }
+
+    #[test]
+    fn svg_sanitizing_keeps_case_and_blocks_namespaced_script() {
+        let dirty = r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg">
+            <svg:script>alert(1)</svg:script>
+            <linearGradient id="g"><stop offset="0"/></linearGradient>
+            <rect viewBox="0 0 10 10" width="10" height="10"/>
+        </svg>"#;
+        let cleaned = String::from_utf8(sanitize_svg(dirty.as_bytes())).unwrap();
+        assert!(!cleaned.to_lowercase().contains("<svg:script"));
+        assert!(!cleaned.contains("alert(1)"));
+        assert!(cleaned.contains("linearGradient"), "SVG 标签名大小写要保留");
+        assert!(cleaned.contains("viewBox"), "SVG 属性名大小写要保留");
     }
 
     #[test]

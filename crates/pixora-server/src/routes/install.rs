@@ -20,8 +20,8 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::Json;
-use pixora_core::settings::keys;
 use pixora_core::install::DbInput;
+use pixora_core::settings::keys;
 use pixora_core::{AppError, AppState};
 use pixora_crypto::password;
 use pixora_repo::db::DbDriver;
@@ -31,7 +31,9 @@ use pixora_repo::{Args, PageRequest};
 
 use crate::http::{finish, request_context};
 
-use super::{bad_request, field_opt_bool, field_opt_i64, field_opt_str, field_str, not_found, PeerAddr};
+use super::{
+    bad_request, field_opt_bool, field_opt_i64, field_opt_str, field_str, not_found, PeerAddr,
+};
 
 /// 已安装就不再提供向导接口。
 async fn ensure_not_installed(state: &AppState) -> Result<(), Response> {
@@ -58,12 +60,7 @@ async fn count_tables(state: &AppState) -> i64 {
             "SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_schema = DATABASE()"
         }
     };
-    state
-        .repo
-        .db()
-        .count(sql, Args::new())
-        .await
-        .unwrap_or(0)
+    state.repo.db().count(sql, Args::new()).await.unwrap_or(0)
 }
 
 /// 数据库驱动的对外名字。
@@ -153,7 +150,10 @@ pub async fn install_database(
     let input = DbInput {
         driver: driver_raw.clone(),
         host: field_opt_string(&body, "host").unwrap_or_default(),
-        port: body.get("port").and_then(|value| value.as_i64()).unwrap_or(0),
+        port: body
+            .get("port")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
         database: field_opt_string(&body, "database").unwrap_or_default(),
         username: field_opt_string(&body, "username").unwrap_or_default(),
         password: field_opt_string(&body, "password").unwrap_or_default(),
@@ -228,9 +228,9 @@ pub async fn install_admin(
         return crate::http::error_response(AppError::Conflict("该邮箱已被占用".into()));
     }
 
-    let hash = match password::hash_password(&password_plain) {
+    let hash = match state.hash_password(&password_plain).await {
         Ok(value) => value,
-        Err(err) => return crate::http::error_response(err.into()),
+        Err(err) => return crate::http::error_response(err),
     };
     let (default_quota, _) = match state.settings.quota_values().await {
         Ok(value) => value,
@@ -336,7 +336,11 @@ pub async fn install_site(
         }
     }
     if let Some(plaza_public) = field_opt_bool(&body, "plaza_public") {
-        if let Err(err) = state.settings.set_bool(keys::PLAZA_PUBLIC, plaza_public).await {
+        if let Err(err) = state
+            .settings
+            .set_bool(keys::PLAZA_PUBLIC, plaza_public)
+            .await
+        {
             return crate::http::error_response(err);
         }
     }
@@ -362,7 +366,8 @@ pub async fn install_site(
         }
         // 发信地址没给就沿用 SMTP 用户名（企业邮箱里两者通常一致）；
         // 两个都没有就保持原值，不写一个看起来像地址的默认值进去
-        let from_email = field_opt_str(&smtp, "from_email").or_else(|| field_opt_str(&smtp, "user"));
+        let from_email =
+            field_opt_str(&smtp, "from_email").or_else(|| field_opt_str(&smtp, "user"));
         if let Some(from_email) = from_email {
             if let Err(err) = state.settings.set(keys::MAIL_FROM_EMAIL, &from_email).await {
                 return crate::http::error_response(err);

@@ -50,10 +50,11 @@ pub async fn me_get(
     peer: PeerAddr,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match require_user_allow_pending(&state, &headers, rectx.ip.as_deref(), &method).await {
-        Ok(auth) => auth,
-        Err(resp) => return resp,
-    };
+    let auth =
+        match require_user_allow_pending(&state, &headers, rectx.ip.as_deref(), &method).await {
+            Ok(auth) => auth,
+            Err(resp) => return resp,
+        };
     if let Err(resp) = super::ensure_scope(&auth, "read") {
         return resp;
     }
@@ -121,12 +122,19 @@ pub async fn me_patch(
             Err(err) => return crate::http::error_response(err),
         };
         let previous = auth.user.avatar.clone();
-        if let Err(err) = state.repo.set_user_avatar(auth.user.id, avatar.as_deref()).await {
+        if let Err(err) = state
+            .repo
+            .set_user_avatar(auth.user.id, avatar.as_deref())
+            .await
+        {
             return crate::http::error_response(err.into());
         }
         // 换掉的若是本地上传的那张头像图，连带把它收掉——否则相册里会一直留着一张
         // 用户不记得传过的图（见 AppState::release_avatar_image 的边界说明）
-        if let Some(old) = previous.as_deref().filter(|old| Some(*old) != avatar.as_deref()) {
+        if let Some(old) = previous
+            .as_deref()
+            .filter(|old| Some(*old) != avatar.as_deref())
+        {
             if let Some(image_id) = state.release_avatar_image(&auth.user, old).await {
                 state
                     .audit_detail(
@@ -167,10 +175,11 @@ pub async fn password_change(
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match require_user_allow_pending(&state, &headers, rectx.ip.as_deref(), &method).await {
-        Ok(auth) => auth,
-        Err(resp) => return resp,
-    };
+    let auth =
+        match require_user_allow_pending(&state, &headers, rectx.ip.as_deref(), &method).await {
+            Ok(auth) => auth,
+            Err(resp) => return resp,
+        };
     if let Err(resp) = super::ensure_scope(&auth, "write") {
         return resp;
     }
@@ -502,7 +511,10 @@ pub async fn totp(
             Err(err) => crate::http::error_response(err),
         },
         // 验证器丢了的人：关之前先往邮箱发一个验证码，用它也能关
-        "send_disable_code" => match state.send_totp_disable_code(&auth.user, &rectx.device()).await {
+        "send_disable_code" => match state
+            .send_totp_disable_code(&auth.user, &rectx.device())
+            .await
+        {
             Ok(delivery) => finish::<serde_json::Value>(Ok(serde_json::json!({
                 "ok": true,
                 "delivered": delivery.delivered,
@@ -610,9 +622,13 @@ pub async fn tokens_create(
         return bad_request("令牌名称不能超过 64 个字");
     }
 
-    // 范围缺省给最小可用的一组：能读能上传，但不能写（改/删要显式申请）
-    let mut scopes = super::field_string_list(&body, "scopes")
-        .unwrap_or_else(|| vec!["upload".to_string(), "read".to_string()]);
+    // 范围缺省给最小可用的一组：能读能上传，但不能写（改/删要显式申请）。
+    // `[]` 也按缺省处理：鉴权层把空 scopes 当成「会话级全权」，
+    // 若这里原样存空数组，用户以为收窄了权限，实际拿到的是一把全权限令牌。
+    let mut scopes = match super::field_string_list(&body, "scopes") {
+        Some(list) if !list.is_empty() => list,
+        _ => vec!["upload".to_string(), "read".to_string()],
+    };
     for scope in &scopes {
         if !ALLOWED_SCOPES.contains(&scope.as_str()) {
             return bad_request(format!("未知的权限范围：{scope}"));
@@ -762,7 +778,12 @@ pub async fn token_revoke(
 
     let hard = params
         .get("hard")
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false);
 
     // 仓储的语句都带 `user_id`，动别人的令牌只会影响 0 行
@@ -782,9 +803,8 @@ pub async fn token_revoke(
 
     match outcome {
         Ok(mut payload) => {
-            payload["csrf_token"] = serde_json::Value::String(
-                cookie_value(&headers, CSRF_COOKIE).unwrap_or_default(),
-            );
+            payload["csrf_token"] =
+                serde_json::Value::String(cookie_value(&headers, CSRF_COOKIE).unwrap_or_default());
             finish::<serde_json::Value>(Ok(payload))
         }
         Err(err) => crate::http::error_response(err.into()),

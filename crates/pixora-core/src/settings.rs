@@ -8,10 +8,21 @@
 //! 出库时自动解密。拿不到主密钥时读取返回错误而不是静默给明文，
 //! 免得出现「看起来配好了其实读不出来」的假象。
 
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
 use pixora_crypto::MasterKey;
 use pixora_repo::Repo;
 
 use crate::error::{AppError, Result};
+
+/// 设置项的进程内缓存寿命。
+///
+/// 站点设置会在每个直链请求、每次鉴权里被读一遍；全部落到数据库时会变成
+/// 一个请求几十次查询（`site()` 一次就要读七八个键）。缓存几秒，管理员保存
+/// 设置时按 key 主动失效，多实例部署最多晚这几秒看到别人的修改。
+const CACHE_TTL: Duration = Duration::from_secs(5);
 
 /// 键名常量。拼错键名的代价是「设置改了不生效」，所以不写字符串字面量。
 pub mod keys {
@@ -415,15 +426,34 @@ pub struct MailSettings {
 pub struct Settings {
     repo: Repo,
     master_key: Option<MasterKey>,
+    /// 键 → 值 + 写入缓存的时间。`None` 也要缓存：大量可选设置从未写过，
+    /// 不缓存「不存在」等于每次仍然查一遍库。
+    cache: Arc<RwLock<HashMap<String, (Option<String>, Instant)>>>,
 }
 
 impl Settings {
     pub fn new(repo: Repo, master_key: Option<MasterKey>) -> Self {
-        Self { repo, master_key }
+        Self {
+            repo,
+            master_key,
+            cache: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     pub async fn raw(&self, name: &str) -> Result<Option<String>> {
-        Ok(self.repo.get_setting_value(name).await?)
+        if let Some((value, at)) = self.cache.read().expect("设置缓存锁不该中毒").get(name)
+        {
+            if at.elapsed() < CACHE_TTL {
+                return Ok(value.clone());
+            }
+        }
+
+        let value = self.repo.get_setting_value(name).await?;
+        self.cache
+            .write()
+            .expect("设置缓存锁不该中毒")
+            .insert(name.to_string(), (value.clone(), Instant::now()));
+        Ok(value)
     }
 
     pub async fn string(&self, name: &str, default: &str) -> Result<String> {
@@ -450,6 +480,7 @@ impl Settings {
 
     pub async fn set(&self, name: &str, value: &str) -> Result<()> {
         self.repo.set_setting_plain(name, value).await?;
+        self.cache.write().expect("设置缓存锁不该中毒").remove(name);
         Ok(())
     }
 
@@ -468,6 +499,7 @@ impl Settings {
         })?;
         let encrypted = key.encrypt_str(value)?;
         self.repo.set_setting(name, Some(&encrypted), true).await?;
+        self.cache.write().expect("设置缓存锁不该中毒").remove(name);
         Ok(())
     }
 
@@ -484,8 +516,7 @@ impl Settings {
         }
         let key = self.master_key.as_ref().ok_or_else(|| {
             AppError::Config(
-                "库里的凭据是加密的，但当前没有可用的主密钥；请配置正确的 PIXORA_MASTER_KEY"
-                    .into(),
+                "库里的凭据是加密的，但当前没有可用的主密钥；请配置正确的 PIXORA_MASTER_KEY".into(),
             )
         })?;
         Ok(Some(key.decrypt_str(&value)?))
@@ -569,7 +600,10 @@ impl Settings {
     pub async fn download(&self) -> Result<DownloadSettings> {
         Ok(DownloadSettings {
             anon_per_minute: self
-                .integer(keys::DOWNLOAD_ANON_PER_MINUTE, defaults::DOWNLOAD_ANON_PER_MINUTE)
+                .integer(
+                    keys::DOWNLOAD_ANON_PER_MINUTE,
+                    defaults::DOWNLOAD_ANON_PER_MINUTE,
+                )
                 .await?
                 .max(0),
             anon_per_day: self
@@ -582,14 +616,20 @@ impl Settings {
     pub async fn upload(&self) -> Result<UploadSettings> {
         let formats = match self.raw(keys::UPLOAD_FORMATS).await? {
             Some(value) if !value.trim().is_empty() => parse_format_list(&value),
-            _ => dedupe(crate::media::DEFAULT_ENABLED.iter().map(|item| crate::media::normalize_ext(*item))),
+            _ => dedupe(
+                crate::media::DEFAULT_ENABLED
+                    .iter()
+                    .map(|item| crate::media::normalize_ext(*item)),
+            ),
         };
 
         Ok(UploadSettings {
             max_file_bytes: self
                 .integer(keys::UPLOAD_MAX_FILE, defaults::MAX_FILE_BYTES)
                 .await?,
-            max_batch: self.integer(keys::UPLOAD_MAX_BATCH, defaults::MAX_BATCH).await?,
+            max_batch: self
+                .integer(keys::UPLOAD_MAX_BATCH, defaults::MAX_BATCH)
+                .await?,
             max_pixels: self
                 .integer(keys::UPLOAD_MAX_PIXELS, defaults::MAX_PIXELS)
                 .await?,
@@ -694,8 +734,18 @@ impl Settings {
         let raw = self.string(keys::HOTLINK_DOMAINS, "").await?;
         let domains = raw
             .split(',')
-            .map(|item| item.trim().trim_start_matches("https://").trim_start_matches("http://"))
-            .map(|item| item.split('/').next().unwrap_or("").trim().to_ascii_lowercase())
+            .map(|item| {
+                item.trim()
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+            })
+            .map(|item| {
+                item.split('/')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase()
+            })
             .filter(|item| !item.is_empty())
             .collect::<Vec<String>>();
         Ok(HotlinkSettings {
@@ -730,7 +780,10 @@ impl Settings {
                 .await?
                 .clamp(1, 100),
             score_field: self
-                .string(keys::MODERATION_SCORE_FIELD, defaults::MODERATION_SCORE_FIELD)
+                .string(
+                    keys::MODERATION_SCORE_FIELD,
+                    defaults::MODERATION_SCORE_FIELD,
+                )
                 .await?,
             endpoint: self.string(keys::MODERATION_ENDPOINT, "").await?,
             region: self.string(keys::MODERATION_REGION, "").await?,
@@ -808,7 +861,7 @@ impl Settings {
     /// 站点默认头像的对外地址。
     ///
     /// 与背景图同一套：外链原样返回；上传的那张用本站地址并带版本号，
-    /// 换图之后旧缓存立刻失效。没配过返回 `None`——前端回落到首字母方块。
+    /// 换图之后旧缓存立刻失效。没配过返回 `None`——前端回落到内置翼标。
     pub async fn default_avatar_url(&self) -> Result<Option<String>> {
         let Some(raw) = self.raw(keys::SITE_DEFAULT_AVATAR).await? else {
             return Ok(None);
@@ -850,7 +903,13 @@ pub fn parse_format_list(raw: &str) -> Vec<String> {
             // 认不出来的扩展名丢掉
             .map(str::trim)
             .map(crate::media::normalize_ext)
-            .map(|ext| if ext == "jpeg" { "jpg".to_string() } else { ext })
+            .map(|ext| {
+                if ext == "jpeg" {
+                    "jpg".to_string()
+                } else {
+                    ext
+                }
+            })
             .filter(|item| crate::media::rule_for_ext(item).is_some()),
     )
 }

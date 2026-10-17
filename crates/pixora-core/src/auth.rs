@@ -66,6 +66,11 @@ const CODE_PER_IP_PER_HOUR: i64 = 20;
 const RESEND_COOLDOWN_SECONDS: i64 = 60;
 /// 恢复码个数。
 const RECOVERY_CODE_COUNT: usize = 8;
+/// 会话/令牌「最后活动时间」的写库节流（秒）。
+///
+/// 直链图片走会话鉴权，一次广场浏览就是几十个请求；每个请求都 UPDATE 一次
+/// `last_seen_at` 会把读接口变成写热点。闲置超时按分钟计，晚几十秒记录不影响判定。
+const TOUCH_INTERVAL_SECONDS: i64 = 60;
 
 /// 请求来源的设备与环境信息。会话表要留痕，安全页要展示。
 #[derive(Debug, Clone, Default)]
@@ -278,7 +283,7 @@ impl AppState {
 
         self.consume_code(&email, purpose::REGISTER, code).await?;
 
-        let password_hash = password::hash_password(password_plain)?;
+        let password_hash = self.hash_password(password_plain).await?;
         let (default_quota, _) = self.settings.quota_values().await?;
 
         let user = self
@@ -293,10 +298,7 @@ impl AppState {
             })
             .await?;
 
-        let album = self
-            .repo
-            .insert_default_album(user.id, "默认相册")
-            .await?;
+        let album = self.repo.insert_default_album(user.id, "默认相册").await?;
 
         self.audit_detail(
             actions::REGISTER,
@@ -465,7 +467,10 @@ impl AppState {
             });
         }
 
-        if !password::verify_password(password_plain, &user.password_hash)? {
+        if !self
+            .verify_password(password_plain, &user.password_hash)
+            .await?
+        {
             let failures = user.login_fail_count + 1;
             let lock_until = if failures >= LOGIN_FAIL_LIMIT {
                 Some(Utc::now() + chrono::Duration::minutes(LOGIN_LOCK_MINUTES))
@@ -501,12 +506,20 @@ impl AppState {
                 let Some(code) = code else {
                     return Err(AppError::TotpRequired);
                 };
-                self.consume_code(&user.email, purpose::LOGIN_CODE, code)
-                    .await?;
+                if let Err(err) = self
+                    .consume_code(&user.email, purpose::LOGIN_CODE, code)
+                    .await
+                {
+                    // 二次验证的失败也计入 IP 风控。只记密码失败的话，拿到密码的
+                    // 人可以把验证码当成无限次数的 6 位数字慢慢试。
+                    self.register_ip_failure(device.ip.as_deref(), actions::LOGIN_FAIL)
+                        .await;
+                    return Err(err);
+                }
             } else {
                 match (code, recovery) {
                     (None, None) => return Err(AppError::TotpRequired),
-                        (Some(code), _) => {
+                    (Some(code), _) => {
                         let secret = user
                             .totp_secret
                             .clone()
@@ -520,11 +533,25 @@ impl AppState {
                                 device.ip.as_deref(),
                             )
                             .await;
+                            self.register_ip_failure(device.ip.as_deref(), actions::LOGIN_FAIL)
+                                .await;
                             return Err(AppError::TotpInvalid("验证码不匹配或已过期".into()));
                         }
                     }
                     (None, Some(code)) => {
-                        self.consume_recovery_code(&user, code).await?;
+                        if let Err(err) = self.consume_recovery_code(&user, code).await {
+                            self.audit_detail(
+                                actions::LOGIN_FAIL,
+                                Some(user.id),
+                                &user.uid,
+                                serde_json::json!({ "reason": "recovery_code_mismatch" }),
+                                device.ip.as_deref(),
+                            )
+                            .await;
+                            self.register_ip_failure(device.ip.as_deref(), actions::LOGIN_FAIL)
+                                .await;
+                            return Err(err);
+                        }
                     }
                 }
             }
@@ -662,8 +689,20 @@ impl AppState {
         // 这里再判一次是防「吊销之前就已经建立的请求」）
         self.ensure_loginable(&user)?;
 
-        if let Err(err) = self.repo.touch_session(session.id, ip, Utc::now()).await {
-            tracing::warn!(error = %err, "刷新会话活动时间失败");
+        // 节流：直链图片也会走到这里。`last_seen_at` 每次访问都刷新会让
+        // 一次相册浏览变成几十条 UPDATE；闲置超时以分钟计，60 秒的粒度足够。
+        let now = Utc::now();
+        let ip_changed = match (ip, session.ip.as_deref()) {
+            (Some(current), Some(previous)) => current != previous,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if ip_changed
+            || now - session.last_seen_at >= chrono::Duration::seconds(TOUCH_INTERVAL_SECONDS)
+        {
+            if let Err(err) = self.repo.touch_session(session.id, ip, now).await {
+                tracing::warn!(error = %err, "刷新会话活动时间失败");
+            }
         }
         Ok((user, session))
     }
@@ -691,8 +730,14 @@ impl AppState {
         // Token 不删，靠这里的状态判断实现「暂停即失效、解封即恢复」
         self.ensure_loginable(&user)?;
 
-        if let Err(err) = self.repo.touch_api_token(record.id).await {
-            tracing::warn!(error = %err, "更新 Token 最后使用时间失败");
+        if record
+            .last_used_at
+            .map(|at| Utc::now() - at >= chrono::Duration::seconds(TOUCH_INTERVAL_SECONDS))
+            .unwrap_or(true)
+        {
+            if let Err(err) = self.repo.touch_api_token(record.id).await {
+                tracing::warn!(error = %err, "更新 Token 最后使用时间失败");
+            }
         }
         Ok((user, record))
     }
@@ -898,11 +943,11 @@ impl AppState {
         keep_session_id: Option<i64>,
         device: &DeviceInfo,
     ) -> Result<u64> {
-        if !password::verify_password(current, &user.password_hash)? {
+        if !self.verify_password(current, &user.password_hash).await? {
             return Err(AppError::bad_request("当前密码不正确"));
         }
         password::check_strength(next)?;
-        let hash = password::hash_password(next)?;
+        let hash = self.hash_password(next).await?;
         self.repo.update_user_password(user.id, &hash).await?;
         // 用户自己选的密码，从此不必再被拦在改密码页
         self.repo.set_must_change_password(user.id, false).await?;
@@ -961,8 +1006,12 @@ impl AppState {
         }
         self.repo.set_totp(user.id, Some(&secret), true).await?;
         let codes = self.regenerate_recovery_codes(user).await?;
-        self.audit_action(actions::SETTINGS_CHANGE, Some(user.id), device.ip.as_deref())
-            .await;
+        self.audit_action(
+            actions::SETTINGS_CHANGE,
+            Some(user.id),
+            device.ip.as_deref(),
+        )
+        .await;
         Ok(codes)
     }
 
@@ -994,8 +1043,12 @@ impl AppState {
         self.repo.set_totp(user.id, None, false).await?;
         // 关掉二次验证时清掉恢复码，避免留下「已经作废但看起来还有效」的凭据
         self.repo.replace_recovery_codes(user.id, &[]).await?;
-        self.audit_action(actions::SETTINGS_CHANGE, Some(user.id), device.ip.as_deref())
-            .await;
+        self.audit_action(
+            actions::SETTINGS_CHANGE,
+            Some(user.id),
+            device.ip.as_deref(),
+        )
+        .await;
         Ok(())
     }
 
@@ -1074,11 +1127,7 @@ impl AppState {
     ///
     /// 与发信分开：投递是否成功不影响这条码的有效性判断，测试也能直接
     /// 拿明文走一遍「用它关掉」的路径，不必搭一台 SMTP。
-    pub async fn issue_totp_disable_code(
-        &self,
-        user: &User,
-        ip: Option<&str>,
-    ) -> Result<String> {
+    pub async fn issue_totp_disable_code(&self, user: &User, ip: Option<&str>) -> Result<String> {
         self.ensure_verification_quota(&user.email, ip, purpose::TOTP_DISABLE)
             .await?;
         let code = crypto_token::new_numeric_code(6)?;
@@ -1111,7 +1160,10 @@ impl AppState {
         device: &DeviceInfo,
     ) -> Result<MailDelivery> {
         let new_email = normalize_email_input(new_email)?;
-        if !password::verify_password(password_plain, &user.password_hash)? {
+        if !self
+            .verify_password(password_plain, &user.password_hash)
+            .await?
+        {
             return Err(AppError::forbidden("当前密码不正确"));
         }
         if new_email.eq_ignore_ascii_case(&user.email) {
@@ -1173,7 +1225,9 @@ impl AppState {
 
         let old_email = user.email.clone();
         // 新地址是刚验过码的，标成已验证；旧地址的「已验证」也随之失效
-        self.repo.set_email_verified(user.id, &new_email, true).await?;
+        self.repo
+            .set_email_verified(user.id, &new_email, true)
+            .await?;
         self.repo
             .insert_user_action(
                 user.id,
@@ -1301,7 +1355,12 @@ impl AppState {
     }
 
     /// 校验并消费验证码。
-    pub(crate) async fn consume_code(&self, email: &str, purpose_value: &str, code: &str) -> Result<()> {
+    pub(crate) async fn consume_code(
+        &self,
+        email: &str,
+        purpose_value: &str,
+        code: &str,
+    ) -> Result<()> {
         let Some(record) = self
             .repo
             .find_latest_verification(email, purpose_value)
@@ -1333,7 +1392,9 @@ impl AppState {
             }));
         }
 
-        self.repo.consume_verification(record.id, Utc::now()).await?;
+        self.repo
+            .consume_verification(record.id, Utc::now())
+            .await?;
         Ok(())
     }
 
@@ -1490,11 +1551,9 @@ impl AppState {
         if delivery.delivered {
             return Ok(delivery);
         }
-        Err(AppError::Config(
-            delivery
-                .detail
-                .unwrap_or_else(|| "验证码邮件没能发出去，请稍后重试".into()),
-        ))
+        Err(AppError::Config(delivery.detail.unwrap_or_else(|| {
+            "验证码邮件没能发出去，请稍后重试".into()
+        })))
     }
 
     /// 生成一条重置链接：一次性令牌，过期时间比验证码宽一些。
@@ -1522,10 +1581,7 @@ impl AppState {
     }
 
     /// 凭令牌找出这条重置链接。无效、用过、过期都归到同一句话里。
-    async fn find_reset_link(
-        &self,
-        token: &str,
-    ) -> Result<pixora_repo::model::EmailVerification> {
+    async fn find_reset_link(&self, token: &str) -> Result<pixora_repo::model::EmailVerification> {
         let token = token.trim();
         if token.is_empty() {
             return Err(AppError::bad_request("链接不完整，请从邮件里重新打开"));
@@ -1681,7 +1737,9 @@ impl AppState {
                 "这个账号已经不存在，请重新发一封重置邮件",
             ));
         };
-        self.repo.consume_verification(record.id, Utc::now()).await?;
+        self.repo
+            .consume_verification(record.id, Utc::now())
+            .await?;
         self.apply_new_password(&user, password_plain, device, "link")
             .await?;
         Ok(record.email)
@@ -1701,7 +1759,7 @@ impl AppState {
         // 重置邮件、重置链接、验证码三条路都收尾在这里：访客账号一个也不放行，
         // 否则「拿到一封信就能设个密码登进去」
         crate::guest::ensure_not_guest(user)?;
-        let hash = password::hash_password(password_plain)?;
+        let hash = self.hash_password(password_plain).await?;
         self.repo.update_user_password(user.id, &hash).await?;
         // 密码是用户自己设的：管理员之前打的「必须改密码」到此为止
         self.repo.set_must_change_password(user.id, false).await?;
@@ -1761,7 +1819,9 @@ impl AppState {
         }
         tracing::info!(code, "未配置 SMTP：验证码写在这里，本机开发直接用它");
         if self.config.dev_return_codes {
-            tracing::warn!("PIXORA_DEV_RETURN_CODES 已开启：验证码会出现在接口响应里，请勿用于对外环境");
+            tracing::warn!(
+                "PIXORA_DEV_RETURN_CODES 已开启：验证码会出现在接口响应里，请勿用于对外环境"
+            );
             return Some(code.to_string());
         }
         None
@@ -1882,14 +1942,18 @@ mod tests {
         let fresh = state.repo.find_user_by_id(user.id).await.unwrap().unwrap();
 
         // 没发过邮箱码时，乱填的码只会得到「验证器丢了可以改用邮箱验证码」这句提示
-        let wrong = state.totp_disable(&fresh, "000000", &device).await.unwrap_err();
-        assert!(wrong.message().contains("验证器不可用"), "{}", wrong.message());
+        let wrong = state
+            .totp_disable(&fresh, "000000", &device)
+            .await
+            .unwrap_err();
+        assert!(
+            wrong.message().contains("验证器不可用"),
+            "{}",
+            wrong.message()
+        );
 
         // 发一个邮箱码（这里只落库，不发信），用它就能关掉
-        let code = state
-            .issue_totp_disable_code(&fresh, None)
-            .await
-            .unwrap();
+        let code = state.issue_totp_disable_code(&fresh, None).await.unwrap();
         state.totp_disable(&fresh, &code, &device).await.unwrap();
         let after = state.repo.find_user_by_id(user.id).await.unwrap().unwrap();
         assert!(!after.totp_enabled, "邮箱验证码应当关掉二次验证");
@@ -1903,7 +1967,10 @@ mod tests {
         let state = crate::tests_support::test_state(&dir).await;
         state
             .settings
-            .set(crate::settings::keys::SITE_BASE_URL, "https://img.example.com")
+            .set(
+                crate::settings::keys::SITE_BASE_URL,
+                "https://img.example.com",
+            )
             .await
             .unwrap();
 
@@ -1918,12 +1985,20 @@ mod tests {
         );
         // 相对路径原样留
         assert_eq!(
-            state.normalize_avatar("/images/abc.png").await.unwrap().as_deref(),
+            state
+                .normalize_avatar("/images/abc.png")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("/images/abc.png")
         );
         // 外链原样留
         assert_eq!(
-            state.normalize_avatar("https://cdn.example.org/me.png").await.unwrap().as_deref(),
+            state
+                .normalize_avatar("https://cdn.example.org/me.png")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("https://cdn.example.org/me.png")
         );
         // 域名长得像本站但不是：不能被折成一段奇怪的路径
@@ -1952,14 +2027,25 @@ mod tests {
             "站内直链要认出来（换头像时靠它找那张图）"
         );
         assert_eq!(
-            parse_direct_link(&format!("/i/{sha}.webp?v=2")).map(|(hash, _)| hash).as_deref(),
+            parse_direct_link(&format!("/i/{sha}.webp?v=2"))
+                .map(|(hash, _)| hash)
+                .as_deref(),
             Some(sha),
             "查询串不算在文件名里"
         );
-        assert!(parse_direct_link("https://cdn.example.org/me.png").is_none(), "外链没有本地实体");
+        assert!(
+            parse_direct_link("https://cdn.example.org/me.png").is_none(),
+            "外链没有本地实体"
+        );
         assert!(parse_direct_link("").is_none());
-        assert!(parse_direct_link("/images/not-a-hash.png").is_none(), "哈希形状不对");
-        assert!(parse_direct_link(&format!("/images/{sha}")).is_none(), "没有扩展名");
+        assert!(
+            parse_direct_link("/images/not-a-hash.png").is_none(),
+            "哈希形状不对"
+        );
+        assert!(
+            parse_direct_link(&format!("/images/{sha}")).is_none(),
+            "没有扩展名"
+        );
     }
 
     /// 重置页上显示的是打码邮箱：能认出是哪个账号，又不至于摊开完整地址。
@@ -2006,7 +2092,11 @@ mod tests {
             .send_email_change_code(&user, "new@example.com", "Old-Passw0rd-2026", &device)
             .await
             .unwrap_err();
-        assert!(no_mail.message().contains("发信服务"), "{}", no_mail.message());
+        assert!(
+            no_mail.message().contains("发信服务"),
+            "{}",
+            no_mail.message()
+        );
 
         // 码在这一步由邮件送达（测试里直接落库），提交后地址就换了
         let code = "482913";
@@ -2072,11 +2162,18 @@ mod tests {
         let user = crate::tests_support::make_user(&state, "link@example.com", "3001").await;
 
         // 站点地址没配时发不出链接：邮件里就只剩验证码
-        assert!(state.issue_reset_link(&user.email).await.unwrap().is_empty());
+        assert!(state
+            .issue_reset_link(&user.email)
+            .await
+            .unwrap()
+            .is_empty());
 
         state
             .settings
-            .set(crate::settings::keys::SITE_BASE_URL, "https://img.example.com")
+            .set(
+                crate::settings::keys::SITE_BASE_URL,
+                "https://img.example.com",
+            )
             .await
             .unwrap();
         let sentence = state.issue_reset_link(&user.email).await.unwrap();
@@ -2094,11 +2191,17 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            state.reset_password_by_token(&token, "Again-2026x", &device).await.is_err(),
+            state
+                .reset_password_by_token(&token, "Again-2026x", &device)
+                .await
+                .is_err(),
             "同一个令牌不能用第二次"
         );
         let fresh = state.repo.find_user_by_id(user.id).await.unwrap().unwrap();
-        assert!(pixora_crypto::password::verify_password("LinkReset-2026x", &fresh.password_hash).unwrap());
+        assert!(
+            pixora_crypto::password::verify_password("LinkReset-2026x", &fresh.password_hash)
+                .unwrap()
+        );
     }
 
     #[test]

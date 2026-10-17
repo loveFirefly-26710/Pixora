@@ -8,7 +8,8 @@
 //! 磁盘占用不重复计——这是设计稿里「按用户相册分类」与「相同文件不重复占空间」
 //! 两条要求同时成立的解法。
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::fs;
@@ -17,6 +18,9 @@ use tokio_util::io::ReaderStream;
 
 use crate::driver::{Capabilities, ObjectInfo, StorageDriver, StoredObject};
 use crate::error::{Result, StorageError};
+
+/// 临时文件名序号。`pid + 序号` 保证同进程并发写入不撞名。
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 本地目录后端。
 pub struct LocalDriver {
@@ -54,23 +58,44 @@ impl LocalDriver {
     /// 但防线不嫌多：任何拼路径的地方都要过一道规范化。
     fn resolve(&self, key: &str) -> Result<PathBuf> {
         let relative = key.trim_start_matches('/');
+        if relative.is_empty() {
+            return Err(StorageError::config("local", "存储键为空"));
+        }
         if relative.split(['/', '\\']).any(|part| part == "..") {
             return Err(StorageError::config("local", "存储键包含路径穿越片段"));
+        }
+        // Windows 盘符（`C:foo`）、UNC 根（`\\server`）与 Unix 绝对路径都不能
+        // 让 `join` 把根目录换掉。存储键由服务端生成，这一关是额外保险。
+        let path = Path::new(relative);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, Component::Prefix(_)))
+        {
+            return Err(StorageError::config("local", "存储键不能是绝对路径"));
         }
         Ok(self.root.join(relative))
     }
 
     fn resolve_view(&self, view_rel: &str) -> Result<PathBuf> {
-        let view_root = self
-            .view_root
-            .as_ref()
-            .ok_or(StorageError::Unsupported {
-                driver: "local",
-                operation: "维护镜像目录树（已关闭）",
-            })?;
+        let view_root = self.view_root.as_ref().ok_or(StorageError::Unsupported {
+            driver: "local",
+            operation: "维护镜像目录树（已关闭）",
+        })?;
         let relative = view_rel.trim_start_matches('/');
+        if relative.is_empty() {
+            return Err(StorageError::config("local", "镜像路径为空"));
+        }
         if relative.split(['/', '\\']).any(|part| part == "..") {
             return Err(StorageError::config("local", "镜像路径包含路径穿越片段"));
+        }
+        let path = Path::new(relative);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, Component::Prefix(_)))
+        {
+            return Err(StorageError::config("local", "镜像路径不能是绝对路径"));
         }
         Ok(view_root.join(relative))
     }
@@ -99,14 +124,15 @@ impl StorageDriver for LocalDriver {
         let target = self.resolve(key)?;
         Self::ensure_parent(&target).await?;
 
-        // 临时文件放在目标同目录，保证改名在同一文件系统内（跨设备改名会失败）
-        let temp = target.with_extension(format!(
-            "{}.part",
-            target
-                .extension()
-                .map(|ext| ext.to_string_lossy().to_string())
-                .unwrap_or_default()
-        ));
+        // 临时文件放在目标同目录，保证改名在同一文件系统内（跨设备改名会失败）。
+        // 文件名必须唯一：同一内容的两个并发上传会写到同一个 CAS 键，
+        // 共用 `.part` 文件会互相覆盖，最后 rename 出去的内容可能是半截的。
+        let name = target
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "object".to_string());
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let temp = target.with_file_name(format!(".{name}.{}.{seq}.part", std::process::id()));
 
         let mut file = fs::File::create(&temp).await?;
         let written = tokio::io::copy(&mut reader, &mut file).await?;
@@ -171,7 +197,10 @@ impl StorageDriver for LocalDriver {
                 StorageError::Io(err)
             }
         })?;
-        let modified = meta.modified().ok().map(chrono::DateTime::<chrono::Utc>::from);
+        let modified = meta
+            .modified()
+            .ok()
+            .map(chrono::DateTime::<chrono::Utc>::from);
         Ok(ObjectInfo {
             key: key.to_string(),
             size: meta.len(),
@@ -300,7 +329,9 @@ pub async fn read_all(driver: &dyn StorageDriver, key: &str, limit: u64) -> Resu
 }
 
 /// 把一个异步读流转换成「字节流」，交给 HTTP 响应体。
-pub fn into_stream(reader: Box<dyn AsyncRead + Send + Unpin>) -> ReaderStream<Box<dyn AsyncRead + Send + Unpin>> {
+pub fn into_stream(
+    reader: Box<dyn AsyncRead + Send + Unpin>,
+) -> ReaderStream<Box<dyn AsyncRead + Send + Unpin>> {
     ReaderStream::new(reader)
 }
 
@@ -408,7 +439,9 @@ mod tests {
 
             // 目录收尾：清空了就该把空目录删掉（删相册/删到没图时走这里）
             driver
-                .remove_view_dir(&crate::cas::view_rel_path("1001", "旅行", "", "").trim_end_matches('/'))
+                .remove_view_dir(
+                    &crate::cas::view_rel_path("1001", "旅行", "", "").trim_end_matches('/'),
+                )
                 .await
                 .unwrap();
             assert!(
@@ -426,7 +459,10 @@ mod tests {
     async fn path_traversal_is_rejected() {
         let (driver, _dir) = temp_driver().await;
         assert!(driver.get("../../etc/passwd").await.is_err());
-        assert!(driver.link_view("blobs/aa/x.jpg", "../../escape.jpg").await.is_err());
+        assert!(driver
+            .link_view("blobs/aa/x.jpg", "../../escape.jpg")
+            .await
+            .is_err());
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ pub mod upload;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, FromRequestParts, OptionalFromRequestParts};
+use axum::extract::{ConnectInfo, FromRequestParts, OptionalFromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
@@ -38,7 +38,7 @@ use pixora_core::images::Viewer;
 use pixora_core::{AppError, AppState};
 use pixora_repo::model::User;
 
-use crate::http::{authenticate_optional, error_response, Authenticated};
+use crate::http::{authenticate, error_response, Authenticated};
 
 /// 连接对端地址。
 ///
@@ -54,10 +54,7 @@ pub struct PeerAddr(pub Option<SocketAddr>);
 impl<S: Send + Sync> FromRequestParts<S> for PeerAddr {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         Ok(PeerAddr(
             parts
                 .extensions
@@ -87,6 +84,31 @@ impl PeerAddr {
     pub fn addr(&self) -> Option<SocketAddr> {
         self.0
     }
+}
+
+/// 全站 IP 规则。
+///
+/// 登录、注册、上传各自还会再按场景检查一次；这一层负责把
+/// `scope = all` 的规则真正落到**所有**请求上。否则一条「全站封禁」只能
+/// 拦住登录和上传，被拦的人照样能浏览广场、拉直链。
+///
+/// 规则表与设置都有短缓存，命中计数也有每分钟一次的节流；这层不会把
+/// 每个静态资源请求变成一次数据库查询。
+pub async fn enforce_ip(
+    State(state): State<Arc<AppState>>,
+    peer: PeerAddr,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let rectx = crate::http::request_context(&state, request.headers(), peer.addr()).await;
+    if let Err(err) = state
+        .ip_guard
+        .ensure_allowed(rectx.ip.as_deref(), pixora_core::ipguard::scope::ALL)
+        .await
+    {
+        return crate::http::error_response(err);
+    }
+    next.run(request).await
 }
 
 // ============================================================
@@ -126,11 +148,20 @@ pub async fn require_user_allow_pending(
     ip: Option<&str>,
     method: &Method,
 ) -> Result<Authenticated, Response> {
-    let auth = match authenticate_optional(state, headers, ip).await {
-        Ok(Some(auth)) => auth,
-        Ok(None) => return Err(error_response(AppError::Unauthorized)),
+    // 这里直接走 `authenticate`，不走 `authenticate_optional`：后者会给
+    // 读接口记一次 API 额度，若在这里再用一次，同一个 GET 会被扣两次。
+    let auth = match authenticate(state, headers, ip).await {
+        Ok(auth) => auth,
         Err(err) => return Err(error_response(err)),
     };
+    let is_read = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
+    if let Err(err) = state
+        .limits
+        .enforce_api(&auth.user, is_read, auth.via_token || !is_read)
+        .await
+    {
+        return Err(error_response(err));
+    }
     if let Err(err) = crate::http::verify_csrf(Some(&auth), headers, method) {
         return Err(error_response(err));
     }
@@ -296,9 +327,11 @@ pub fn not_found(what: impl Into<String>) -> Response {
 }
 
 /// 解析 `serde_json::Value` 成具体类型，失败给 `BAD_REQUEST`。
-pub fn parse_body<T: serde::de::DeserializeOwned>(body: &serde_json::Value, what: &str) -> Result<T, Response> {
-    serde_json::from_value(body.clone())
-        .map_err(|err| bad_request(format!("{what}不合法：{err}")))
+pub fn parse_body<T: serde::de::DeserializeOwned>(
+    body: &serde_json::Value,
+    what: &str,
+) -> Result<T, Response> {
+    serde_json::from_value(body.clone()).map_err(|err| bad_request(format!("{what}不合法：{err}")))
 }
 
 /// 从查询串取分页参数，交给领域层的 `PageRequest`。
@@ -349,7 +382,10 @@ pub async fn user_prefs(state: &AppState, user: &User) -> (bool, bool) {
 ///
 /// 统计与限额都从库里现取而不是让前端再发一次请求——它们是同一个页面的
 /// 同一次渲染，分两次取会出现「配额条和数字对不上」这种说不清的问题。
-pub async fn user_view(state: &Arc<AppState>, user: &User) -> pixora_core::Result<serde_json::Value> {
+pub async fn user_view(
+    state: &Arc<AppState>,
+    user: &User,
+) -> pixora_core::Result<serde_json::Value> {
     let stats = state.repo.user_stats(user.id).await?;
     let limits = state.repo.effective_policy(user).await?;
     // 上传策略（单文件上限、单批张数、像素上限、格式白名单、并发数）按生效值给：
@@ -449,7 +485,13 @@ pub async fn impersonator_info(
 }
 
 /// 审计里记「管理员看了谁」，与 `AppState::audit_cross_user` 同一动作名。
-pub async fn audit_admin_view(state: &AppState, admin: &User, target_uid: &str, page: &str, ip: Option<&str>) {
+pub async fn audit_admin_view(
+    state: &AppState,
+    admin: &User,
+    target_uid: &str,
+    page: &str,
+    ip: Option<&str>,
+) {
     state
         .audit_detail(
             actions::ADMIN_VIEW_USER,
@@ -508,7 +550,7 @@ mod tests {
             accel_prefix: None,
             secure_cookies: false,
             samesite: pixora_core::config::SameSite::Lax,
-        dev_return_codes: false,
+            dev_return_codes: false,
             log_level: "error".into(),
         };
         let state = AppState::bootstrap(config).await.expect("装配 AppState");
@@ -581,7 +623,12 @@ mod tests {
         builder.body(Body::empty()).expect("构造请求")
     }
 
-    fn post_json(uri: &str, cookie: Option<&str>, csrf: Option<&str>, body: serde_json::Value) -> Request<Body> {
+    fn post_json(
+        uri: &str,
+        cookie: Option<&str>,
+        csrf: Option<&str>,
+        body: serde_json::Value,
+    ) -> Request<Body> {
         let mut builder = Request::builder()
             .method("POST")
             .uri(uri)
@@ -600,10 +647,18 @@ mod tests {
     /// 契约 1.2：错误必须带 code，`data` 为 null。
     fn assert_error(body: &serde_json::Value, code: &str) {
         assert_eq!(body["error"]["code"], code, "错误码要与契约一致：{body}");
-        assert!(body["data"].is_null(), "失败响应里 data 必须是 null：{body}");
+        assert!(
+            body["data"].is_null(),
+            "失败响应里 data 必须是 null：{body}"
+        );
     }
 
-    fn patch_json(uri: &str, cookie: Option<&str>, csrf: Option<&str>, body: serde_json::Value) -> Request<Body> {
+    fn patch_json(
+        uri: &str,
+        cookie: Option<&str>,
+        csrf: Option<&str>,
+        body: serde_json::Value,
+    ) -> Request<Body> {
         let mut builder = Request::builder()
             .method("PATCH")
             .uri(uri)
@@ -635,6 +690,36 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("登录"));
+    }
+
+    #[tokio::test]
+    async fn api_read_limit_is_enforced_for_sessions() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "limit@example.com", "6601", false).await;
+        let cookie = login_cookie(&state, &user).await;
+
+        let mut policy = pixora_repo::model::RateLimitPolicy::defaults();
+        policy.api_read_per_minute = 1;
+        policy.api_per_minute = 1;
+        state
+            .repo
+            .upsert_global_policy(&policy)
+            .await
+            .expect("写限流策略");
+
+        let first = app(state.clone())
+            .oneshot(get("/api/v1/me", Some(&cookie)))
+            .await
+            .expect("第一次请求");
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app(state)
+            .oneshot(get("/api/v1/me", Some(&cookie)))
+            .await
+            .expect("第二次请求");
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = body_json(second).await;
+        assert_error(&body, "RATE_LIMITED");
     }
 
     #[tokio::test]
@@ -844,13 +929,10 @@ mod tests {
         }
         body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
 
-        let mut builder = Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header(
-                "content-type",
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            );
+        let mut builder = Request::builder().method("POST").uri(uri).header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        );
         match auth {
             MultipartAuth::Token(token) => {
                 builder = builder.header("authorization", format!("Bearer {token}"));
@@ -875,10 +957,18 @@ mod tests {
 
     /// 一张最小可用的 WebP（嗅探只看 RIFF/WEBP 魔数）。
     fn tiny_webp() -> Vec<u8> {
-        let mut bytes = b"RIFF".to_vec();
-        bytes.extend_from_slice(&[0x1a, 0x00, 0x00, 0x00]);
+        // 1×1 的 VP8X WebP：真实 RIFF/VP8X 头，尺寸解析能读出 1×1。
+        // 早先这里只写了 RIFF+WEBP 加 14 个零字节，嗅探能过、尺寸读不出，
+        // 新的缩略图像素校验会把它拦掉。
+        let mut bytes = Vec::with_capacity(30);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&22u32.to_le_bytes());
         bytes.extend_from_slice(b"WEBP");
-        bytes.extend_from_slice(&[0u8; 14]);
+        bytes.extend_from_slice(b"VP8X");
+        bytes.extend_from_slice(&10u32.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0]); // width - 1
+        bytes.extend_from_slice(&[0, 0, 0]); // height - 1
         bytes
     }
 
@@ -975,7 +1065,10 @@ mod tests {
         // 密码与角色决定「这个账号能不能被登进来、是不是管理员」，两样都要拒。
         // 邮箱不在此列：它只是个记号（访客登不进来、也不收发信），管理员可以改
         for (field, body) in [
-            ("password", serde_json::json!({ "password": "Visitor-Login-2026x" })),
+            (
+                "password",
+                serde_json::json!({ "password": "Visitor-Login-2026x" }),
+            ),
             ("role", serde_json::json!({ "role": "admin" })),
         ] {
             let response = app(state.clone())
@@ -1041,7 +1134,11 @@ mod tests {
             ))
             .await
             .expect("发请求");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "访客账号不该能收重置邮件");
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "访客账号不该能收重置邮件"
+        );
         assert_error(&body_json(response).await, "FORBIDDEN");
 
         // 免登录切换同样要拒：那是给访客账号发一张登录凭据
@@ -1059,12 +1156,11 @@ mod tests {
         assert_error(&payload, "FORBIDDEN");
 
         // 被拒之后不该留下会话：访客账号名下必须一张凭据都没有
-        let sessions = state
-            .repo
-            .list_sessions(guest.id)
-            .await
-            .expect("读会话");
-        assert!(sessions.is_empty(), "访客账号不能留下任何会话：{sessions:?}");
+        let sessions = state.repo.list_sessions(guest.id).await.expect("读会话");
+        assert!(
+            sessions.is_empty(),
+            "访客账号不能留下任何会话：{sessions:?}"
+        );
     }
 
     /// 后台入口对访客账号关门。
@@ -1097,6 +1193,56 @@ mod tests {
     /// 上传链路端到端：Bearer 鉴权 → multipart 收件 → 魔数与尺寸解析 →
     /// 内容寻址落盘。同内容的第二份要命中去重：物理文件只有一份，
     /// 但各自生成独立的图片记录。
+    #[tokio::test]
+    async fn uploaded_svg_is_sanitized_before_serving() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "svg@example.com", "8801", false).await;
+        let cookie = login_cookie(&state, &user).await;
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"
+              onload="alert(1)">
+            <script>alert(2)</script>
+            <rect width="10" height="10" fill="#7fd9c4"/>
+        </svg>"##;
+
+        let uploaded = app(state.clone())
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Session {
+                    cookie: &cookie,
+                    csrf: "csrf-8801",
+                },
+                svg.as_bytes(),
+                "evil.svg",
+                &[],
+                None,
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let body = body_json(uploaded).await;
+        let url = body["data"]["url"]
+            .as_str()
+            .expect("直链")
+            .replace("https://img.example.com", "");
+
+        let response = app(state)
+            .oneshot(get(&url, Some(&cookie)))
+            .await
+            .expect("取图");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("读响应体")
+            .to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("<script"), "脚本标签必须删掉：{text}");
+        assert!(!text.contains("onload"), "事件属性必须删掉：{text}");
+        assert!(!text.contains("alert(2)"), "脚本正文必须删掉：{text}");
+        assert!(text.contains("<rect"), "正常图形要保留：{text}");
+    }
+
     #[tokio::test]
     async fn upload_stores_a_real_png_and_dedups_identical_content() {
         let (state, dir) = test_state().await;
@@ -1132,9 +1278,15 @@ mod tests {
         assert_eq!(first["data"]["dedup"], false, "首次上传不该是去重：{first}");
         assert_eq!(first["data"]["size"], PNG_1X1.len() as i64);
         assert_eq!(first["data"]["storage_type"], "local");
-        let sha = first["data"]["sha256"].as_str().expect("响应带哈希").to_string();
+        let sha = first["data"]["sha256"]
+            .as_str()
+            .expect("响应带哈希")
+            .to_string();
         assert_eq!(sha.len(), 64, "哈希应是 SHA-256 十六进制");
-        let url = first["data"]["url"].as_str().expect("响应带直链").to_string();
+        let url = first["data"]["url"]
+            .as_str()
+            .expect("响应带直链")
+            .to_string();
         assert!(
             url.contains(&format!("{sha}.png")),
             "直链应指向内容寻址文件：{url}"
@@ -1147,7 +1299,11 @@ mod tests {
             .join("blobs")
             .join(&sha[..2])
             .join(format!("{sha}.png"));
-        assert!(blob_path.exists(), "物理文件应落盘：{}", blob_path.display());
+        assert!(
+            blob_path.exists(),
+            "物理文件应落盘：{}",
+            blob_path.display()
+        );
 
         // 同内容再传一次：命中去重，独立图片记录，直链不变
         let second = app(state.clone())
@@ -1198,7 +1354,12 @@ mod tests {
             .await
             .expect("站点格式白名单");
         let blocked = app(state.clone())
-            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .oneshot(multipart_upload(
+                "/api/v1/upload",
+                plaintext,
+                PNG_1X1,
+                "pixel.png",
+            ))
             .await
             .expect("发请求");
         let blocked = body_json(blocked).await;
@@ -1220,7 +1381,12 @@ mod tests {
             .await
             .expect("写用户覆盖");
         let allowed = app(state.clone())
-            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .oneshot(multipart_upload(
+                "/api/v1/upload",
+                plaintext,
+                PNG_1X1,
+                "pixel.png",
+            ))
             .await
             .expect("发请求");
         assert_eq!(allowed.status(), StatusCode::OK, "单独放开后应当能传");
@@ -1244,7 +1410,10 @@ mod tests {
             .as_array()
             .expect("limits.formats");
         assert_eq!(
-            formats.iter().filter_map(|item| item.as_str()).collect::<Vec<_>>(),
+            formats
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>(),
             vec!["png"],
             "生效格式要按用户覆盖给：{me}"
         );
@@ -1252,10 +1421,11 @@ mod tests {
         // 单文件上限的覆盖：10 字节的用户传 67 字节的 PNG，收流时就该拦。
         // 覆盖是整行写入，所以每次都带上「允许 png」——否则上一个格式覆盖被清掉，
         // 断言失败的原因会变成格式而不是尺寸
-        let with_png = |policy: pixora_repo::model::RateLimitPolicy| pixora_repo::model::RateLimitPolicy {
-            formats: Some("png".into()),
-            ..policy
-        };
+        let with_png =
+            |policy: pixora_repo::model::RateLimitPolicy| pixora_repo::model::RateLimitPolicy {
+                formats: Some("png".into()),
+                ..policy
+            };
         state
             .repo
             .upsert_user_policy(
@@ -1268,7 +1438,12 @@ mod tests {
             .await
             .expect("写用户覆盖");
         let too_big = app(state.clone())
-            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .oneshot(multipart_upload(
+                "/api/v1/upload",
+                plaintext,
+                PNG_1X1,
+                "pixel.png",
+            ))
             .await
             .expect("发请求");
         let too_big = body_json(too_big).await;
@@ -1290,11 +1465,19 @@ mod tests {
             .await
             .expect("写用户覆盖");
         let pixels = app(state.clone())
-            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .oneshot(multipart_upload(
+                "/api/v1/upload",
+                plaintext,
+                PNG_1X1,
+                "pixel.png",
+            ))
             .await
             .expect("发请求");
         let pixels = body_json(pixels).await;
-        assert!(pixels["error"].is_null(), "1x1 正好在上限内不该被拦：{pixels}");
+        assert!(
+            pixels["error"].is_null(),
+            "1x1 正好在上限内不该被拦：{pixels}"
+        );
 
         // 把用户覆盖整行删掉：立刻回到站点白名单（不含 png），又被拦住
         state
@@ -1303,7 +1486,12 @@ mod tests {
             .await
             .expect("删用户覆盖");
         let restored = app(state.clone())
-            .oneshot(multipart_upload("/api/v1/upload", plaintext, PNG_1X1, "pixel.png"))
+            .oneshot(multipart_upload(
+                "/api/v1/upload",
+                plaintext,
+                PNG_1X1,
+                "pixel.png",
+            ))
             .await
             .expect("发请求");
         let restored = body_json(restored).await;
@@ -1328,7 +1516,10 @@ mod tests {
         let uploaded = app(state.clone())
             .oneshot(multipart_form(
                 "/api/v1/upload",
-                MultipartAuth::Session { cookie: &cookie, csrf: "csrf-7701" },
+                MultipartAuth::Session {
+                    cookie: &cookie,
+                    csrf: "csrf-7701",
+                },
                 PNG_1X1,
                 "pixel.png",
                 &[],
@@ -1338,7 +1529,10 @@ mod tests {
             .expect("发请求");
         assert_eq!(uploaded.status(), StatusCode::OK);
         let body = body_json(uploaded).await;
-        let url = body["data"]["url"].as_str().expect("直链").replace("https://img.example.com", "");
+        let url = body["data"]["url"]
+            .as_str()
+            .expect("直链")
+            .replace("https://img.example.com", "");
         let thumb_url = body["data"]["thumb_url"]
             .as_str()
             .expect("缩略图直链")
@@ -1357,15 +1551,29 @@ mod tests {
             Some("image/webp"),
             "带 ?thumb=1 时要发缩略图那一份（webp）"
         );
-        let bytes = response.into_body().collect().await.expect("读响应体").to_bytes();
-        assert_eq!(bytes.as_ref(), thumb.as_slice(), "返回的应当正是客户端传上来的缩略图");
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("读响应体")
+            .to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            thumb.as_slice(),
+            "返回的应当正是客户端传上来的缩略图"
+        );
 
         // 不带 ?thumb=1：仍是原图
         let response = app(state)
             .oneshot(get(&url, Some(&cookie)))
             .await
             .expect("发请求");
-        let bytes = response.into_body().collect().await.expect("读响应体").to_bytes();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("读响应体")
+            .to_bytes();
         assert_eq!(bytes.as_ref(), PNG_1X1, "原图直链要给原图");
     }
 
@@ -1402,7 +1610,10 @@ mod tests {
         let uploaded = app(state.clone())
             .oneshot(multipart_form(
                 "/api/v1/upload",
-                MultipartAuth::Session { cookie: &guest_cookie, csrf: &csrf },
+                MultipartAuth::Session {
+                    cookie: &guest_cookie,
+                    csrf: &csrf,
+                },
                 PNG_1X1,
                 "guest.png",
                 &[("visibility", "private")],
@@ -1447,7 +1658,12 @@ mod tests {
                 .await
                 .expect("切开关");
             assert!(
-                state.repo.find_user_by_id(guest.id).await.unwrap().is_some(),
+                state
+                    .repo
+                    .find_user_by_id(guest.id)
+                    .await
+                    .unwrap()
+                    .is_some(),
                 "关闭游客上传不该动这个账号"
             );
             assert!(
@@ -1481,7 +1697,12 @@ mod tests {
         let body = body_json(response).await;
         assert_error(&body, "FORBIDDEN");
         assert!(
-            state.repo.find_user_by_id(guest.id).await.unwrap().is_some(),
+            state
+                .repo
+                .find_user_by_id(guest.id)
+                .await
+                .unwrap()
+                .is_some(),
             "被拒之后账号必须还在"
         );
     }
@@ -1498,7 +1719,10 @@ mod tests {
         let upload = |fields: Vec<(&'static str, &'static str)>| {
             multipart_form(
                 "/api/v1/upload",
-                MultipartAuth::Session { cookie: &cookie, csrf },
+                MultipartAuth::Session {
+                    cookie: &cookie,
+                    csrf,
+                },
                 PNG_1X1,
                 "avatar.png",
                 &fields,
@@ -1556,7 +1780,10 @@ mod tests {
         let uploaded = app(state.clone())
             .oneshot(multipart_form(
                 "/api/v1/upload",
-                MultipartAuth::Session { cookie: &cookie, csrf: "csrf-8901" },
+                MultipartAuth::Session {
+                    cookie: &cookie,
+                    csrf: "csrf-8901",
+                },
                 PNG_1X1,
                 "secret.png",
                 &[("visibility", "private")],
@@ -1624,7 +1851,10 @@ mod tests {
         let uploaded = app(state.clone())
             .oneshot(multipart_form(
                 "/api/v1/upload",
-                MultipartAuth::Session { cookie: &cookie, csrf: "csrf-8903" },
+                MultipartAuth::Session {
+                    cookie: &cookie,
+                    csrf: "csrf-8903",
+                },
                 PNG_1X1,
                 "pixel.png",
                 &[("visibility", "public")],
@@ -1668,7 +1898,11 @@ mod tests {
                 .oneshot(get(path, Some(&cookie)))
                 .await
                 .expect("发请求");
-            assert_eq!(owner.status(), StatusCode::OK, "本人应当能看回收站里的{label}");
+            assert_eq!(
+                owner.status(),
+                StatusCode::OK,
+                "本人应当能看回收站里的{label}"
+            );
             let stranger = app(state.clone())
                 .oneshot(get(path, Some(&other_cookie)))
                 .await
@@ -1700,7 +1934,10 @@ mod tests {
         let uploaded = app(state.clone())
             .oneshot(multipart_form(
                 "/api/v1/upload",
-                MultipartAuth::Session { cookie: &cookie, csrf: "csrf-8905" },
+                MultipartAuth::Session {
+                    cookie: &cookie,
+                    csrf: "csrf-8905",
+                },
                 PNG_1X1,
                 "pixel.png",
                 &[("visibility", "private")],
@@ -1709,7 +1946,10 @@ mod tests {
             .await
             .expect("发请求");
         let body = body_json(uploaded).await;
-        assert!(body["data"]["thumb_url"].is_null(), "没传缩略图时不该给缩略图直链");
+        assert!(
+            body["data"]["thumb_url"].is_null(),
+            "没传缩略图时不该给缩略图直链"
+        );
         let url = body["data"]["url"].as_str().expect("直链");
         let with_thumb = format!("{url}?thumb=2");
 
@@ -1768,7 +2008,12 @@ mod tests {
             .expect("发请求");
         assert_eq!(deleted.status(), StatusCode::OK);
         assert!(
-            state.repo.find_user_by_id(target.id).await.unwrap().is_none(),
+            state
+                .repo
+                .find_user_by_id(target.id)
+                .await
+                .unwrap()
+                .is_none(),
             "账号确实删掉了"
         );
 

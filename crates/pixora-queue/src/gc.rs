@@ -44,7 +44,10 @@ pub async fn collect_blobs(
     let mut removed = 0u64;
 
     for blob in candidates {
-        // 再确认一次：并发上传可能在这一瞬间给它加上上了引用
+        // 与上传的「查重 → 落盘 → 建引用」串行化。没有这把锁时，复查完
+        // ref_count 到真正删文件之间，新上传仍可能挂到这一行上。
+        let _blob_guard = state.blob_lock(&blob.sha256).lock().await;
+        // 再确认一次：并发上传可能在这一瞬间给它加上了引用
         let Some(fresh) = state.repo.find_blob_by_id(blob.id).await? else {
             continue;
         };
@@ -156,7 +159,12 @@ pub async fn clean_empty_blob_dirs(state: &Arc<AppState>) -> u64 {
     let mut removed = 0u64;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
-        if !entry.metadata().await.map(|meta| meta.is_dir()).unwrap_or(false) {
+        if !entry
+            .metadata()
+            .await
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false)
+        {
             continue;
         }
         // remove_dir 只对空目录成功，非空的会报错——正是我们要的语义

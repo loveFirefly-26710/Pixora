@@ -298,7 +298,9 @@ impl AppState {
         // 协议层的硬顶：比这更大的一次性预检没有实际意义，客户端本来就按批发
         const CEILING: usize = 1000;
         if hashes.len() > CEILING {
-            return Err(AppError::bad_request(format!("单次最多预检 {CEILING} 个哈希")));
+            return Err(AppError::bad_request(format!(
+                "单次最多预检 {CEILING} 个哈希"
+            )));
         }
         // 一次预检就是客户端的一批：条数上限按**这个账号生效的**单批次最大张数算。
         // 上传本身是逐张发的，服务端看不见批次；预检是唯一能按批卡住的地方。
@@ -344,7 +346,8 @@ impl AppState {
         thumb: Option<(Box<dyn tokio::io::AsyncRead + Send + Unpin>, i64)>,
         ip: Option<&str>,
     ) -> Result<UploadOutcome> {
-        self.ensure_ip_allowed(ip, crate::ipguard::scope::UPLOAD).await?;
+        self.ensure_ip_allowed(ip, crate::ipguard::scope::UPLOAD)
+            .await?;
 
         // 访客上传只有公开：那个账号登不进来，私有图片传完谁也看不见——
         // 连它自己都进不去，等于白传。所以这里按账号定，不听客户端传了什么
@@ -352,6 +355,9 @@ impl AppState {
         if crate::guest::is_guest(user) {
             input.visibility = visibility::PUBLIC.to_string();
         }
+        // 原始文件名只用于展示与下载：去掉路径、控制字符，并压到库列宽以内。
+        // 不处理时，PG/MySQL 会在插入阶段报「值太长」，SQLite 则会把整段塞进去。
+        input.original_name = clean_original_name(&input.original_name);
 
         let upload_settings = self.settings.upload().await?;
         let policy = self.repo.effective_policy(user).await?;
@@ -367,15 +373,25 @@ impl AppState {
 
         // 先把字节落到临时文件：大小上限在流的过程中就能判，不必等收完
         let temp = TempUpload::begin(&self.storage.local_root()).await?;
-        let collected = temp.write_all(reader, limits.max_file_bytes).await?;
+        let mut collected = temp.write_all(reader, limits.max_file_bytes).await?;
 
         if collected.size == 0 {
             return Err(AppError::InvalidImage("文件为空".into()));
         }
 
         // 格式校验：白名单只是第一道，真实格式看魔数
-        let sniffed = media::sniff(&collected.head)
+        let mut sniffed = media::sniff(&collected.head)
             .ok_or_else(|| AppError::InvalidImage("无法识别的图片格式".into()))?;
+        // SVG 是唯一能携带脚本的“图片”，必须在入库前净化；直链上的 CSP
+        // 只是第二道防线，不能拿它替代净化（下载后换宿主、换反代就没了）。
+        if sniffed.mime == "image/svg+xml" {
+            collected.sanitize_svg_in_place().await?;
+            sniffed = media::sniff(&collected.head)
+                .ok_or_else(|| AppError::InvalidImage("SVG 净化后不再是有效图片".into()))?;
+            if sniffed.mime != "image/svg+xml" {
+                return Err(AppError::InvalidImage("SVG 净化后格式异常".into()));
+            }
+        }
         let ext = sniffed.ext.to_string();
         let normalized_ext = media::normalize_ext(&ext);
         let declared_ext = media::normalize_ext(&media::ext_from_name(&input.original_name));
@@ -392,8 +408,8 @@ impl AppState {
         }
 
         // 尺寸与像素上限：解压炸弹防线
-        let (width, height) = media::dimensions(&collected.metadata_bytes(), sniffed.mime)
-            .unwrap_or((0, 0));
+        let (width, height) =
+            media::dimensions(&collected.metadata_bytes(), sniffed.mime).unwrap_or((0, 0));
         if width > 0 && height > 0 {
             media::check_pixels(width, height, limits.max_pixels as u64)?;
             media::check_dimensions(width, height, limits.max_width, limits.max_height)?;
@@ -404,8 +420,15 @@ impl AppState {
         let thumb_bytes = read_thumb(thumb).await?;
 
         // 内容审核：在写任何一行数据库之前拦下违规内容
-        self.screen_before_store(user, &collected, &input, sniffed.mime, thumb_bytes.as_ref(), ip)
-            .await?;
+        self.screen_before_store(
+            user,
+            &collected,
+            &input,
+            sniffed.mime,
+            thumb_bytes.as_ref(),
+            ip,
+        )
+        .await?;
 
         // 配额与限流：都在拿到真实大小之后判
         crate::quota::ensure_quota_available(self, user, collected.size as i64).await?;
@@ -482,10 +505,7 @@ impl AppState {
                         ip,
                     )
                     .await;
-                    let _ = self
-                        .ip_guard
-                        .record_failure(ip, actions::UPLOAD_FAIL)
-                        .await;
+                    let _ = self.ip_guard.record_failure(ip, actions::UPLOAD_FAIL).await;
                 }
                 Err(err)
             }
@@ -507,6 +527,9 @@ impl AppState {
         thumb_bytes: Option<BufferedThumb>,
     ) -> Result<UploadOutcome> {
         let size = collected.size as i64;
+        // 与 GC 共用一把按内容哈希分片的锁：从查重到建图片引用期间，
+        // 同一实体的「引用归零回收」必须等我们走完。
+        let _blob_guard = self.blob_lock(&collected.sha256).lock().await;
 
         if let Some(client_hash) = input.client_sha256.as_deref() {
             let client_hash = client_hash.trim().to_lowercase();
@@ -565,12 +588,10 @@ impl AppState {
         // 头像反复设同一张图时，相册里不该并排站着两张一模一样的。
         // 放在建缩略图、建图片行之前——复用本来就不需要这两步
         if input.reuse_existing {
-            if let Some(existing) = self
-                .repo
-                .find_live_image_by_blob(user.id, blob.id)
-                .await?
-            {
-                let tags = self.merge_image_tags(existing.id, user.id, &input.tags).await?;
+            if let Some(existing) = self.repo.find_live_image_by_blob(user.id, blob.id).await? {
+                let tags = self
+                    .merge_image_tags(existing.id, user.id, &input.tags)
+                    .await?;
                 let url = self.direct_url(&collected.sha256, ext, false).await;
                 let thumb_url = if existing.thumb_blob_id.is_some() {
                     Some(self.direct_url(&collected.sha256, ext, true).await)
@@ -706,7 +727,9 @@ impl AppState {
             return Ok(current);
         }
         current.extend(missing);
-        self.repo.set_image_tags(image_id, owner_id, &current).await?;
+        self.repo
+            .set_image_tags(image_id, owner_id, &current)
+            .await?;
         Ok(current)
     }
 
@@ -722,6 +745,12 @@ impl AppState {
         if !matches!(sniffed.mime, "image/webp" | "image/png" | "image/jpeg") {
             return Err(AppError::UnsupportedFormat(sniffed.ext.to_string()));
         }
+        // 缩略图也要过像素上限：4 MiB 的 PNG 可以解出几万像素见方，
+        // 列表页一口气渲染几十张时，浏览器和服务端都会为它买单。
+        let (thumb_w, thumb_h) = media::dimensions(&buffer, sniffed.mime)
+            .ok_or_else(|| AppError::InvalidImage("缩略图尺寸无法识别".into()))?;
+        media::check_pixels(thumb_w, thumb_h, 16_000_000)?;
+        media::check_dimensions(thumb_w, thumb_h, 8192, 8192)?;
 
         let sha256 = pixora_crypto::hash::sha256_hex(&buffer);
         let ext = sniffed.ext;
@@ -733,10 +762,10 @@ impl AppState {
             return Ok(Some(existing.id));
         }
         // 记下这张缩略图自己的像素尺寸：判断「是不是该按新尺寸重算」全靠它
-        // （尺寸读不出来不影响上传，留 0 表示未知）
-        let (thumb_width, thumb_height) = media::dimensions(&buffer, sniffed.mime)
-            .map(|(w, h)| (Some(w as i32).filter(|v| *v > 0), Some(h as i32).filter(|v| *v > 0)))
-            .unwrap_or((None, None));
+        let (thumb_width, thumb_height) = (
+            Some(thumb_w as i32).filter(|v| *v > 0),
+            Some(thumb_h as i32).filter(|v| *v > 0),
+        );
 
         let key = cas_key(&sha256, ext);
         let (resolved, _) = self
@@ -812,7 +841,8 @@ impl AppState {
             tracing::debug!(error = %err, "删除镜像链接失败（可能本来就没有）");
         }
         // 最后一张删掉之后目录会空着：顺手收掉，别让磁盘上留一串空壳目录
-        self.prune_view_dir(driver, backend_id, uid, album_slug).await;
+        self.prune_view_dir(driver, backend_id, uid, album_slug)
+            .await;
     }
 
     /// 清掉已经空了的镜像目录（只删空目录，绝不递归）。
@@ -849,7 +879,6 @@ impl AppState {
         )
         .await;
     }
-
 }
 
 /// 临时文件的生命周期封装：构造时创建，Drop 时删除。
@@ -858,14 +887,35 @@ struct TempUpload {
     dir: PathBuf,
 }
 
+/// 原始文件名的展示形态：只留文件名本身，去掉控制字符，截到 255 字符。
+fn clean_original_name(raw: &str) -> String {
+    let name = raw
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(255)
+        .collect::<String>();
+    if name.is_empty() {
+        "upload".to_string()
+    } else {
+        name
+    }
+}
+
 impl TempUpload {
     async fn begin(data_root: &std::path::Path) -> Result<Self> {
         let dir = data_root.join("tmp");
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|err| AppError::internal(format!("临时目录不可用：{err}")))?;
+        // 同一个进程里并发上传同一时刻并不罕见；只用时间戳 + pid 会撞名，
+        // 两个请求互相覆盖对方写到一半的文件。
+        let suffix = pixora_crypto::token::random_hex(8)?;
         let name = format!(
-            "upload-{}-{}",
+            "upload-{}-{}-{suffix}",
             Utc::now().timestamp_micros(),
             std::process::id()
         );
@@ -921,8 +971,7 @@ impl TempUpload {
             // JPEG 的 SOF 段藏在 EXIF 之后也不过几十 KB，
             // ISOBMFF（avif/heic）的 ispe 同样在这个量级
             if metadata.len() < 1024 * 1024 {
-                metadata
-                    .extend_from_slice(&slice[..slice.len().min(1024 * 1024 - metadata.len())]);
+                metadata.extend_from_slice(&slice[..slice.len().min(1024 * 1024 - metadata.len())]);
             }
         }
 
@@ -987,6 +1036,28 @@ impl Collected {
             .await
             .map_err(|err| AppError::internal(format!("读取临时文件失败：{err}")))
     }
+
+    /// 就地把 SVG 净化后写回临时文件，并重算哈希/大小/头部。
+    ///
+    /// 净化会改变内容，哈希也必须跟着变：去重、直链、审计都以这个哈希为准。
+    /// 只在嗅探到 SVG 时调用，其他格式不读盘。
+    async fn sanitize_svg_in_place(&mut self) -> Result<()> {
+        let bytes = self.read_all().await?;
+        let cleaned = media::sanitize_svg(&bytes);
+        let sniffed = media::sniff(&cleaned)
+            .ok_or_else(|| AppError::InvalidImage("SVG 净化后无法识别".into()))?;
+        if sniffed.mime != "image/svg+xml" {
+            return Err(AppError::InvalidImage("SVG 净化后格式异常".into()));
+        }
+        tokio::fs::write(&self.path, &cleaned)
+            .await
+            .map_err(|err| AppError::internal(format!("写回净化后的 SVG 失败：{err}")))?;
+        self.size = cleaned.len() as u64;
+        self.sha256 = pixora_crypto::hash::sha256_hex(&cleaned);
+        self.head = cleaned[..cleaned.len().min(64)].to_vec();
+        self.metadata = cleaned[..cleaned.len().min(1024 * 1024)].to_vec();
+        Ok(())
+    }
 }
 
 /// 清理遗留的临时文件。进程启动时调一次，避免上次崩溃留下的残渣堆积。
@@ -1014,7 +1085,6 @@ pub async fn purge_stale_temp_files(data_root: &std::path::Path, older_than_seco
     }
     removed
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1065,7 +1135,10 @@ mod tests {
         };
         let inherited = EffectiveUploadLimits::resolve(&site, &global, None);
         assert_eq!(inherited.max_file_bytes, 30 * 1024 * 1024);
-        assert_eq!(inherited.max_pixels, site.max_pixels, "没设的字段继续跟随系统设置");
+        assert_eq!(
+            inherited.max_pixels, site.max_pixels,
+            "没设的字段继续跟随系统设置"
+        );
 
         // 用户覆盖优先；他只设了格式，其它字段继续按全局与系统设置解析
         let own = RateLimitPolicy {

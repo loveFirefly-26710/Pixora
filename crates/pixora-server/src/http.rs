@@ -67,7 +67,6 @@ impl AppResponse {
         envelope_response(StatusCode::OK, Some(data), None, None, None)
     }
 
-
     pub fn paged<T: Serialize>(page: pixora_repo::Page<T>) -> Response {
         let meta = Meta {
             page: page.page,
@@ -77,7 +76,6 @@ impl AppResponse {
         };
         envelope_response(StatusCode::OK, Some(page.items), None, Some(meta), None)
     }
-
 }
 
 impl IntoResponse for AppResponse {
@@ -204,12 +202,7 @@ pub async fn request_context(
     let peer = addr.map(|value| value.ip().to_string());
 
     RequestContext {
-        ip: pixora_core::ipguard::IpGuard::client_ip(
-            &policy,
-            forwarded,
-            real_ip,
-            peer.as_deref(),
-        ),
+        ip: pixora_core::ipguard::IpGuard::client_ip(&policy, forwarded, real_ip, peer.as_deref()),
         user_agent: headers
             .get(header::USER_AGENT)
             .and_then(|value| value.to_str().ok())
@@ -246,9 +239,7 @@ impl Authenticated {
         {
             return Ok(());
         }
-        Err(AppError::forbidden(format!(
-            "当前 Token 缺少 {scope} 权限"
-        )))
+        Err(AppError::forbidden(format!("当前 Token 缺少 {scope} 权限")))
     }
 }
 
@@ -261,7 +252,10 @@ pub fn session_cookie(headers: &HeaderMap) -> Option<String> {
 pub fn api_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers.get(header::AUTHORIZATION) {
         if let Ok(text) = value.to_str() {
-            if let Some(token) = text.strip_prefix("Bearer ").or_else(|| text.strip_prefix("bearer ")) {
+            if let Some(token) = text
+                .strip_prefix("Bearer ")
+                .or_else(|| text.strip_prefix("bearer "))
+            {
                 let token = token.trim();
                 if !token.is_empty() {
                     return Some(token.to_string());
@@ -331,7 +325,15 @@ pub async fn authenticate_optional(
         return Ok(None);
     }
     match authenticate(state, headers, ip).await {
-        Ok(auth) => Ok(Some(auth)),
+        Ok(auth) => {
+            // 读接口的额度也要算。浏览器会话不落库，只过进程内令牌桶；
+            // Token 客户端记账，管理页能看到脚本用了多少。
+            state
+                .limits
+                .enforce_api(&auth.user, true, auth.via_token)
+                .await?;
+            Ok(Some(auth))
+        }
         // 被暂停/封禁要如实返回错误：前端要展示整页提示与申诉入口
         Err(AppError::Unauthorized) => Ok(None),
         Err(err) => Err(err),
@@ -525,11 +527,11 @@ pub fn rfc3339(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-
-
 /// 从查询串里取可选整数。
 pub fn parse_i64(params: &std::collections::HashMap<String, String>, key: &str) -> Option<i64> {
-    params.get(key).and_then(|value| value.trim().parse::<i64>().ok())
+    params
+        .get(key)
+        .and_then(|value| value.trim().parse::<i64>().ok())
 }
 
 /// 从查询串里取可选字符串（空串视为不存在）。
@@ -582,16 +584,10 @@ mod tests {
     fn csrf_requires_matching_double_submit() {
         let method = axum::http::Method::POST;
 
-        let good = headers_with(&[
-            ("cookie", "pixora_csrf=abc123"),
-            ("x-csrf-token", "abc123"),
-        ]);
+        let good = headers_with(&[("cookie", "pixora_csrf=abc123"), ("x-csrf-token", "abc123")]);
         assert!(verify_csrf(None, &good, &method).is_ok());
 
-        let mismatch = headers_with(&[
-            ("cookie", "pixora_csrf=abc123"),
-            ("x-csrf-token", "other"),
-        ]);
+        let mismatch = headers_with(&[("cookie", "pixora_csrf=abc123"), ("x-csrf-token", "other")]);
         assert!(verify_csrf(None, &mismatch, &method).is_err());
 
         let missing = headers_with(&[("cookie", "pixora_csrf=abc123")]);
@@ -648,10 +644,7 @@ mod tests {
             detail: String::new(),
         });
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            limited.headers().get(header::RETRY_AFTER).unwrap(),
-            "42"
-        );
+        assert_eq!(limited.headers().get(header::RETRY_AFTER).unwrap(), "42");
     }
 
     fn sample_user() -> User {
