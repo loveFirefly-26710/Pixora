@@ -83,8 +83,10 @@ impl ReceiveFile {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|err| AppError::internal(format!("临时目录不可用：{err}")))?;
+        // 时间戳 + pid 在同一微秒的并发上传里会撞名，补一段随机后缀
+        let suffix = pixora_crypto::token::random_hex(8)?;
         let path = dir.join(format!(
-            "recv-{}-{}",
+            "recv-{}-{}-{suffix}",
             std::process::id(),
             pixora_repo::model::now().timestamp_micros()
         ));
@@ -214,6 +216,13 @@ pub async fn blobs_exists(
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
+    // 预检也会查库，IP 规则不能只在真正上传那一步才生效
+    if let Err(err) = state
+        .ensure_ip_allowed(rectx.ip.as_deref(), pixora_core::ipguard::scope::UPLOAD)
+        .await
+    {
+        return error_response(err);
+    }
     let uploader = match resolve_uploader(&state, &headers, rectx.ip.as_deref(), &method).await {
         Ok(user) => user,
         Err(resp) => return resp,
@@ -258,7 +267,9 @@ pub async fn upload(
         Ok(Some(outcome)) => {
             finish::<serde_json::Value>(Ok(upload_payload(&outcome, csrf_of(&headers))))
         }
-        Ok(None) => error_response(AppError::bad_request("请求里没有图片文件（字段名应为 file）")),
+        Ok(None) => error_response(AppError::bad_request(
+            "请求里没有图片文件（字段名应为 file）",
+        )),
         Err(err) => error_response(err),
     }
 }
@@ -313,11 +324,7 @@ async fn collect_upload(
         .map_err(|err| AppError::bad_request(format!("表单解析失败：{err}")))?
     {
         // 字段名统一小写：老客户端里出现 `File` / `Image` 的大写写法并不罕见
-        let name = field
-            .name()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
+        let name = field.name().unwrap_or_default().trim().to_ascii_lowercase();
 
         match name.as_str() {
             // ---------- 普通字段 ----------
@@ -360,10 +367,9 @@ async fn collect_upload(
                 }
             }
             "original_name" => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|err| AppError::bad_request(format!("读取 original_name 失败：{err}")))?;
+                let text = field.text().await.map_err(|err| {
+                    AppError::bad_request(format!("读取 original_name 失败：{err}"))
+                })?;
                 let text = text.trim().to_string();
                 if !text.is_empty() {
                     parts.original_name = Some(text);
@@ -377,10 +383,9 @@ async fn collect_upload(
                 }
             }
             "reuse_existing" => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|err| AppError::bad_request(format!("读取 reuse_existing 失败：{err}")))?;
+                let text = field.text().await.map_err(|err| {
+                    AppError::bad_request(format!("读取 reuse_existing 失败：{err}"))
+                })?;
                 // 表单里的布尔：`1` / `true` 都算开
                 let text = text.trim().to_ascii_lowercase();
                 parts.reuse_existing = matches!(text.as_str(), "1" | "true" | "yes" | "on");

@@ -101,9 +101,7 @@ impl ImageSort {
             Self::Shuffle => {
                 // 取一个接近 2^31 的质数做模，避免整除导致的规律性空档
                 let seed = seed.max(1);
-                format!(
-                    "((i.id * {seed}) % 2147483647) ASC, i.id ASC"
-                )
+                format!("((i.id * {seed}) % 2147483647) ASC, i.id ASC")
             }
             Self::Newest => "i.upload_time DESC, i.id DESC".to_string(),
             Self::Oldest => "i.upload_time ASC, i.id ASC".to_string(),
@@ -195,10 +193,7 @@ impl Repo {
     // ---------- 读取 ----------
 
     pub async fn find_image(&self, id: i64) -> Result<Option<Image>> {
-        let sql = format!(
-            "SELECT {} FROM images WHERE id = ?",
-            Image::COLUMNS
-        );
+        let sql = format!("SELECT {} FROM images WHERE id = ?", Image::COLUMNS);
         let row = self.db.fetch_optional(&sql, Args::new().int(id)).await?;
         row.as_ref().map(Image::from_row).transpose()
     }
@@ -208,7 +203,11 @@ impl Repo {
     /// 「已有就复用」的上传靠它：头像这类同一张图反复设的场景，第二次起
     /// 直接引用图库里那张，不再多出一条记录。只看活着的引用——回收站里的
     /// 那张不该被悄悄翻出来用。
-    pub async fn find_live_image_by_blob(&self, owner_id: i64, blob_id: i64) -> Result<Option<Image>> {
+    pub async fn find_live_image_by_blob(
+        &self,
+        owner_id: i64,
+        blob_id: i64,
+    ) -> Result<Option<Image>> {
         let sql = format!(
             "SELECT {} FROM images WHERE owner_id = ? AND blob_id = ? AND deleted_at IS NULL ORDER BY id LIMIT 1",
             Image::COLUMNS
@@ -246,7 +245,10 @@ impl Repo {
                 return Ok(Some(Image::from_row(&row)?));
             }
         }
-        let row = self.db.fetch_optional(&sql, Args::new().int(blob_id)).await?;
+        let row = self
+            .db
+            .fetch_optional(&sql, Args::new().int(blob_id))
+            .await?;
         row.as_ref().map(Image::from_row).transpose()
     }
 
@@ -271,10 +273,14 @@ impl Repo {
         .bind(image_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(&self.db.sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"))
-            .bind(new_thumb_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            &self
+                .db
+                .sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"),
+        )
+        .bind(new_thumb_id)
+        .execute(&mut *tx)
+        .await?;
         if let Some(old_thumb_id) = old_thumb_id.filter(|old| *old != new_thumb_id) {
             let dec_ref = self.db.sql_v(
                 "UPDATE blobs SET ref_count = GREATEST(ref_count - 1, 0) WHERE id = ?",
@@ -405,7 +411,10 @@ impl Repo {
             args = args.int(*id);
         }
         let rows = self.db.fetch_all(&sql, args).await?;
-        let mut views: Vec<ImageView> = rows.iter().map(ImageView::from_row).collect::<Result<_>>()?;
+        let mut views: Vec<ImageView> = rows
+            .iter()
+            .map(ImageView::from_row)
+            .collect::<Result<_>>()?;
         let id_list: Vec<i64> = views.iter().map(|view| view.id).collect();
         let mut tag_map = self.tags_for_images(&id_list).await?;
         for view in &mut views {
@@ -439,7 +448,10 @@ impl Repo {
             .db
             .fetch_all(&sql, args.int(page.per_page).int(page.offset()))
             .await?;
-        let mut views: Vec<ImageView> = rows.iter().map(ImageView::from_row).collect::<Result<_>>()?;
+        let mut views: Vec<ImageView> = rows
+            .iter()
+            .map(ImageView::from_row)
+            .collect::<Result<_>>()?;
         let ids: Vec<i64> = views.iter().map(|view| view.id).collect();
         let mut tag_map = self.tags_for_images(&ids).await?;
         for view in &mut views {
@@ -489,7 +501,10 @@ impl Repo {
             .db
             .fetch_all(&sql, Args::new().int(limit.clamp(1, 100)))
             .await?;
-        let mut views: Vec<ImageView> = rows.iter().map(ImageView::from_row).collect::<Result<_>>()?;
+        let mut views: Vec<ImageView> = rows
+            .iter()
+            .map(ImageView::from_row)
+            .collect::<Result<_>>()?;
         let ids: Vec<i64> = views.iter().map(|view| view.id).collect();
         let mut tag_map = self.tags_for_images(&ids).await?;
         for view in &mut views {
@@ -524,15 +539,23 @@ impl Repo {
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query(&self.db.sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"))
-            .bind(image.blob_id)
+        sqlx::query(
+            &self
+                .db
+                .sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"),
+        )
+        .bind(image.blob_id)
+        .execute(&mut *tx)
+        .await?;
+        if let Some(thumb_id) = image.thumb_blob_id {
+            sqlx::query(
+                &self
+                    .db
+                    .sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"),
+            )
+            .bind(thumb_id)
             .execute(&mut *tx)
             .await?;
-        if let Some(thumb_id) = image.thumb_blob_id {
-            sqlx::query(&self.db.sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"))
-                .bind(thumb_id)
-                .execute(&mut *tx)
-                .await?;
         }
 
         if count_album {
@@ -689,12 +712,10 @@ impl Repo {
         }
 
         let mut tx = self.db.pool().begin().await?;
-        let deleted = sqlx::query(
-            &self.db.sql(
-                "DELETE FROM images WHERE (blob_id = ? OR thumb_blob_id = ?) \
+        let deleted = sqlx::query(&self.db.sql(
+            "DELETE FROM images WHERE (blob_id = ? OR thumb_blob_id = ?) \
                  AND deleted_at IS NOT NULL AND deleted_at < ?",
-            ),
-        )
+        ))
         .bind(blob_id)
         .bind(blob_id)
         .bind(ts(cutoff))
@@ -711,7 +732,11 @@ impl Repo {
     }
 
     /// 清空某个账号的回收站。返回删掉的墓碑各自对应的实体，供调用方当场回收。
-    pub async fn purge_deleted_images(&self, owner_id: i64, limit: i64) -> Result<Vec<PurgedBlobs>> {
+    pub async fn purge_deleted_images(
+        &self,
+        owner_id: i64,
+        limit: i64,
+    ) -> Result<Vec<PurgedBlobs>> {
         let limit = limit.clamp(1, 20_000);
         // 先记下这批墓碑的字节数与实体，删完从额度里扣掉——顺序不能反，
         // 行没了就算不出大小，也不知道该回收哪些实体了
@@ -736,13 +761,11 @@ impl Repo {
         }
 
         let mut tx = self.db.pool().begin().await?;
-        let deleted = sqlx::query(
-            &self.db.sql(
-                "DELETE FROM images WHERE id IN ( \
+        let deleted = sqlx::query(&self.db.sql(
+            "DELETE FROM images WHERE id IN ( \
                    SELECT id FROM images WHERE owner_id = ? AND deleted_at IS NOT NULL \
                    ORDER BY deleted_at ASC LIMIT ?)",
-            ),
-        )
+        ))
         .bind(owner_id)
         .bind(limit)
         .execute(&mut *tx)
@@ -900,7 +923,6 @@ impl Repo {
         rows.iter().map(crate::model::Blob::from_row).collect()
     }
 
-
     pub async fn album_aggregates(&self, owner_id: i64) -> Result<Vec<AlbumAggregate>> {
         let rows = self
             .db
@@ -987,29 +1009,39 @@ impl Repo {
             get_i64(&row, "id")?
         };
 
-        sqlx::query(&self.db.sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"))
-            .bind(new.blob_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            &self
+                .db
+                .sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"),
+        )
+        .bind(new.blob_id)
+        .execute(&mut *tx)
+        .await?;
         if let Some(thumb_id) = new.thumb_blob_id {
-            sqlx::query(&self.db.sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"))
-                .bind(thumb_id)
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        sqlx::query(&self.db.sql("UPDATE users SET used_bytes = used_bytes + ? WHERE id = ?"))
-            .bind(blob_size)
-            .bind(new.owner_id)
-            .execute(&mut *tx)
-            .await?;
-
-        if let Some(album_id) = new.album_id {
             sqlx::query(
                 &self
                     .db
-                    .sql("UPDATE albums SET image_count = image_count + 1, updated_at = ? WHERE id = ?"),
+                    .sql("UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?"),
             )
+            .bind(thumb_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            &self
+                .db
+                .sql("UPDATE users SET used_bytes = used_bytes + ? WHERE id = ?"),
+        )
+        .bind(blob_size)
+        .bind(new.owner_id)
+        .execute(&mut *tx)
+        .await?;
+
+        if let Some(album_id) = new.album_id {
+            sqlx::query(&self.db.sql(
+                "UPDATE albums SET image_count = image_count + 1, updated_at = ? WHERE id = ?",
+            ))
             .bind(&now)
             .bind(album_id)
             .execute(&mut *tx)
@@ -1040,7 +1072,11 @@ impl Repo {
     ///
     /// **账号用量不动**：进回收站的文件还占着盘，也继续算在已用额度里，
     /// 只有彻底删除（`purge_*`）才把字节数还回去。
-    pub async fn delete_image_reference(&self, deletion: &ImageDeletion, at: DateTime<Utc>) -> Result<()> {
+    pub async fn delete_image_reference(
+        &self,
+        deletion: &ImageDeletion,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
         let mut tx = self.db.pool().begin().await?;
         let stamp = ts(at);
 
@@ -1102,7 +1138,11 @@ impl Repo {
     ///
     /// 逐张在同一个事务里删：跨表计数必须成对变化，一次性 `UPDATE ... WHERE id IN (...)`
     /// 做不到「按每张图的大小回退用量」。
-    pub async fn delete_images(&self, deletions: &[ImageDeletion], at: DateTime<Utc>) -> Result<u64> {
+    pub async fn delete_images(
+        &self,
+        deletions: &[ImageDeletion],
+        at: DateTime<Utc>,
+    ) -> Result<u64> {
         let mut removed = 0u64;
         for deletion in deletions {
             self.delete_image_reference(deletion, at).await?;
@@ -1182,7 +1222,9 @@ impl Repo {
         let old_rows = self
             .db
             .fetch_all(
-                &format!("SELECT id, album_id FROM images WHERE owner_id = ? AND id IN ({placeholders})"),
+                &format!(
+                    "SELECT id, album_id FROM images WHERE owner_id = ? AND id IN ({placeholders})"
+                ),
                 {
                     let mut args = Args::new().int(owner_id);
                     for id in ids {
@@ -1215,11 +1257,9 @@ impl Repo {
                 .await?;
             }
             if let Some(new_album) = album_id {
-                sqlx::query(
-                    &self.db.sql(
-                        "UPDATE albums SET image_count = image_count + 1, updated_at = ? WHERE id = ?",
-                    ),
-                )
+                sqlx::query(&self.db.sql(
+                    "UPDATE albums SET image_count = image_count + 1, updated_at = ? WHERE id = ?",
+                ))
                 .bind(&now)
                 .bind(new_album)
                 .execute(&mut *tx)
@@ -1274,7 +1314,9 @@ impl Repo {
                 "UPDATE images SET {} WHERE owner_id = ? AND id IN ({placeholders}) AND deleted_at IS NULL",
                 sets.join(", ")
             ));
-            let result = sqlx::query_with(&sql, args.take()).execute(&mut *tx).await?;
+            let result = sqlx::query_with(&sql, args.take())
+                .execute(&mut *tx)
+                .await?;
             affected = result.rows_affected();
         }
 
@@ -1358,9 +1400,24 @@ impl Repo {
 
     /// 随机取一张图。给随机图 API 用：博客头图、桌面壁纸这类场景。
     ///
-    /// 用 `ORDER BY RANDOM()`（MySQL 是 `RAND()`）而不是自建随机偏移：
-    /// 图床规模下这条语句的代价可以接受，而少一个会漂移的偏移量计算。
+    /// 无筛选的公开图走「随机 id + 主键范围」的快路径：`ORDER BY RANDOM()`
+    /// 在几十万行上要全表扫一遍再排序，而随机图 API 可能被首页每隔几秒调一次。
+    /// 带搜索/标签/相册的请求仍走原来的随机排序，保证语义不变。
     pub async fn random_image(&self, filter: &ImageFilter) -> Result<Option<ImageView>> {
+        let simple_public = filter.public_only
+            && !filter.include_deleted
+            && filter.owner_id.is_none()
+            && filter.album_id.is_none()
+            && filter.query.is_none()
+            && filter.tag.is_none()
+            && filter.ids.is_none();
+        if simple_public {
+            if let Some(view) = self.random_public_image_fast().await? {
+                return Ok(Some(view));
+            }
+            return Ok(None);
+        }
+
         let (where_sql, args) = self.image_where(filter);
         let order = self.db.sql_v(
             "ORDER BY RANDOM() LIMIT 1",
@@ -1375,6 +1432,50 @@ impl Repo {
             return Ok(None);
         };
         Ok(Some(ImageView::from_row(row)?))
+    }
+
+    /// 公开图随机快路径：取 id 区间内的随机点，再找第一张 id 不小于它的公开图；
+    /// 到末尾没有就回绕到第一张。仍然是均匀的「随机起点」，只是不保证每张图
+    /// 被选中的概率完全相等（id 有空洞时会有偏差，对随机图 API 足够）。
+    async fn random_public_image_fast(&self) -> Result<Option<ImageView>> {
+        let bounds = self
+            .db
+            .fetch_optional(
+                "SELECT MIN(id) AS min_id, MAX(id) AS max_id FROM images \
+                  WHERE visibility = 'public' AND deleted_at IS NULL",
+                Args::new(),
+            )
+            .await?;
+        let Some(bounds) = bounds else {
+            return Ok(None);
+        };
+        let (Some(min_id), Some(max_id)) = (
+            get_opt_i64(&bounds, "min_id")?,
+            get_opt_i64(&bounds, "max_id")?,
+        ) else {
+            return Ok(None);
+        };
+        let span = (max_id as i128 - min_id as i128 + 1).max(1) as u128;
+        let target = min_id + (random_u64() as u128 % span) as i64;
+
+        let forward = format!(
+            "{IMAGE_VIEW_SQL} WHERE i.visibility = 'public' AND i.deleted_at IS NULL \
+                  AND i.id >= ? ORDER BY i.id ASC LIMIT 1"
+        );
+        if let Some(row) = self
+            .db
+            .fetch_optional(&forward, Args::new().int(target))
+            .await?
+        {
+            return Ok(Some(ImageView::from_row(&row)?));
+        }
+
+        let wrap = format!(
+            "{IMAGE_VIEW_SQL} WHERE i.visibility = 'public' AND i.deleted_at IS NULL \
+                  ORDER BY i.id ASC LIMIT 1"
+        );
+        let row = self.db.fetch_optional(&wrap, Args::new()).await?;
+        row.as_ref().map(ImageView::from_row).transpose()
     }
 
     /// 图片总数（公开面）。
@@ -1466,6 +1567,20 @@ const IMAGE_VIEW_SQL: &str = "SELECT i.id, i.owner_id, u.uid AS owner_uid, i.alb
    JOIN blobs b ON b.id = i.blob_id \
    JOIN users u ON u.id = i.owner_id \
    LEFT JOIN albums a ON a.id = i.album_id";
+
+/// 给随机图用的轻量随机数。不需要密码学强度，只要每次调用分布不同。
+fn random_u64() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(nanos);
+    hasher.finish()
+}
 
 /// 缩略图兜底与对账要用到的补充查询。
 ///

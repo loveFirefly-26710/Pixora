@@ -161,8 +161,8 @@ impl AppState {
 
         // 先认驱动名：填了不支持的驱动要当场报错，而不是拿正在用的库糊弄过去。
         // 驱动名是用户填的，所以是 400 而不是 500。
-        let requested = DbDriver::parse(&input.driver)
-            .map_err(|err| AppError::bad_request(err.to_string()))?;
+        let requested =
+            DbDriver::parse(&input.driver).map_err(|err| AppError::bad_request(err.to_string()))?;
 
         // 再验证**当前进程正在用的那个连接池**，不另开一个池。两个原因：
         //   1. 数据库配置只走环境变量（ADR-0003），重启后生效的仍是环境变量里的值，
@@ -201,7 +201,7 @@ impl AppState {
             return Err(AppError::bad_request("管理员账号已创建，请进入下一步"));
         }
 
-        let password_hash = pixora_crypto::password::hash_password(&input.password)?;
+        let password_hash = self.hash_password(&input.password).await?;
         let (quota_default, _) = self.settings.quota_values().await?;
         let user = self
             .create_first_admin(&email, &password_hash, quota_default)
@@ -393,7 +393,9 @@ impl AppState {
             value if (1..=65535).contains(&value) => value,
             _ => return Err(AppError::bad_request("SMTP 端口不合法")),
         };
-        self.settings.set_integer(keys::MAIL_SMTP_PORT, port).await?;
+        self.settings
+            .set_integer(keys::MAIL_SMTP_PORT, port)
+            .await?;
         self.settings
             .set(keys::MAIL_SMTP_SECURITY, security.as_str())
             .await?;
@@ -422,9 +424,7 @@ impl AppState {
             .unwrap_or(user);
         if !from_email.is_empty() {
             crate::antispam::validate_email_format(from_email)?;
-            self.settings
-                .set(keys::MAIL_FROM_EMAIL, from_email)
-                .await?;
+            self.settings.set(keys::MAIL_FROM_EMAIL, from_email).await?;
         }
         Ok(())
     }
@@ -433,7 +433,8 @@ impl AppState {
 /// 独立入口：向导第一步可能在数据库还没接上、`AppState` 还不存在时调用，
 /// 所以这里自己建临时连接，用完即关，不碰进程里的池。
 pub async fn check_database(input: &DbInput) -> Result<String> {
-    let driver = DbDriver::parse(&input.driver).map_err(|err| AppError::bad_request(err.to_string()))?;
+    let driver =
+        DbDriver::parse(&input.driver).map_err(|err| AppError::bad_request(err.to_string()))?;
     let dsn = build_dsn(input, driver)?;
 
     let db = Db::connect(driver, &dsn, 2)
@@ -481,12 +482,7 @@ async fn server_description(db: &Db, driver: DbDriver) -> String {
             // version() 返回 "PostgreSQL 16.4 on x86_64…"，取前两个词就够用
             let version = scalar(db, "SELECT version() AS v")
                 .await
-                .map(|raw| {
-                    raw.split_whitespace()
-                        .take(2)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
+                .map(|raw| raw.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
                 .unwrap_or_default();
             let charset = scalar(db, "SELECT current_setting('server_encoding') AS v")
                 .await
@@ -494,7 +490,9 @@ async fn server_description(db: &Db, driver: DbDriver) -> String {
             compose("PostgreSQL", &version, &charset)
         }
         DbDriver::MySql => {
-            let version = scalar(db, "SELECT VERSION() AS v").await.unwrap_or_default();
+            let version = scalar(db, "SELECT VERSION() AS v")
+                .await
+                .unwrap_or_default();
             let charset = scalar(db, "SELECT @@character_set_server AS v")
                 .await
                 .unwrap_or_default();
@@ -578,9 +576,7 @@ fn build_dsn(input: &DbInput, driver: DbDriver) -> Result<String> {
         credentials.push('@');
     }
 
-    Ok(format!(
-        "{scheme}://{credentials}{host}:{port}/{database}"
-    ))
+    Ok(format!("{scheme}://{credentials}{host}:{port}/{database}"))
 }
 
 /// 连接串里的用户名与密码要做百分号编码：密码里出现 `@`、`:`、`/` 这类字符
@@ -739,7 +735,11 @@ mod tests {
             driver: "sqlite".to_string(),
             host: String::new(),
             port: 0,
-            database: dir.path().join("whatever.db").to_string_lossy().into_owned(),
+            database: dir
+                .path()
+                .join("whatever.db")
+                .to_string_lossy()
+                .into_owned(),
             username: String::new(),
             password: String::new(),
         };
@@ -747,7 +747,10 @@ mod tests {
         let probed = state.install_check_database(input).await.unwrap();
         assert!(probed.contains("SQLite"), "{probed}");
         assert!(probed.contains("字符集"), "{probed}");
-        assert!(probed.contains("增量迁移"), "已迁移过的库应当报增量迁移：{probed}");
+        assert!(
+            probed.contains("增量迁移"),
+            "已迁移过的库应当报增量迁移：{probed}"
+        );
 
         // 填的驱动与当前不一致时要如实说明「重启后才切换」
         let mismatch = state
@@ -900,11 +903,7 @@ mod tests {
         assert_eq!(albums[0].id, account.default_album_id);
 
         // 站点名落到设置里
-        let site_name = state
-            .settings
-            .string(keys::SITE_NAME, "")
-            .await
-            .unwrap();
+        let site_name = state.settings.string(keys::SITE_NAME, "").await.unwrap();
         assert_eq!(site_name, "Pixora 自建");
 
         // 重复提交不能再建一个管理员，也不能改掉现有账号
@@ -979,11 +978,7 @@ mod tests {
 
         let error = state.install_finish().await.expect_err("还没有管理员");
         assert_eq!(error.code(), "BAD_REQUEST");
-        assert!(
-            error.message().contains("管理员"),
-            "{}",
-            error.message()
-        );
+        assert!(error.message().contains("管理员"), "{}", error.message());
 
         install_through_site(&state).await;
         let result = state.install_finish().await.unwrap();

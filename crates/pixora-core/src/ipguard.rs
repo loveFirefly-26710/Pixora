@@ -10,8 +10,9 @@
 //!   - **只信最靠近服务端的那一层代理**：`X-Forwarded-For` 从右往左数第 N 跳，
 //!     N 就是可信代理层数。信任全部转发头等于把 IP 黑名单的钥匙交给客户端。
 
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -45,8 +46,10 @@ impl Default for IpPolicy {
     fn default() -> Self {
         Self {
             enabled: true,
-            trust_proxy: true,
-            proxy_hops: 1,
+            // 读不出设置时宁可不信任转发头：伪造 X-Forwarded-For 的代价
+            // 比「代理后面的所有请求都记成代理 IP」更高。
+            trust_proxy: false,
+            proxy_hops: 0,
             auto_ban: true,
             fail_threshold: 20,
             fail_window_minutes: 10,
@@ -82,16 +85,25 @@ pub struct IpGuard {
     repo: Repo,
     settings: Settings,
     cache: RwLock<Option<Cache>>,
+    /// 环境变量里给的默认值。后台设置没写过时用它，保证
+    /// `PIXORA_TRUST_PROXY` 不是解析了却没人读的摆设。
+    default_proxy_hops: usize,
+    /// 规则命中次数的写库节流：同一规则最多每分钟记一次。
+    /// 被拦截的客户端会不停重试，逐请求 UPDATE 等于把封禁变成写放大。
+    hit_marks: Mutex<HashMap<i64, Instant>>,
 }
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
+const HIT_MARK_TTL: Duration = Duration::from_secs(60);
 
 impl IpGuard {
-    pub fn new(repo: Repo, settings: Settings) -> Self {
+    pub fn new(repo: Repo, settings: Settings, trust_proxy: usize) -> Self {
         Self {
             repo,
             settings,
             cache: RwLock::new(None),
+            default_proxy_hops: trust_proxy.min(10),
+            hit_marks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -101,23 +113,33 @@ impl IpGuard {
     }
 
     pub async fn policy(&self) -> Result<IpPolicy> {
+        let default_trust = self.default_proxy_hops > 0;
         Ok(IpPolicy {
             enabled: self.settings.bool(keys::IP_ENABLED, true).await?,
-            trust_proxy: self.settings.bool(keys::IP_TRUST_PROXY, true).await?,
+            trust_proxy: self
+                .settings
+                .bool(keys::IP_TRUST_PROXY, default_trust)
+                .await?,
             proxy_hops: self
                 .settings
-                .integer(keys::IP_PROXY_HOPS, 1)
+                .integer(keys::IP_PROXY_HOPS, self.default_proxy_hops as i64)
                 .await?
                 .clamp(0, 10) as usize,
             auto_ban: self.settings.bool(keys::IP_AUTO_BAN, true).await?,
             fail_threshold: self
                 .settings
-                .integer(keys::IP_FAIL_THRESHOLD, crate::settings::defaults::IP_FAIL_THRESHOLD)
+                .integer(
+                    keys::IP_FAIL_THRESHOLD,
+                    crate::settings::defaults::IP_FAIL_THRESHOLD,
+                )
                 .await?,
             fail_window_minutes: 10,
             ban_minutes: self
                 .settings
-                .integer(keys::IP_BAN_MINUTES, crate::settings::defaults::IP_BAN_MINUTES)
+                .integer(
+                    keys::IP_BAN_MINUTES,
+                    crate::settings::defaults::IP_BAN_MINUTES,
+                )
                 .await?,
         })
     }
@@ -187,8 +209,25 @@ impl IpGuard {
             }
         }
 
-        // 命中次数累加（失败不影响判定）
-        for id in hit_ids {
+        // 命中次数累加（失败不影响判定）。节流到每分钟一次：被拦的客户端
+        // 可能每秒重试几十次，逐请求写库只会把封禁变成新的压力源。
+        let to_bump: Vec<i64> = {
+            let mut marks = self.hit_marks.lock().expect("IP 命中节流表不该中毒");
+            hit_ids
+                .into_iter()
+                .filter(|id| {
+                    let fresh = marks
+                        .get(id)
+                        .map(|at| at.elapsed() >= HIT_MARK_TTL)
+                        .unwrap_or(true);
+                    if fresh {
+                        marks.insert(*id, Instant::now());
+                    }
+                    fresh
+                })
+                .collect()
+        };
+        for id in to_bump {
             if let Err(err) = self.repo.bump_ip_rule_hits(id).await {
                 tracing::warn!(rule_id = id, error = %err, "IP 规则命中计数失败");
             }
@@ -225,11 +264,7 @@ impl IpGuard {
     ///
     /// 临时规则带 `is_auto` 标记与到期时间，界面上可以「提前解除」。
     /// 返回 `Some(提示)` 表示这次触发了自动封禁。
-    pub async fn record_failure(
-        &self,
-        ip: Option<&str>,
-        action: &str,
-    ) -> Result<Option<String>> {
+    pub async fn record_failure(&self, ip: Option<&str>, action: &str) -> Result<Option<String>> {
         let Some(ip) = ip.filter(|value| !value.trim().is_empty()) else {
             return Ok(None);
         };
@@ -284,7 +319,13 @@ impl IpGuard {
             .await?;
         self.invalidate();
 
-        tracing::warn!(ip, action, hits, minutes = policy.ban_minutes, "触发自动临时封禁");
+        tracing::warn!(
+            ip,
+            action,
+            hits,
+            minutes = policy.ban_minutes,
+            "触发自动临时封禁"
+        );
         Ok(Some(note))
     }
 
@@ -323,7 +364,11 @@ impl IpGuard {
     }
 
     /// 规则列表，管理界面用。
-    pub async fn list(&self, filter: &pixora_repo::repo::iprules::IpRuleFilter, limit: i64) -> Result<Vec<IpRule>> {
+    pub async fn list(
+        &self,
+        filter: &pixora_repo::repo::iprules::IpRuleFilter,
+        limit: i64,
+    ) -> Result<Vec<IpRule>> {
         Ok(self.repo.list_ip_rules(filter, limit).await?)
     }
 
@@ -373,7 +418,11 @@ mod tests {
             Some("5.6.7.8"),
             Some("198.51.100.42"),
         );
-        assert_eq!(ip.as_deref(), Some("198.51.100.42"), "不信任代理头时必须用连接对端地址");
+        assert_eq!(
+            ip.as_deref(),
+            Some("198.51.100.42"),
+            "不信任代理头时必须用连接对端地址"
+        );
     }
 
     #[test]
@@ -389,7 +438,12 @@ mod tests {
 
     #[test]
     fn real_ip_header_is_used_when_no_chain() {
-        let ip = IpGuard::client_ip(&policy(1, true), None, Some("203.0.113.9"), Some("10.0.0.1"));
+        let ip = IpGuard::client_ip(
+            &policy(1, true),
+            None,
+            Some("203.0.113.9"),
+            Some("10.0.0.1"),
+        );
         assert_eq!(ip.as_deref(), Some("203.0.113.9"));
     }
 }

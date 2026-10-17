@@ -16,7 +16,7 @@
 //! 所以这里对全部产物发 `Cache-Control: no-cache`（每次校验）+ 内容 ETag：
 //! 没变就是一次 304、没有响应体，代价只是多一个请求头。
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -61,7 +61,11 @@ async fn try_file(state: &AppState, request_headers: &HeaderMap, path: &str) -> 
     {
         let asset = WebAssets::get(path)?;
         let mime = mime_of(path);
-        Some(build_response(request_headers, asset.data.into_owned(), mime))
+        Some(build_response(
+            request_headers,
+            asset.data.into_owned(),
+            mime,
+        ))
     }
     #[cfg(not(feature = "embed-web"))]
     {
@@ -69,12 +73,25 @@ async fn try_file(state: &AppState, request_headers: &HeaderMap, path: &str) -> 
     }
 }
 
-async fn read_from_disk(dir: &PathBuf, request_headers: &HeaderMap, path: &str) -> Option<Response> {
-    // 路径穿越防线：相对路径里不许出现 `..`
-    if path.split('/').any(|part| part == "..") {
+async fn read_from_disk(
+    dir: &PathBuf,
+    request_headers: &HeaderMap,
+    path: &str,
+) -> Option<Response> {
+    // 路径穿越防线：除了 `..`，Windows 上反斜杠也是分隔符、`C:` 这类前缀
+    // 会让 `join` 直接换根。开发模式（PIXORA_WEB_DIR）下也必须挡住。
+    if path.contains('\\') || path.split('/').any(|part| part == ".." || part == ".") {
         return None;
     }
-    let target = dir.join(path);
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| matches!(part, Component::Prefix(_) | Component::RootDir))
+    {
+        return None;
+    }
+    let target = dir.join(relative);
     let bytes = tokio::fs::read(&target).await.ok()?;
     let mime = mime_of(path);
     Some(build_response(request_headers, bytes, mime))
@@ -135,14 +152,35 @@ mod tests {
         let body = b"console.log('pixora')".to_vec();
         let fresh = build_response(&HeaderMap::new(), body.clone(), "text/javascript");
         assert_eq!(fresh.status(), StatusCode::OK);
-        let etag = fresh.headers().get(header::ETAG).unwrap().to_str().unwrap().to_string();
-        assert_eq!(fresh.headers().get(header::CACHE_CONTROL).unwrap(), "no-cache");
+        let etag = fresh
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            fresh.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
 
         // 带对 ETag 的请求 → 304，且没有实体
-        let cached = build_response(&headers_with_if_none_match(&etag), body.clone(), "text/javascript");
+        let cached = build_response(
+            &headers_with_if_none_match(&etag),
+            body.clone(),
+            "text/javascript",
+        );
         assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
         assert!(cached.headers().get(header::CONTENT_TYPE).is_none());
-        assert_eq!(cached.headers().get(header::ETAG).unwrap().to_str().unwrap(), etag);
+        assert_eq!(
+            cached
+                .headers()
+                .get(header::ETAG)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            etag
+        );
 
         // 弱校验前缀与 `*` 也认
         let weak = build_response(
@@ -151,7 +189,11 @@ mod tests {
             "text/javascript",
         );
         assert_eq!(weak.status(), StatusCode::NOT_MODIFIED);
-        let star = build_response(&headers_with_if_none_match("*"), body.clone(), "text/javascript");
+        let star = build_response(
+            &headers_with_if_none_match("*"),
+            body.clone(),
+            "text/javascript",
+        );
         assert_eq!(star.status(), StatusCode::NOT_MODIFIED);
 
         // 内容变了 ETag 就变，不能命中 304
@@ -161,7 +203,15 @@ mod tests {
             "text/javascript",
         );
         assert_eq!(changed.status(), StatusCode::OK);
-        assert_ne!(changed.headers().get(header::ETAG).unwrap().to_str().unwrap(), etag);
+        assert_ne!(
+            changed
+                .headers()
+                .get(header::ETAG)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            etag
+        );
     }
 }
 

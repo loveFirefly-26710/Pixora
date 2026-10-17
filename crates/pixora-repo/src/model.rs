@@ -258,7 +258,7 @@ pub struct User {
     pub auto_unsuspend_at: Option<DateTime<Utc>>,
     /// 管理员直接设过密码：下次登录必须自己改一个。没改之前只放行 /me 与改密码本身
     pub must_change_password: bool,
-    /// 头像：站内相对路径（`/images/x.png`）或外链。空 = 没设，界面回落到邮箱首字母
+    /// 头像：站内相对路径（`/images/x.png`）或外链。空 = 没设，界面回落到站点默认或内置翼标
     pub avatar: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_login_at: Option<DateTime<Utc>>,
@@ -266,7 +266,8 @@ pub struct User {
 }
 
 impl User {
-    pub const COLUMNS: &'static str = "id, uid, email, email_verified, password_hash, role, status, \
+    pub const COLUMNS: &'static str =
+        "id, uid, email, email_verified, password_hash, role, status, \
          status_reason, status_changed_at, status_changed_by, totp_secret, totp_enabled, \
          quota_bytes, used_bytes, login_fail_count, locked_until, auto_unsuspend_at, \
          must_change_password, avatar, created_at, last_login_at, last_login_ip";
@@ -409,7 +410,8 @@ impl SessionPolicy {
 }
 
 impl Session {
-    pub const COLUMNS: &'static str = "id, user_id, token_hash, device, ip, user_agent, created_at, \
+    pub const COLUMNS: &'static str =
+        "id, user_id, token_hash, device, ip, user_agent, created_at, \
          last_seen_at, expires_at, revoked_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
@@ -450,7 +452,8 @@ impl Session {
         {
             return true;
         }
-        if policy.absolute_days > 0 && now - self.created_at > chrono::Duration::days(policy.absolute_days)
+        if policy.absolute_days > 0
+            && now - self.created_at > chrono::Duration::days(policy.absolute_days)
         {
             return true;
         }
@@ -740,7 +743,8 @@ pub struct UploadJob {
 }
 
 impl UploadJob {
-    pub const COLUMNS: &'static str = "id, owner_id, album_id, sha256, original_name, size, status, \
+    pub const COLUMNS: &'static str =
+        "id, owner_id, album_id, sha256, original_name, size, status, \
          dedup, image_id, attempts, error, created_at, started_at, finished_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
@@ -848,7 +852,8 @@ pub struct RateLimitPolicy {
 }
 
 impl RateLimitPolicy {
-    pub const COLUMNS: &'static str = "id, user_id, api_per_minute, api_per_hour, api_read_per_minute, \
+    pub const COLUMNS: &'static str =
+        "id, user_id, api_per_minute, api_per_hour, api_read_per_minute, \
          api_burst, upload_per_minute, upload_per_hour, upload_per_day, upload_bytes_per_day, \
          max_concurrent_uploads, max_batch_size, max_file_size, max_pixels, max_width, max_height, \
          formats, download_per_minute, download_per_day, unlimited, note, updated_at";
@@ -976,7 +981,8 @@ pub struct TermsVersion {
 }
 
 impl TermsVersion {
-    pub const COLUMNS: &'static str = "id, version, title, body, summary, status, require_reconsent, \
+    pub const COLUMNS: &'static str =
+        "id, version, title, body, summary, status, require_reconsent, \
          effective_at, published_at, created_by, created_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
@@ -1033,8 +1039,7 @@ pub struct TermsConsent {
 }
 
 impl TermsConsent {
-    pub const COLUMNS: &'static str =
-        "id, user_id, version_id, version, agreed_at, ip, user_agent";
+    pub const COLUMNS: &'static str = "id, user_id, version_id, version, agreed_at, ip, user_agent";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -1185,7 +1190,8 @@ pub struct MailOutboxItem {
 }
 
 impl MailOutboxItem {
-    pub const COLUMNS: &'static str = "id, to_email, template_name, vars, status, attempts, error, \
+    pub const COLUMNS: &'static str =
+        "id, to_email, template_name, vars, status, attempts, error, \
          next_attempt_at, created_at, sent_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
@@ -1305,7 +1311,10 @@ mod tests {
         let late = ts(Utc.with_ymd_and_hms(2026, 10, 14, 15, 30, 0).unwrap());
         assert_eq!(early, "2026-01-02T03:04:05.000000Z");
         assert!(early < late, "定长 RFC3339 的字典序必须与时间序一致");
-        assert_eq!(parse_ts(&late).unwrap(), Utc.with_ymd_and_hms(2026, 10, 14, 15, 30, 0).unwrap());
+        assert_eq!(
+            parse_ts(&late).unwrap(),
+            Utc.with_ymd_and_hms(2026, 10, 14, 15, 30, 0).unwrap()
+        );
     }
 
     #[test]

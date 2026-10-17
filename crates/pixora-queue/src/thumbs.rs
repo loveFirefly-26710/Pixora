@@ -42,10 +42,7 @@ pub async fn backfill(state: &Arc<AppState>, limit: i64) -> pixora_core::Result<
         return Ok(0);
     }
 
-    let images = state
-        .repo
-        .list_images_missing_thumb(limit, true)
-        .await?;
+    let images = state.repo.list_images_missing_thumb(limit, true).await?;
     if images.is_empty() {
         return Ok(0);
     }
@@ -74,9 +71,20 @@ const THUMB_MIN_EDGE: i32 = 768;
 /// 自己跟上新尺寸，不需要管理员记得去点「重算缩略图」；重算之后尺寸记在实体
 /// 行上，不会再被捞出来，所以是收敛的。
 pub async fn refresh_small_thumbs(state: &Arc<AppState>, limit: i64) -> pixora_core::Result<u64> {
+    // 这一轮会在启动时无条件被调用。服务端缩略图兜底没开时就不该碰像素：
+    // 大库上一次性解码原图会把 CPU / 内存打满，与「默认不在服务端缩放」的
+    // 设计约束冲突。管理员明确开了兜底、或点了「重算缩略图」，才继续。
+    if !state.settings.upload().await?.thumb_server_fallback {
+        return Ok(0);
+    }
     let images = state
         .repo
-        .list_images_with_small_thumb(THUMB_MIN_EDGE, MAX_SOURCE_BYTES as i64, MAX_SOURCE_PIXELS as i64, limit)
+        .list_images_with_small_thumb(
+            THUMB_MIN_EDGE,
+            MAX_SOURCE_BYTES as i64,
+            MAX_SOURCE_PIXELS as i64,
+            limit,
+        )
         .await?;
     let mut refreshed = 0u64;
     for image in images {
@@ -242,7 +250,11 @@ async fn make_thumb_for(
 }
 
 /// 单张：读原图 → 缩放 → 编码 → 存成实体 → 挂到图片上。
-async fn generate_for(state: &Arc<AppState>, image_id: i64, blob_id: i64) -> pixora_core::Result<bool> {
+async fn generate_for(
+    state: &Arc<AppState>,
+    image_id: i64,
+    blob_id: i64,
+) -> pixora_core::Result<bool> {
     let Some(blob) = state.repo.find_blob_by_id(blob_id).await? else {
         return Ok(false);
     };
@@ -321,7 +333,12 @@ async fn generate_for(state: &Arc<AppState>, image_id: i64, blob_id: i64) -> pix
 /// 从编码好的 JPEG 里读出像素尺寸，写进实体行（判断该不该重算靠它）。
 fn encoded_dimensions(bytes: &[u8]) -> (Option<i32>, Option<i32>) {
     pixora_core::media::dimensions(bytes, "image/jpeg")
-        .map(|(w, h)| (Some(w as i32).filter(|v| *v > 0), Some(h as i32).filter(|v| *v > 0)))
+        .map(|(w, h)| {
+            (
+                Some(w as i32).filter(|v| *v > 0),
+                Some(h as i32).filter(|v| *v > 0),
+            )
+        })
         .unwrap_or((None, None))
 }
 
@@ -376,10 +393,7 @@ mod tests {
         let buffer = image::RgbImage::from_pixel(width, height, image::Rgb([120, 180, 240]));
         let mut out = Vec::new();
         image::DynamicImage::ImageRgb8(buffer)
-            .write_to(
-                &mut std::io::Cursor::new(&mut out),
-                image::ImageFormat::Png,
-            )
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .expect("编码 PNG");
         out
     }
@@ -397,7 +411,11 @@ mod tests {
             .expect("解码缩略图");
         assert!(thumb.starts_with(&[0xFF, 0xD8, 0xFF]), "JPEG 魔数");
         assert_eq!(decoded.width(), MAX_EDGE);
-        assert_eq!(decoded.height(), MAX_EDGE * 3 / 4, "等比缩放：1600×1200 → 1024×768");
+        assert_eq!(
+            decoded.height(),
+            MAX_EDGE * 3 / 4,
+            "等比缩放：1600×1200 → 1024×768"
+        );
     }
 
     #[test]

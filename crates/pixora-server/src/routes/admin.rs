@@ -14,6 +14,10 @@
 
 use std::sync::Arc;
 
+use crate::http::{
+    cookie_value, error_response, finish, finish_page, parse_i64, parse_str, request_context,
+    rfc3339, CSRF_COOKIE,
+};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
@@ -28,15 +32,11 @@ use pixora_core::stats::BackendView;
 use pixora_core::{AppError, AppState};
 use pixora_repo::model::{now, RateLimitPolicy};
 use pixora_repo::repo::audit::AuditFilter;
-use pixora_repo::repo::identities::provider;
 use pixora_repo::repo::backends::{BackendPatch, NewBackend};
+use pixora_repo::repo::identities::provider;
 use pixora_repo::repo::iprules::{IpRuleFilter, NewIpRule};
 use pixora_repo::repo::users::UserFilter;
 use pixora_repo::PageRequest;
-use crate::http::{
-    cookie_value, error_response, finish, finish_page, parse_i64, parse_str, request_context,
-    rfc3339, CSRF_COOKIE,
-};
 
 use super::{
     bad_request, field_i64, field_opt_bool, field_opt_i64, field_opt_str, field_str, not_found,
@@ -49,18 +49,11 @@ use super::{
 macro_rules! admin_guard {
     ($state:expr, $headers:expr, $method:expr, $peer:expr, $path:expr) => {{
         let rectx = request_context(&$state, &$headers, $peer.addr()).await;
-        let auth = match require_admin(
-            &$state,
-            &$headers,
-            rectx.ip.as_deref(),
-            &$method,
-            $path,
-        )
-        .await
-        {
-            Ok(auth) => auth,
-            Err(resp) => return resp,
-        };
+        let auth =
+            match require_admin(&$state, &$headers, rectx.ip.as_deref(), &$method, $path).await {
+                Ok(auth) => auth,
+                Err(resp) => return resp,
+            };
         (rectx, auth)
     }};
 }
@@ -106,8 +99,14 @@ pub async fn user_detail(
 
     if let Ok(Some(target)) = state.repo.find_user_by_id(user_id).await {
         if target.id != auth.user.id {
-            super::audit_admin_view(&state, &auth.user, &target.uid, "admin_user_detail", rectx.ip.as_deref())
-                .await;
+            super::audit_admin_view(
+                &state,
+                &auth.user,
+                &target.uid,
+                "admin_user_detail",
+                rectx.ip.as_deref(),
+            )
+            .await;
         }
     }
 
@@ -300,7 +299,11 @@ pub async fn user_quota(
         Err(resp) => return resp,
     };
 
-    finish(state.set_user_quota(auth.user.id, user_id, quota_bytes).await)
+    finish(
+        state
+            .set_user_quota(auth.user.id, user_id, quota_bytes)
+            .await,
+    )
 }
 
 /// `POST /api/v1/admin/users/{id}/status` — 处置：暂停 / 封禁 / 恢复。
@@ -417,7 +420,13 @@ pub async fn storage_thumbs_rebuild(
     method: Method,
     peer: PeerAddr,
 ) -> Response {
-    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/storage/thumbs/rebuild");
+    let (rectx, auth) = admin_guard!(
+        state,
+        headers,
+        method,
+        peer,
+        "/admin/storage/thumbs/rebuild"
+    );
     match state.start_thumb_rebuild().await {
         Ok(progress) => {
             // 立刻开跑：队列那边的轮询默认是 5 分钟一轮，管理员点了按钮不该干等。
@@ -556,11 +565,7 @@ pub async fn storage_prefix(
         Err(resp) => return resp,
     };
     let normalized = normalize_prefix(&raw);
-    if let Err(err) = state
-        .settings
-        .set(keys::UPLOAD_PREFIX, &normalized)
-        .await
-    {
+    if let Err(err) = state.settings.set(keys::UPLOAD_PREFIX, &normalized).await {
         return crate::http::error_response(err);
     }
 
@@ -595,7 +600,9 @@ pub async fn storage_capacity(
         Some(value) => {
             let mode = value.trim().to_ascii_lowercase();
             if !matches!(mode.as_str(), "auto" | "manual" | "hidden") {
-                return bad_request(format!("容量模式只能是 auto / manual / hidden，收到 {value}"));
+                return bad_request(format!(
+                    "容量模式只能是 auto / manual / hidden，收到 {value}"
+                ));
             }
             Some(mode)
         }
@@ -658,7 +665,8 @@ pub async fn backend_create(
     if !pixora_storage::names::all().contains(&driver.as_str()) {
         return bad_request(format!("未知的存储驱动：{driver}"));
     }
-    let label = field_opt_str(&body, "label").unwrap_or_else(|| pixora_storage::names::label(&driver).to_string());
+    let label = field_opt_str(&body, "label")
+        .unwrap_or_else(|| pixora_storage::names::label(&driver).to_string());
     let config = body
         .get("config")
         .cloned()
@@ -872,7 +880,13 @@ pub async fn backend_test(
     peer: PeerAddr,
     Path(backend_id): Path<i64>,
 ) -> Response {
-    let (_rectx, _auth) = admin_guard!(state, headers, method, peer, "/admin/storage/backends/{id}/test");
+    let (_rectx, _auth) = admin_guard!(
+        state,
+        headers,
+        method,
+        peer,
+        "/admin/storage/backends/{id}/test"
+    );
 
     match state.storage.test_backend(backend_id).await {
         Ok(message) => finish::<serde_json::Value>(Ok(serde_json::json!({
@@ -994,7 +1008,10 @@ async fn read_on_breach(state: &AppState) -> serde_json::Value {
         .await
         .ok()
         .flatten();
-    match raw.as_deref().map(serde_json::from_str::<serde_json::Value>) {
+    match raw
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+    {
         Some(Ok(serde_json::Value::Object(map))) => {
             let mut out = on_breach_default();
             if let Some(target) = out.as_object_mut() {
@@ -1036,7 +1053,10 @@ pub async fn ratelimit_get(
     // 用户覆盖表一页给够（200 行）：管理页要一眼看到「谁被单独调过」
     let rows = match state
         .repo
-        .list_user_policies(&UserFilter::default(), PageRequest::new(Some(1), Some(200), 50, 200))
+        .list_user_policies(
+            &UserFilter::default(),
+            PageRequest::new(Some(1), Some(200), 50, 200),
+        )
         .await
     {
         Ok(value) => value,
@@ -1054,7 +1074,11 @@ pub async fn ratelimit_get(
             &global,
             row.policy.as_ref(),
         );
-        let counters = state.limits.counters_for(row.user.id).await.unwrap_or_default();
+        let counters = state
+            .limits
+            .counters_for(row.user.id)
+            .await
+            .unwrap_or_default();
         users.push(serde_json::json!({
             "uid": row.user.uid,
             "email": row.user.email,
@@ -1173,8 +1197,14 @@ pub async fn ratelimit_global_put(
     // 游客的下载限额是系统设置（游客没有账号，挂不进策略表）。同一个卡片一起
     // 提交，所以在这里一并落库——分成两个接口会让「保存」按两次才有用
     for (key, value) in [
-        (keys::DOWNLOAD_ANON_PER_MINUTE, field_opt_i64(&body, "download_anon_per_minute")),
-        (keys::DOWNLOAD_ANON_PER_DAY, field_opt_i64(&body, "download_anon_per_day")),
+        (
+            keys::DOWNLOAD_ANON_PER_MINUTE,
+            field_opt_i64(&body, "download_anon_per_minute"),
+        ),
+        (
+            keys::DOWNLOAD_ANON_PER_DAY,
+            field_opt_i64(&body, "download_anon_per_day"),
+        ),
     ] {
         if let Some(value) = value {
             if value < 0 {
@@ -1443,9 +1473,7 @@ pub async fn ratelimit_logs(
                     })
                 })
                 .collect();
-            finish_page::<serde_json::Value>(Ok(pixora_repo::Page::new(
-                items, result.total, page,
-            )))
+            finish_page::<serde_json::Value>(Ok(pixora_repo::Page::new(items, result.total, page)))
         }
         Err(err) => crate::http::error_response(err),
     }
@@ -1726,11 +1754,7 @@ pub async fn settings_get(
 ) -> Response {
     let (_rectx, _auth) = admin_guard!(state, headers, method, peer, "/admin/settings");
 
-    let site = match state
-        .settings
-        .site(state.config.base_url.as_deref())
-        .await
-    {
+    let site = match state.settings.site(state.config.base_url.as_deref()).await {
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
@@ -2002,7 +2026,6 @@ pub async fn settings_put(
         if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
             return resp;
         }
-
     }
 
     if let Some(session) = body.get("session").and_then(|value| value.as_object()) {
@@ -2011,19 +2034,25 @@ pub async fn settings_put(
             (
                 keys::SESSION_IDLE_MINUTES,
                 field_opt_i64(&session, "idle_minutes").map(|value| {
-                    value.clamp(0, settings_defaults::SESSION_MINUTES_MAX).to_string()
+                    value
+                        .clamp(0, settings_defaults::SESSION_MINUTES_MAX)
+                        .to_string()
                 }),
             ),
             (
                 keys::SESSION_ABSOLUTE_DAYS,
                 field_opt_i64(&session, "absolute_days").map(|value| {
-                    value.clamp(0, settings_defaults::SESSION_DAYS_MAX).to_string()
+                    value
+                        .clamp(0, settings_defaults::SESSION_DAYS_MAX)
+                        .to_string()
                 }),
             ),
             (
                 keys::SESSION_REMEMBER_DAYS,
                 field_opt_i64(&session, "remember_days").map(|value| {
-                    value.clamp(1, settings_defaults::SESSION_DAYS_MAX).to_string()
+                    value
+                        .clamp(1, settings_defaults::SESSION_DAYS_MAX)
+                        .to_string()
                 }),
             ),
         ];
@@ -2043,7 +2072,10 @@ pub async fn settings_put(
                 keys::HOTLINK_ALLOW_EMPTY,
                 field_opt_bool(&security, "hotlink_allow_empty").map(|value| value.to_string()),
             ),
-            (keys::HOTLINK_DOMAINS, field_opt_str(&security, "hotlink_domains")),
+            (
+                keys::HOTLINK_DOMAINS,
+                field_opt_str(&security, "hotlink_domains"),
+            ),
         ];
         if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
             return resp;
@@ -2057,18 +2089,31 @@ pub async fn settings_put(
                 keys::MODERATION_ENABLED,
                 field_opt_bool(&moderation, "enabled").map(|value| value.to_string()),
             ),
-            (keys::MODERATION_PROVIDER, field_opt_str(&moderation, "provider")),
+            (
+                keys::MODERATION_PROVIDER,
+                field_opt_str(&moderation, "provider"),
+            ),
             (
                 keys::MODERATION_THRESHOLD,
-                field_opt_i64(&moderation, "threshold").map(|value| value.clamp(1, 100).to_string()),
+                field_opt_i64(&moderation, "threshold")
+                    .map(|value| value.clamp(1, 100).to_string()),
             ),
             (
                 keys::MODERATION_SCORE_FIELD,
                 field_opt_str(&moderation, "score_field"),
             ),
-            (keys::MODERATION_ENDPOINT, field_opt_str(&moderation, "endpoint")),
-            (keys::MODERATION_REGION, field_opt_str(&moderation, "region")),
-            (keys::MODERATION_APP_ID, field_opt_str(&moderation, "app_id")),
+            (
+                keys::MODERATION_ENDPOINT,
+                field_opt_str(&moderation, "endpoint"),
+            ),
+            (
+                keys::MODERATION_REGION,
+                field_opt_str(&moderation, "region"),
+            ),
+            (
+                keys::MODERATION_APP_ID,
+                field_opt_str(&moderation, "app_id"),
+            ),
             (
                 keys::MODERATION_USER_ENABLED,
                 field_opt_bool(&moderation, "user_enabled").map(|value| value.to_string()),
@@ -2143,11 +2188,17 @@ pub async fn settings_put(
                 keys::MAIL_SMTP_PORT,
                 field_opt_i64(&mail, "smtp_port").map(|value| value.to_string()),
             ),
-            (keys::MAIL_SMTP_SECURITY, field_opt_str(&mail, "smtp_security")),
+            (
+                keys::MAIL_SMTP_SECURITY,
+                field_opt_str(&mail, "smtp_security"),
+            ),
             (keys::MAIL_SMTP_USER, field_opt_str(&mail, "smtp_user")),
             (keys::MAIL_FROM_NAME, field_opt_str(&mail, "from_name")),
             (keys::MAIL_FROM_EMAIL, field_opt_str(&mail, "from_email")),
-            (keys::MAIL_APPEAL_EMAIL, field_opt_str(&mail, "appeal_email")),
+            (
+                keys::MAIL_APPEAL_EMAIL,
+                field_opt_str(&mail, "appeal_email"),
+            ),
             (
                 keys::ANTISPAM_DISPOSABLE,
                 field_opt_bool(&mail, "disposable_check").map(|value| value.to_string()),
@@ -2157,11 +2208,7 @@ pub async fn settings_put(
             return resp;
         }
         if let Some(value) = field_opt_bool(&mail, "mx_check") {
-            if let Err(err) = state
-                .settings
-                .set_bool(keys::ANTISPAM_MX, value)
-                .await
-            {
+            if let Err(err) = state.settings.set_bool(keys::ANTISPAM_MX, value).await {
                 return crate::http::error_response(err);
             }
             touched.push(keys::ANTISPAM_MX.to_string());
@@ -2203,8 +2250,7 @@ pub async fn settings_put(
                 return crate::http::error_response(err);
             }
             // 不再用上传的那张图时，把库里的字节一起删掉——留着没有引用它的东西
-            if field_opt_str(&appearance, "background")
-                .as_deref()
+            if field_opt_str(&appearance, "background").as_deref()
                 != Some(pixora_core::settings::keys::BACKGROUND_ASSET_MARKER)
             {
                 if let Err(err) = state
@@ -2313,7 +2359,13 @@ pub async fn mail_template_put(
     };
     finish(
         state
-            .mail_template_save(auth.user.id, &name, &subject, &body_text, rectx.ip.as_deref())
+            .mail_template_save(
+                auth.user.id,
+                &name,
+                &subject,
+                &body_text,
+                rectx.ip.as_deref(),
+            )
             .await,
     )
 }
@@ -2326,13 +2378,7 @@ pub async fn mail_template_delete(
     peer: PeerAddr,
     Path(name): Path<String>,
 ) -> Response {
-    let (rectx, auth) = admin_guard!(
-        state,
-        headers,
-        method,
-        peer,
-        "/admin/mail/templates/{name}"
-    );
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/mail/templates/{name}");
     finish(
         state
             .mail_template_reset(auth.user.id, &name, rectx.ip.as_deref())
@@ -2353,8 +2399,7 @@ pub async fn mail_test(
 ) -> Response {
     let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/settings/mail/test");
 
-    let to = field_opt_str(&body, "to")
-        .unwrap_or_else(|| auth.user.email.clone());
+    let to = field_opt_str(&body, "to").unwrap_or_else(|| auth.user.email.clone());
     // 先看这个地址收不收得到信：域名都没了的话，测出来的「失败」跟 SMTP 配置
     // 没关系，会把管理员引到错的方向去查
     if let Err(err) = state.ensure_deliverable(&to).await {
@@ -2699,7 +2744,12 @@ async fn upload_site_asset(
 }
 
 /// 站点资产上传的响应：新地址 + 字节数。
-fn site_asset_response(headers: &HeaderMap, url: String, stored: &[u8], asset: &SiteAsset<'_>) -> Response {
+fn site_asset_response(
+    headers: &HeaderMap,
+    url: String,
+    stored: &[u8],
+    asset: &SiteAsset<'_>,
+) -> Response {
     let _ = asset;
     finish::<serde_json::Value>(Ok(serde_json::json!({
         "ok": true,
@@ -2742,7 +2792,13 @@ pub async fn user_impersonate(
     peer: PeerAddr,
     Path(user_id): Path<i64>,
 ) -> Response {
-    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/users/{id}/impersonate");
+    let (rectx, auth) = admin_guard!(
+        state,
+        headers,
+        method,
+        peer,
+        "/admin/users/{id}/impersonate"
+    );
 
     // 必须能拿到管理员自己的会话令牌：用 API Token 调这个接口就没法切回来
     let Some(admin_token) = crate::http::session_cookie(&headers) else {
@@ -2880,9 +2936,7 @@ pub async fn terms_list(
     let (_rectx, _auth) = admin_guard!(state, headers, method, peer, "/admin/terms");
 
     match state.repo.list_terms().await {
-        Ok(rows) => finish::<Vec<serde_json::Value>>(Ok(
-            rows.iter().map(terms_row_json).collect(),
-        )),
+        Ok(rows) => finish::<Vec<serde_json::Value>>(Ok(rows.iter().map(terms_row_json).collect())),
         Err(err) => crate::http::error_response(err.into()),
     }
 }
@@ -2914,8 +2968,8 @@ fn terms_input(
             .map(|item| item.body.clone())
             .ok_or_else(|| bad_request("缺少参数 body"))?,
     };
-    let summary = field_opt_str(body, "summary")
-        .or_else(|| existing.and_then(|item| item.summary.clone()));
+    let summary =
+        field_opt_str(body, "summary").or_else(|| existing.and_then(|item| item.summary.clone()));
     let require_reconsent = field_opt_bool(body, "require_reconsent")
         .or_else(|| existing.map(|item| item.require_reconsent))
         .unwrap_or(true);
@@ -3169,7 +3223,7 @@ pub async fn admin_login_methods_get(
                 "client_id": state.settings.string(&id_key, "").await.unwrap_or_default(),
                 "has_secret": state.settings.secret_configured(&secret_key).await.unwrap_or(false),
                 // 回调地址要在对方平台原样登记，页面上直接给出来让人复制
-                "callback": crate::routes::oauth::redirect_uri(&state, name),
+                "callback": crate::routes::oauth::redirect_uri(&state, name).await,
             }),
         );
     }
@@ -3319,7 +3373,15 @@ pub async fn admin_identity_unbind(
     Path((user_id, provider_name)): Path<(i64, String)>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let auth = match require_admin(&state, &headers, rectx.ip.as_deref(), &method, "/admin/users").await {
+    let auth = match require_admin(
+        &state,
+        &headers,
+        rectx.ip.as_deref(),
+        &method,
+        "/admin/users",
+    )
+    .await
+    {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };

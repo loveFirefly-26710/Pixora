@@ -920,7 +920,12 @@ say "缩略图：?thumb=1 给的是缩略图那一份"
 # 文件」会让 curl 报 rc=26（命令行里那些 /e/... 路径被转换时的坑），@- 绕开它
 python - "$DIR/thumb.webp" <<'PY'
 import sys
-open(sys.argv[1], "wb").write(b"RIFF" + bytes([0x1a, 0, 0, 0]) + b"WEBP" + bytes(14))
+# 30 字节的 1×1 VP8X WebP：服务端会校验缩略图的像素尺寸，
+# 只有 RIFF/WEBP 魔数、读不出尺寸的假头会被拒绝。
+open(sys.argv[1], "wb").write(
+    b"RIFF" + (22).to_bytes(4, "little") + b"WEBP" + b"VP8X"
+    + (10).to_bytes(4, "little") + bytes(4) + bytes(6)
+)
 PY
 out=$(cat "$DIR/thumb.webp" | curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" -F "file=@$DIR/up.png" -F "thumb=@-;type=image/webp" -F "visibility=public" -F "original_name=thumb-check.png")
 expect "带缩略图上传成功" '"thumb_url"' "$out"
@@ -938,7 +943,7 @@ esac
   || bad "缩略图不该等于原图" "$THUMB_SIZE"
 
 say "缩略图重算：老图按新尺寸重来"
-# 造一张 800px 的图 + 一张假的「老缩略图」（26 字节的 webp），
+# 造一张 800px 的图 + 一张 30 字节的 1×1 WebP（假的「老缩略图」），
 # 重算之后这张缩略图应当被服务端生成的大图替换掉
 python "$ROOT/scripts/make-test-png.py" "$DIR/big.png" 800
 out=$(cat "$DIR/thumb.webp" | curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload" -H "X-CSRF-Token: $(csrf)" -F "file=@$DIR/big.png" -F "thumb=@-;type=image/webp" -F "visibility=public" -F "original_name=big-thumb.png")

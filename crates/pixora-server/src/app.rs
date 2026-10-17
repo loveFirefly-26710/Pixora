@@ -15,11 +15,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use tower_http::compression::CompressionLayer;
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
@@ -35,7 +36,7 @@ const MAX_UPLOAD_BODY: usize = 64 * 1024 * 1024;
 pub fn build(state: Arc<AppState>) -> Router {
     let api = api_routes();
 
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(crate::routes::public::healthz))
         .nest("/api/v1", api)
         .fallback(fallback)
@@ -49,7 +50,36 @@ pub fn build(state: Arc<AppState>) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY))
-        .with_state(state)
+        .with_state(state.clone());
+
+    // 全站 IP 规则放在业务层之外：被拉黑的人不该还能浏览广场、拉直链。
+    // 再往外套一层安全响应头，连被 IP 规则拦下的响应也带上。
+    router
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::routes::enforce_ip,
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("SAMEORIGIN"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("content-security-policy"),
+            // 同一个源要允许：扫码登录的 OAuth 回调是嵌在自己页面里的 iframe。
+            HeaderValue::from_static("frame-ancestors 'self'"),
+        ))
 }
 
 fn api_routes() -> Router<Arc<AppState>> {
@@ -72,16 +102,16 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/auth/password/code", post(r::auth::password_code))
         // 第三方登录：start 跳去对方站点，callback 带着授权码回来
         .route("/auth/oauth/{provider}/start", get(r::oauth::oauth_start))
-        .route("/auth/oauth/{provider}/callback", get(r::oauth::oauth_callback))
+        .route(
+            "/auth/oauth/{provider}/callback",
+            get(r::oauth::oauth_callback),
+        )
         .route("/auth/oauth/complete", post(r::oauth::complete_signup))
         // 手机号 + 验证码
         .route("/auth/phone/code", post(r::oauth::phone_code))
         .route("/auth/phone/login", post(r::oauth::phone_login))
         // 登录第二步可以改用邮箱验证码（验证器不在手边时）
-        .route(
-            "/auth/login/email-code",
-            post(r::auth::login_email_code),
-        )
+        .route("/auth/login/email-code", post(r::auth::login_email_code))
         .route("/auth/password/reset", post(r::auth::password_reset))
         // 邮件里的重置链接：GET 换「给谁设密码」，POST 交新密码（令牌一次性）
         .route("/auth/password/link", get(r::auth::password_link_info))
@@ -95,9 +125,15 @@ fn api_routes() -> Router<Arc<AppState>> {
         // 换绑邮箱：先给新地址发码，再带上码提交
         .route("/me/email/code", post(r::account::email_change_code))
         .route("/me/email", post(r::account::email_change))
-        .route("/me/identities", get(r::oauth::identities_get).post(r::oauth::identity_bind))
+        .route(
+            "/me/identities",
+            get(r::oauth::identities_get).post(r::oauth::identity_bind),
+        )
         .route("/me/identities/phone/code", post(r::oauth::phone_bind_code))
-        .route("/me/identities/{provider}", delete(r::oauth::identity_unbind))
+        .route(
+            "/me/identities/{provider}",
+            delete(r::oauth::identity_unbind),
+        )
         .route("/me/totp", post(r::account::totp))
         .route(
             "/me/recovery-codes",
@@ -201,19 +237,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             post(r::admin::storage_thumbs_rebuild),
         )
         .route("/admin/storage/gc", post(r::admin::storage_gc))
-        .route(
-            "/admin/storage/default",
-            put(r::admin::storage_default),
-        )
+        .route("/admin/storage/default", put(r::admin::storage_default))
         .route("/admin/storage/prefix", put(r::admin::storage_prefix))
-        .route(
-            "/admin/storage/capacity",
-            put(r::admin::storage_capacity),
-        )
-        .route(
-            "/admin/storage/backends",
-            post(r::admin::backend_create),
-        )
+        .route("/admin/storage/capacity", put(r::admin::storage_capacity))
+        .route("/admin/storage/backends", post(r::admin::backend_create))
         .route(
             "/admin/storage/backends/{id}",
             patch(r::admin::backend_update).delete(r::admin::backend_delete),
@@ -244,10 +271,7 @@ fn api_routes() -> Router<Arc<AppState>> {
             post(r::admin::background_upload),
         )
         // 站点默认头像：没设过头像的账号（含新注册的）都用它
-        .route(
-            "/admin/settings/avatar",
-            post(r::admin::avatar_upload),
-        )
+        .route("/admin/settings/avatar", post(r::admin::avatar_upload))
         .route("/admin/settings/mail/test", post(r::admin::mail_test))
         .route(
             "/admin/login-methods",

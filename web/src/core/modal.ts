@@ -33,12 +33,29 @@ export interface ModalHandle {
 
 const openStack: ModalHandle[] = [];
 
+/**
+ * 弹窗里的字符串按纯文本渲染，只把 `<br>` 当换行。
+ *
+ * 相册名、图片标题、令牌名、设备名（User-Agent）都可能被用户控制，而它们
+ * 会出现在确认框里。走 `innerHTML` 等于把存储型 XSS 送到管理员眼前；
+ * 这里用文本节点，标签只会原样显示。
+ */
+function textWithBreaks(text: string): HTMLElement {
+  const box = h("div");
+  const parts = text.split(/<br\s*\/?>/i);
+  parts.forEach((part, index) => {
+    if (index > 0) box.append(h("br"));
+    box.append(document.createTextNode(part));
+  });
+  return box;
+}
+
 export function openModal(options: ModalOptions): ModalHandle {
   const dismissable = options.dismissable ?? true;
   const previousFocus = document.activeElement as HTMLElement | null;
 
   const body = h("div.sheet-body");
-  if (typeof options.body === "string") body.innerHTML = options.body;
+  if (typeof options.body === "string") body.append(textWithBreaks(options.body));
   else if (Array.isArray(options.body)) body.append(...options.body);
   else body.append(options.body);
 
@@ -117,7 +134,9 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
     };
 
     const message =
-      typeof options.message === "string" ? h("div", { html: options.message }) : options.message;
+      typeof options.message === "string"
+        ? textWithBreaks(options.message)
+        : options.message;
     const nodes: Node[] = [message];
 
     let input: HTMLInputElement | null = null;

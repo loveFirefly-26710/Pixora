@@ -20,15 +20,15 @@ use base64::Engine;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use pixora_repo::model::{status, role, User};
+use pixora_repo::model::{role, status, User};
 use pixora_repo::repo::identities::provider;
 use pixora_repo::repo::users::NewUser;
 use pixora_repo::repo::verifications::purpose;
 
-use crate::error::{AppError, Result};
-use crate::settings::keys;
 use crate::auth::{DeviceInfo, IssuedSession};
+use crate::error::{AppError, Result};
 use crate::guest;
+use crate::settings::keys;
 use crate::AppState;
 
 /// OAuth 的 `state` 与「补邮箱」令牌的有效期。十几分钟够走完一次授权，
@@ -355,7 +355,9 @@ impl AppState {
                 let token = parse_query_like(&text)
                     .get("access_token")
                     .cloned()
-                    .ok_or_else(|| AppError::bad_request(format!("QQ 没有返回 access_token：{text}")))?;
+                    .ok_or_else(|| {
+                        AppError::bad_request(format!("QQ 没有返回 access_token：{text}"))
+                    })?;
                 // openid 要单独问一次，顺手在这里拿：取用户信息时要用它
                 let openid = self.qq_openid(&token).await?;
                 Ok(TokenBundle {
@@ -399,7 +401,11 @@ impl AppState {
     }
 
     /// 取用户信息。每个平台的字段名都不一样，收在这一处。
-    pub async fn oauth_profile(&self, client: &OAuthClient, bundle: &TokenBundle) -> Result<IdentityProfile> {
+    pub async fn oauth_profile(
+        &self,
+        client: &OAuthClient,
+        bundle: &TokenBundle,
+    ) -> Result<IdentityProfile> {
         match client.provider.as_str() {
             provider::GITHUB => {
                 let user: serde_json::Value = self
@@ -412,7 +418,9 @@ impl AppState {
                     .map_err(|err| AppError::internal(format!("读取 GitHub 账号失败：{err}")))?
                     .json()
                     .await
-                    .map_err(|err| AppError::internal(format!("GitHub 账号信息不是 JSON：{err}")))?;
+                    .map_err(|err| {
+                        AppError::internal(format!("GitHub 账号信息不是 JSON：{err}"))
+                    })?;
                 let subject = user
                     .get("id")
                     .map(|value| value.to_string())
@@ -445,7 +453,8 @@ impl AppState {
                                 .iter()
                                 .find(|item| {
                                     item.get("primary").and_then(|v| v.as_bool()) == Some(true)
-                                        && item.get("verified").and_then(|v| v.as_bool()) == Some(true)
+                                        && item.get("verified").and_then(|v| v.as_bool())
+                                            == Some(true)
                                 })
                                 .or_else(|| {
                                     items.iter().find(|item| {
@@ -474,7 +483,9 @@ impl AppState {
                     .map_err(|err| AppError::internal(format!("读取 Google 账号失败：{err}")))?
                     .json()
                     .await
-                    .map_err(|err| AppError::internal(format!("Google 账号信息不是 JSON：{err}")))?;
+                    .map_err(|err| {
+                        AppError::internal(format!("Google 账号信息不是 JSON：{err}"))
+                    })?;
                 let subject = info
                     .get("sub")
                     .and_then(|value| value.as_str())
@@ -521,7 +532,12 @@ impl AppState {
                     .json()
                     .await
                     .map_err(|err| AppError::internal(format!("QQ 账号信息不是 JSON：{err}")))?;
-                if info.get("ret").and_then(|value| value.as_i64()).unwrap_or(0) != 0 {
+                if info
+                    .get("ret")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(0)
+                    != 0
+                {
                     return Err(AppError::bad_request(format!(
                         "QQ 拒绝了这次读取：{}",
                         error_hint(&info)
@@ -548,7 +564,10 @@ impl AppState {
                 let info: serde_json::Value = self
                     .http
                     .get("https://api.weixin.qq.com/sns/userinfo")
-                    .query(&[("access_token", bundle.token.as_str()), ("openid", openid.as_str())])
+                    .query(&[
+                        ("access_token", bundle.token.as_str()),
+                        ("openid", openid.as_str()),
+                    ])
                     .send()
                     .await
                     .map_err(|err| AppError::internal(format!("读取微信账号失败：{err}")))?
@@ -740,7 +759,11 @@ impl AppState {
                 let meta = profile_meta(profile);
                 self.repo
                     .db()
-                    .update_identity_display(existing.id, profile.display.as_deref(), meta.as_deref())
+                    .update_identity_display(
+                        existing.id,
+                        profile.display.as_deref(),
+                        meta.as_deref(),
+                    )
                     .await?;
                 return Ok(());
             }
@@ -750,8 +773,16 @@ impl AppState {
             )));
         }
         // 同一个账号每类只留一条：换绑（解绑旧号再绑新号）走这条
-        if let Some(existing) = self.repo.db().find_user_identity(user.id, provider_name).await? {
-            self.repo.db().delete_identity(user.id, provider_name).await?;
+        if let Some(existing) = self
+            .repo
+            .db()
+            .find_user_identity(user.id, provider_name)
+            .await?
+        {
+            self.repo
+                .db()
+                .delete_identity(user.id, provider_name)
+                .await?;
             tracing::info!(
                 user_id = user.id,
                 provider = provider_name,
@@ -790,7 +821,12 @@ impl AppState {
     }
 
     /// 解绑。邮箱不在身份表里（它不可解绑），这里只管第三方方式与手机号。
-    pub async fn unbind_identity(&self, user: &User, provider_name: &str, ip: Option<&str>) -> Result<()> {
+    pub async fn unbind_identity(
+        &self,
+        user: &User,
+        provider_name: &str,
+        ip: Option<&str>,
+    ) -> Result<()> {
         if provider_name == crate::auth::PASSWORD_IDENTITY {
             return Err(AppError::bad_request(
                 "邮箱是账号本身，不能解绑；要换邮箱请到「账号信息」里改",
@@ -801,9 +837,16 @@ impl AppState {
                 "不支持的登录方式：{provider_name}"
             )));
         }
-        let removed = self.repo.db().delete_identity(user.id, provider_name).await?;
+        let removed = self
+            .repo
+            .db()
+            .delete_identity(user.id, provider_name)
+            .await?;
         if removed == 0 {
-            return Err(AppError::not_found(format!("未绑定的 {label}", label = provider::label(provider_name))));
+            return Err(AppError::not_found(format!(
+                "未绑定的 {label}",
+                label = provider::label(provider_name)
+            )));
         }
         // 解绑之后还得能进得来：没有可用口令、也没有别的第三方方式时，
         // 这个人就再也登不上了（邮箱验证码只在开了二次验证时才有意义）
@@ -886,7 +929,12 @@ impl AppState {
 
     /// 发一条短信验证码。手机号进 `email_verifications` 的键位（那张表的键只是个
     /// 字符串，手机号一样能用），用途分开，免得分不清是哪条路上的码。
-    pub async fn send_phone_code(&self, phone: &str, device: &DeviceInfo, purpose_name: &str) -> Result<()> {
+    pub async fn send_phone_code(
+        &self,
+        phone: &str,
+        device: &DeviceInfo,
+        purpose_name: &str,
+    ) -> Result<()> {
         self.ensure_ip_allowed(device.ip.as_deref(), crate::ipguard::scope::LOGIN)
             .await?;
         let phone = normalize_phone(phone)?;
@@ -940,7 +988,8 @@ impl AppState {
                 "本站没开手机号登录（或短信服务没配好），请用邮箱登录".into(),
             ));
         }
-        self.consume_code(&phone, purpose::PHONE_LOGIN, code).await?;
+        self.consume_code(&phone, purpose::PHONE_LOGIN, code)
+            .await?;
 
         let Some(identity) = self
             .repo
@@ -982,7 +1031,13 @@ impl AppState {
     }
 
     /// 把手机号绑到当前账号上（先验码）。
-    pub async fn bind_phone(&self, user: &User, phone: &str, code: &str, ip: Option<&str>) -> Result<()> {
+    pub async fn bind_phone(
+        &self,
+        user: &User,
+        phone: &str,
+        code: &str,
+        ip: Option<&str>,
+    ) -> Result<()> {
         let phone = normalize_phone(phone)?;
         // 同上：配置问题排在验证码前面，报错才指向真正的原因
         if !self.phone_login_enabled().await? {
@@ -996,7 +1051,8 @@ impl AppState {
             display: Some(mask_phone(&phone)),
             ..Default::default()
         };
-        self.bind_identity(user, provider::PHONE, &profile, ip).await
+        self.bind_identity(user, provider::PHONE, &profile, ip)
+            .await
     }
 
     // ============================================================
@@ -1094,9 +1150,16 @@ fn mask_phone(phone: &str) -> String {
 
 /// 跳转目标只允许站内相对路径：`state` 里带的是可控输入，`//evil.com` 这种
 /// 会被浏览器当成协议相对地址，变成把用户送去别处的开放重定向。
+///
+/// 反斜杠也要拒：浏览器在水合 URL 时常把 `\` 当 `/`，`/\evil.com` 会变成
+/// `//evil.com`；控制字符同理，不能让它混进 Location。
 fn sanitize_next(next: &str) -> String {
     let trimmed = next.trim();
-    if trimmed.starts_with('/') && !trimmed.starts_with("//") {
+    if trimmed.starts_with('/')
+        && !trimmed.starts_with("//")
+        && !trimmed.contains('\\')
+        && !trimmed.chars().any(char::is_control)
+    {
         return trimmed.to_string();
     }
     "/".to_string()
@@ -1109,7 +1172,9 @@ fn parse_query_like(text: &str) -> std::collections::HashMap<String, String> {
         if let Some(map) = json.as_object() {
             return map
                 .iter()
-                .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|value| (key.clone(), value.to_string()))
+                })
                 .collect();
         }
     }
@@ -1138,7 +1203,12 @@ fn require_token(json: &serde_json::Value, label: &str) -> Result<String> {
     json.get("access_token")
         .and_then(|value| value.as_str())
         .map(str::to_string)
-        .ok_or_else(|| AppError::bad_request(format!("{label} 没有返回 access_token：{}", error_hint(json))))
+        .ok_or_else(|| {
+            AppError::bad_request(format!(
+                "{label} 没有返回 access_token：{}",
+                error_hint(json)
+            ))
+        })
 }
 
 /// 对方的错误响应里常见 `error` / `error_description`，带上能让管理员看懂。
@@ -1215,15 +1285,13 @@ impl SmsClient {
             .map(|(key, value)| format!("{}={}", urlencode(key), urlencode(value)))
             .collect::<Vec<_>>()
             .join("&");
-        let to_sign = format!(
-            "GET&{}&{}",
-            urlencode("/"),
-            urlencode(&canonical)
-        );
-        let mut mac = Hmac::<Sha1>::new_from_slice(format!("{}&", self.access_key_secret).as_bytes())
-            .map_err(|err| AppError::internal(format!("短信签名初始化失败：{err}")))?;
+        let to_sign = format!("GET&{}&{}", urlencode("/"), urlencode(&canonical));
+        let mut mac =
+            Hmac::<Sha1>::new_from_slice(format!("{}&", self.access_key_secret).as_bytes())
+                .map_err(|err| AppError::internal(format!("短信签名初始化失败：{err}")))?;
         mac.update(to_sign.as_bytes());
-        let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
         let query = format!("{canonical}&Signature={}", urlencode(&signature));
         let response = state
@@ -1281,6 +1349,12 @@ mod tests {
         // 把域名塞进 userinfo 的写法
         assert_eq!(sanitize_next("https://pixora.example.com@evil.net/"), "/");
         assert_eq!(sanitize_next("javascript:alert(1)"), "/");
+        // 反斜杠会被浏览器当成分隔符，`/\evil.com` 等价于 `//evil.com`
+        assert_eq!(sanitize_next("/\\evil.example.com"), "/");
+        assert_eq!(
+            sanitize_next("/ok\nLocation: https://evil.example.com"),
+            "/"
+        );
         assert_eq!(sanitize_next(""), "/");
     }
 }

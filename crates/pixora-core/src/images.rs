@@ -158,7 +158,11 @@ pub struct ListQuery {
 
 impl AppState {
     /// 图片列表。
-    pub async fn list_images(&self, viewer: &Viewer, q: &ListQuery) -> Result<Page<ImageItemPayload>> {
+    pub async fn list_images(
+        &self,
+        viewer: &Viewer,
+        q: &ListQuery,
+    ) -> Result<Page<ImageItemPayload>> {
         let owner_id = self.resolve_owner(viewer, q.uid.as_deref()).await?;
         let request = PageRequest::new(q.page, q.per_page, 24, 100);
 
@@ -251,7 +255,10 @@ impl AppState {
         };
         let siblings = self
             .repo
-            .list_images(&siblings_filter, PageRequest::new(Some(1), Some(20), 20, 20))
+            .list_images(
+                &siblings_filter,
+                PageRequest::new(Some(1), Some(20), 20, 20),
+            )
             .await?;
         let mut sibling_views: Vec<SiblingRef> = Vec::new();
         for sibling in siblings.items {
@@ -286,6 +293,12 @@ impl AppState {
         tags: Option<Vec<String>>,
     ) -> Result<()> {
         let image = self.require_touchable(viewer, id).await?;
+
+        if let Some(Some(value)) = &title {
+            if value.chars().count() > 255 {
+                return Err(AppError::bad_request("标题不能超过 255 个字符"));
+            }
+        }
 
         if let Some(album_id) = album_id {
             if let Some(album_id) = album_id {
@@ -366,7 +379,6 @@ impl AppState {
             }
         };
 
-
         // 先把可操作的图片筛出来，越权的直接跳过而不是整批失败
         let mut owned: Vec<Image> = Vec::new();
         for id in &ids {
@@ -383,7 +395,10 @@ impl AppState {
         match action {
             BatchAction::Delete => Ok(self.delete_images_inner(viewer, &owned).await?),
             BatchAction::Move => {
-                let moved = self.repo.move_images(&owned_ids, owner_id, album_id).await?;
+                let moved = self
+                    .repo
+                    .move_images(&owned_ids, owner_id, album_id)
+                    .await?;
                 Ok(moved)
             }
             BatchAction::Tag => {
@@ -392,7 +407,10 @@ impl AppState {
                     tags: Some(tags),
                     ..Default::default()
                 };
-                Ok(self.repo.update_images(&owned_ids, owner_id, &patch).await?)
+                Ok(self
+                    .repo
+                    .update_images(&owned_ids, owner_id, &patch)
+                    .await?)
             }
             BatchAction::Visibility => {
                 let value = visibility.ok_or_else(|| AppError::bad_request("缺少可见性"))?;
@@ -400,7 +418,10 @@ impl AppState {
                     visibility: Some(value),
                     ..Default::default()
                 };
-                Ok(self.repo.update_images(&owned_ids, owner_id, &patch).await?)
+                Ok(self
+                    .repo
+                    .update_images(&owned_ids, owner_id, &patch)
+                    .await?)
             }
         }
     }
@@ -529,7 +550,11 @@ impl AppState {
     // ============================================================
 
     /// 解析「要看谁的空间」。
-    async fn resolve_owner(&self, viewer: &Viewer, requested_uid: Option<&str>) -> Result<Option<i64>> {
+    async fn resolve_owner(
+        &self,
+        viewer: &Viewer,
+        requested_uid: Option<&str>,
+    ) -> Result<Option<i64>> {
         let uid = self.resolve_owner_uid(viewer, requested_uid).await?;
         match uid {
             None => Ok(None),
@@ -544,7 +569,11 @@ impl AppState {
         }
     }
 
-    async fn resolve_owner_uid(&self, viewer: &Viewer, requested_uid: Option<&str>) -> Result<Option<String>> {
+    async fn resolve_owner_uid(
+        &self,
+        viewer: &Viewer,
+        requested_uid: Option<&str>,
+    ) -> Result<Option<String>> {
         match (viewer, requested_uid) {
             (_, None) => Ok(viewer.user().map(|user| user.uid.clone())),
             (viewer, Some(uid)) if viewer.is_admin() => {
@@ -577,9 +606,7 @@ impl AppState {
         if image.deleted_at.is_some() {
             return Ok(None);
         }
-        let actor = viewer
-            .user()
-            .ok_or_else(|| AppError::Unauthorized)?;
+        let actor = viewer.user().ok_or_else(|| AppError::Unauthorized)?;
         if image.owner_id != actor.id && !actor.is_admin() {
             return Ok(None);
         }
@@ -664,10 +691,7 @@ impl AppState {
         page: PageRequest,
     ) -> Result<(Vec<ImageItemPayload>, i64, i64)> {
         let owner = viewer.user().ok_or(AppError::Unauthorized)?;
-        let result = self
-            .repo
-            .list_deleted_images(owner.id, page)
-            .await?;
+        let result = self.repo.list_deleted_images(owner.id, page).await?;
         let retention = self.settings.retention_days().await?;
         let items = self.shape_items(viewer, result.items).await?;
         Ok((items, result.total, retention))
@@ -747,6 +771,11 @@ impl AppState {
         let Some(blob) = self.repo.find_blob_by_id(blob_id).await? else {
             return Ok(false);
         };
+        // 与上传去重共用同一把内容哈希分片锁：删除期间不允许新引用挂上来。
+        let _blob_guard = self.blob_lock(&blob.sha256).lock().await;
+        let Some(blob) = self.repo.find_blob_by_id(blob_id).await? else {
+            return Ok(false);
+        };
         if blob.ref_count > 0 {
             return Ok(false);
         }
@@ -802,7 +831,10 @@ impl AppState {
     ///
     /// 彻底删除之后不再需要管理员去「存储分布」页点「立即回收」：引用归零的
     /// 文件本来就该在删除的那一刻消失。收不掉的（远端失败）留着由后台重试。
-    pub async fn reclaim_purged(&self, targets: Vec<pixora_repo::repo::images::PurgedBlobs>) -> u64 {
+    pub async fn reclaim_purged(
+        &self,
+        targets: Vec<pixora_repo::repo::images::PurgedBlobs>,
+    ) -> u64 {
         let mut reclaimed = 0u64;
         for target in targets {
             if let Ok(true) = self.reclaim_blob_now(target.blob_id).await {
@@ -900,7 +932,11 @@ impl AppState {
     }
 
     /// 把仓储的视图转成接口形状，并按访问者裁剪字段。
-    async fn shape_items(&self, viewer: &Viewer, views: Vec<ImageView>) -> Result<Vec<ImageItemPayload>> {
+    async fn shape_items(
+        &self,
+        viewer: &Viewer,
+        views: Vec<ImageView>,
+    ) -> Result<Vec<ImageItemPayload>> {
         let mut items = Vec::with_capacity(views.len());
         for view in views {
             items.push(self.shape_item(viewer, view).await?);
@@ -955,7 +991,9 @@ impl AppState {
             return Err(AppError::not_found("图片"));
         };
         // 扩展名与库里记录不一致 → 当作不存在，防止用伪造扩展名探测
-        if !ext.is_empty() && crate::media::normalize_ext(ext) != crate::media::normalize_ext(&blob.ext) {
+        if !ext.is_empty()
+            && crate::media::normalize_ext(ext) != crate::media::normalize_ext(&blob.ext)
+        {
             return Err(AppError::not_found("图片"));
         }
         Ok(DirectLink {

@@ -53,13 +53,13 @@ async fn direct_inner(
     peer: Option<std::net::SocketAddr>,
 ) -> pixora_core::Result<Response> {
     // 一级目录要匹配当前配置；`i`、`images` 这类都行，改完旧链仍能命中数据库映射
-    let site = state.settings.site(state.config.base_url.as_deref()).await?;
+    let site = state
+        .settings
+        .site(state.config.base_url.as_deref())
+        .await?;
     let expected = site.upload_prefix.trim_matches('/');
     let actual = prefix.trim_matches('/');
-    let prefix_ok = actual == expected
-        || actual == "images"
-        || actual == "i"
-        || actual == "p";
+    let prefix_ok = actual == expected || actual == "images" || actual == "i" || actual == "p";
     if !prefix_ok {
         return Err(AppError::not_found("图片"));
     }
@@ -144,7 +144,10 @@ async fn direct_inner(
     };
 
     // 条件请求：内容寻址下 ETag 永远稳定
-    if let Some(etag) = headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()) {
+    if let Some(etag) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    {
         if etag.trim_matches('"') == blob.sha256 {
             let mut response = StatusCode::NOT_MODIFIED.into_response();
             response
@@ -169,9 +172,7 @@ async fn direct_inner(
                     path.to_string_lossy().trim_start_matches('/')
                 );
                 if let Ok(value) = HeaderValue::from_str(&target) {
-                    response
-                        .headers_mut()
-                        .insert("X-Accel-Redirect", value);
+                    response.headers_mut().insert("X-Accel-Redirect", value);
                 }
                 apply_headers(
                     &mut response,
@@ -231,10 +232,7 @@ async fn direct_inner(
 ///   3. 来源主机与站点 `base_url` 的主机一致 → 放行（有 CDN/反向代理时常见）。
 ///   4. 来源主机命中白名单（含子域）→ 放行。
 ///   5. 其余一律 403。
-async fn ensure_hotlink_allowed(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> pixora_core::Result<()> {
+async fn ensure_hotlink_allowed(state: &AppState, headers: &HeaderMap) -> pixora_core::Result<()> {
     let settings = state.settings.hotlink().await?;
     if !settings.enabled {
         return Ok(());
@@ -256,7 +254,9 @@ async fn ensure_hotlink_allowed(
     };
 
     let Some(host) = host_of(referer) else {
-        return Err(AppError::forbidden("这个图片不允许从该来源访问".to_string()));
+        return Err(AppError::forbidden(
+            "这个图片不允许从该来源访问".to_string(),
+        ));
     };
 
     let request_host = headers
@@ -267,7 +267,10 @@ async fn ensure_hotlink_allowed(
         return Ok(());
     }
 
-    let site = state.settings.site(state.config.base_url.as_deref()).await?;
+    let site = state
+        .settings
+        .site(state.config.base_url.as_deref())
+        .await?;
     if let Some(site_host) = host_of(&site.base_url) {
         if host_matches(&host, &site_host) {
             return Ok(());
@@ -356,7 +359,9 @@ async fn is_publicly_referenced(state: &AppState, blob_id: i64) -> pixora_core::
         )
         .await?;
     for row in rows {
-        if pixora_repo::model::get_str(&row, "visibility")? == pixora_repo::model::visibility::PUBLIC {
+        if pixora_repo::model::get_str(&row, "visibility")?
+            == pixora_repo::model::visibility::PUBLIC
+        {
             return Ok(true);
         }
     }
@@ -397,7 +402,10 @@ async fn references_blob(
         .db()
         .fetch_optional(
             "SELECT 1 AS hit FROM images WHERE owner_id = ? AND (blob_id = ? OR thumb_blob_id = ?)",
-            pixora_repo::Args::new().int(user.id).int(blob_id).int(blob_id),
+            pixora_repo::Args::new()
+                .int(user.id)
+                .int(blob_id)
+                .int(blob_id),
         )
         .await?;
     Ok(hit.is_some())
@@ -540,10 +548,14 @@ fn apply_headers(
     }
 
     if is_svg {
-        // 沙箱化：即使净化有漏网，脚本也不会有执行上下文
+        // 沙箱化：即使净化有漏网，脚本也不会有执行上下文；默认连外部图片
+        // 都不让加载，只允许 data: 内联。
         headers.insert(
             "Content-Security-Policy",
-            HeaderValue::from_static("sandbox; script-src 'none'; object-src 'none'"),
+            HeaderValue::from_static(
+                "sandbox; default-src 'none'; script-src 'none'; object-src 'none'; \
+                 img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'",
+            ),
         );
     }
     if download {
@@ -568,7 +580,13 @@ fn content_disposition(file_name: Option<&str>, fallback: &str) -> Option<Header
     }
     let ascii: String = raw
         .chars()
-        .map(|ch| if ch.is_ascii() && ch != '"' && ch != '\\' { ch } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii() && ch != '"' && ch != '\\' {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect();
     let encoded = percent_encoding::utf8_percent_encode(raw, percent_encoding::NON_ALPHANUMERIC);
     HeaderValue::from_str(&format!(
@@ -580,4 +598,3 @@ fn content_disposition(file_name: Option<&str>, fallback: &str) -> Option<Header
 fn etag_header(sha256: &str) -> HeaderValue {
     HeaderValue::from_str(&format!("\"{sha256}\"")).unwrap_or(HeaderValue::from_static("\"0\""))
 }
-

@@ -187,7 +187,9 @@ impl RateLimits {
             }
         }
         if policy.upload_per_day > 0 {
-            let used = self.read(kind::UPLOAD_DAY, user.id, day_window(now)).await?;
+            let used = self
+                .read(kind::UPLOAD_DAY, user.id, day_window(now))
+                .await?;
             if used + count > policy.upload_per_day {
                 return Err(AppError::RateLimited {
                     retry_after: seconds_to_next_day(now),
@@ -237,9 +239,26 @@ impl RateLimits {
         } else {
             kind::API_MINUTE
         };
-        self.bump(kind_name, user_id, minute_window(now), 1, 0).await?;
+        self.bump(kind_name, user_id, minute_window(now), 1, 0)
+            .await?;
         self.bump(kind::API_HOUR, user_id, hour_window(now), 1, 0)
             .await?;
+        Ok(())
+    }
+
+    /// 鉴权通过后的 API 限流。
+    ///
+    /// 准入在进程内令牌桶里做（每个请求都要过，不能查库）；计数落库只为
+    /// 管理页展示，浏览器翻页产生的读请求不记，免得把每次看图都变成两次写。
+    /// Token 客户端与写操作仍然记账，管理员能看出脚本用了多少。
+    pub async fn enforce_api(&self, user: &User, is_read: bool, record: bool) -> Result<()> {
+        let policy = self.repo.effective_policy(user).await?;
+        self.check_api(user, &policy, is_read)?;
+        if record {
+            if let Err(err) = self.record_api(user.id, is_read).await {
+                tracing::debug!(error = %err, user_id = user.id, "API 用量计数写入失败");
+            }
+        }
         Ok(())
     }
 
@@ -247,17 +266,26 @@ impl RateLimits {
     pub async fn counters_for(&self, user_id: i64) -> Result<WindowCounters> {
         let now = Utc::now();
         Ok(WindowCounters {
-            api_minute: self.read(kind::API_MINUTE, user_id, minute_window(now)).await?,
+            api_minute: self
+                .read(kind::API_MINUTE, user_id, minute_window(now))
+                .await?,
             upload_minute: self
                 .read(kind::UPLOAD_MINUTE, user_id, minute_window(now))
                 .await?,
-            upload_day: self.read(kind::UPLOAD_DAY, user_id, day_window(now)).await?,
+            upload_day: self
+                .read(kind::UPLOAD_DAY, user_id, day_window(now))
+                .await?,
         })
     }
 
     async fn read(&self, kind_name: &str, user_id: i64, window: String) -> Result<i64> {
         self.repo
-            .read_counter(scope::USER, &user_id.to_string(), kind_name, parse_window(&window)?)
+            .read_counter(
+                scope::USER,
+                &user_id.to_string(),
+                kind_name,
+                parse_window(&window)?,
+            )
             .await
             .map_err(AppError::from)
     }
@@ -306,7 +334,11 @@ impl RateLimits {
     ///
     /// 分钟级用令牌桶是刻意的：直链下载常常一串并发过来，查库计数拦不住同一秒
     /// 里的爆发；天级必须落库，否则重启一次额度就回满了。
-    pub async fn check_download(&self, actor: &DownloadActor, limits: DownloadLimits) -> Result<()> {
+    pub async fn check_download(
+        &self,
+        actor: &DownloadActor,
+        limits: DownloadLimits,
+    ) -> Result<()> {
         let now = Utc::now();
         if limits.per_minute > 0 {
             let wait = self.take_bucket(&actor.bucket_key(), limits.per_minute as f64, 1.0);
@@ -546,7 +578,9 @@ mod tests {
         policy.api_per_minute = 3;
 
         for _ in 0..3 {
-            limits.check_api(&user, &policy, false).expect("前三次应通过");
+            limits
+                .check_api(&user, &policy, false)
+                .expect("前三次应通过");
         }
         let error = limits.check_api(&user, &policy, false).unwrap_err();
         assert_eq!(error.code(), "RATE_LIMITED");
@@ -563,9 +597,14 @@ mod tests {
         policy.api_read_per_minute = 5;
 
         limits.check_api(&user, &policy, false).unwrap();
-        assert!(limits.check_api(&user, &policy, false).is_err(), "写接口已用尽");
+        assert!(
+            limits.check_api(&user, &policy, false).is_err(),
+            "写接口已用尽"
+        );
         for _ in 0..5 {
-            limits.check_api(&user, &policy, true).expect("读接口有自己的额度");
+            limits
+                .check_api(&user, &policy, true)
+                .expect("读接口有自己的额度");
         }
         assert!(limits.check_api(&user, &policy, true).is_err());
     }

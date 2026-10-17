@@ -20,21 +20,54 @@ use pixora_core::{AppError, AppState};
 use pixora_repo::repo::identities::provider;
 
 use crate::http::{
-    cookie_value, error_response, finish, request_context, session_cookies, with_cookies,
-    CSRF_COOKIE,
+    cookie_value, error_response, finish, merge_cookies, request_context, session_cookies,
+    with_cookies, CSRF_COOKIE,
 };
 
 use super::{bad_request, field_str, require_user, PeerAddr};
 
+/// 把一次 OAuth 流程绑定到发起它的浏览器。
+///
+/// `state` 只保证「这张票是我签的」，不保证「callback 是同一个浏览器打开的」。
+/// 只签名不绑定，攻击者可以把自己发起流程的 callback URL 发给受害者，形成
+/// login CSRF（受害者登录进攻击者账号）。这里存 `state` 的哈希到 HttpOnly
+/// Cookie，回调时必须对得上。
+const OAUTH_STATE_COOKIE: &str = "pixora_oauth_state";
+const OAUTH_STATE_TTL_SECONDS: i64 = 600;
+
+fn state_cookie(state: &AppState, signed: &str) -> HeaderMap {
+    let hash = pixora_crypto::token::token_hash(signed);
+    let secure = if state.config.cookie_secure() {
+        "; Secure"
+    } else {
+        ""
+    };
+    crate::http::cookie_headers(format!(
+        "{OAUTH_STATE_COOKIE}={hash}; Path=/api/v1/auth/oauth; HttpOnly; SameSite=Lax; Max-Age={OAUTH_STATE_TTL_SECONDS}{secure}"
+    ))
+}
+
+fn clear_state_cookie(state: &AppState) -> HeaderMap {
+    let secure = if state.config.cookie_secure() {
+        "; Secure"
+    } else {
+        ""
+    };
+    crate::http::cookie_headers(format!(
+        "{OAUTH_STATE_COOKIE}=; Path=/api/v1/auth/oauth; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
+    ))
+}
+
+fn with_state_cleared(state: &AppState, response: Response) -> Response {
+    with_cookies(response, clear_state_cookie(state))
+}
+
 /// 回调地址：站点自己的地址 + 固定路径。必须与在对方平台登记的完全一致。
-pub(crate) fn redirect_uri(state: &AppState, provider_name: &str) -> String {
-    let base = state
-        .config
-        .base_url
-        .clone()
-        .unwrap_or_default()
-        .trim_end_matches('/')
-        .to_string();
+///
+/// 用设置里的站点地址（安装向导/后台写的），而不是只看环境变量：向导里填的
+/// 地址若在这里不生效，OAuth 会拿一个空 base 去拼 callback，平台直接拒绝。
+pub(crate) async fn redirect_uri(state: &AppState, provider_name: &str) -> String {
+    let base = state.base_url().await.trim_end_matches('/').to_string();
     format!("{base}/api/v1/auth/oauth/{provider_name}/callback")
 }
 
@@ -53,7 +86,10 @@ pub async fn oauth_start(
         .get("mode")
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_else(|| "login".to_string());
-    let next = query.get("next").cloned().unwrap_or_else(|| "/".to_string());
+    let next = query
+        .get("next")
+        .cloned()
+        .unwrap_or_else(|| "/".to_string());
     // 扫码登录用：授权页嵌在 iframe 里，回调时改带走顶层窗口
     let embed = query
         .get("embed")
@@ -100,13 +136,17 @@ pub async fn oauth_start(
         Ok(value) => value,
         Err(err) => return error_response(err),
     };
-    let url = state.authorize_url(&client, &redirect_uri(&state, &provider_name), &signed);
+    let url = state.authorize_url(
+        &client,
+        &redirect_uri(&state, &provider_name).await,
+        &signed,
+    );
     if url.is_empty() {
         return error_response(AppError::bad_request(format!(
             "不支持的登录方式：{provider_name}"
         )));
     }
-    redirect(&url)
+    with_cookies(redirect(&url), state_cookie(&state, &signed))
 }
 
 /// `GET /api/v1/auth/oauth/{provider}/callback` — 对方带着授权码回来。
@@ -125,19 +165,34 @@ pub async fn oauth_callback(
             .get("error_description")
             .cloned()
             .unwrap_or_else(|| error.clone());
-        return fail_redirect(&format!("{}授权被拒绝：{detail}", provider::label(&provider_name)));
+        return with_state_cleared(
+            &state,
+            fail_redirect(&format!(
+                "{}授权被拒绝：{detail}",
+                provider::label(&provider_name)
+            )),
+        );
     }
 
     let state_token = query.get("state").cloned().unwrap_or_default();
+    let expected = cookie_value(&headers, OAUTH_STATE_COOKIE).unwrap_or_default();
+    let actual = pixora_crypto::token::token_hash(&state_token);
+    // 只校验签名还不够：callback 必须由发起流程的那只浏览器打开。
+    if !pixora_crypto::token::constant_time_eq(&expected, &actual) {
+        return with_state_cleared(
+            &state,
+            fail_redirect("登录状态已失效或与当前浏览器不匹配，请重新发起"),
+        );
+    }
     let oauth_state = match state.verify_state(&state_token) {
         Ok(value) => value,
-        Err(err) => return fail_redirect(err.message().as_str()),
+        Err(err) => return with_state_cleared(&state, fail_redirect(err.message().as_str())),
     };
     if oauth_state.provider != provider_name {
-        return fail_redirect("登录状态对不上，请重新发起");
+        return with_state_cleared(&state, fail_redirect("登录状态对不上，请重新发起"));
     }
     let Some(code) = query.get("code").cloned() else {
-        return fail_redirect("对方没有带回授权码，请重试");
+        return with_state_cleared(&state, fail_redirect("对方没有带回授权码，请重试"));
     };
 
     let rectx = request_context(&state, &headers, peer.addr()).await;
@@ -145,40 +200,49 @@ pub async fn oauth_callback(
 
     let client = match state.get_oauth_client(&provider_name).await {
         Ok(Some(client)) => client,
-        Ok(None) => return fail_redirect("这个登录方式没有配置好"),
-        Err(err) => return fail_redirect(err.message().as_str()),
+        Ok(None) => return with_state_cleared(&state, fail_redirect("这个登录方式没有配置好")),
+        Err(err) => return with_state_cleared(&state, fail_redirect(err.message().as_str())),
     };
     let bundle = match state
-        .oauth_token_bundle(&client, &code, &redirect_uri(&state, &provider_name))
+        .oauth_token_bundle(&client, &code, &redirect_uri(&state, &provider_name).await)
         .await
     {
         Ok(bundle) => bundle,
-        Err(err) => return fail_redirect(err.message().as_str()),
+        Err(err) => return with_state_cleared(&state, fail_redirect(err.message().as_str())),
     };
     let profile = match state.oauth_profile(&client, &bundle).await {
         Ok(profile) => profile,
-        Err(err) => return fail_redirect(err.message().as_str()),
+        Err(err) => return with_state_cleared(&state, fail_redirect(err.message().as_str())),
     };
 
     // 绑定：把身份挂到发起时那个账号上（会话可能已经过期，所以再核一次身份）
     if oauth_state.mode == "bind" {
         let auth = match crate::http::authenticate(&state, &headers, rectx.ip.as_deref()).await {
             Ok(auth) => auth,
-            Err(_) => return fail_redirect("登录状态已失效，请重新登录后再绑定"),
+            Err(_) => {
+                return with_state_cleared(
+                    &state,
+                    fail_redirect("登录状态已失效，请重新登录后再绑定"),
+                )
+            }
         };
         if let Some(expected) = oauth_state.user_id {
             if expected != auth.user.id {
-                return fail_redirect("绑定的账号与发起时不一致，请重试");
+                return with_state_cleared(
+                    &state,
+                    fail_redirect("绑定的账号与发起时不一致，请重试"),
+                );
             }
         }
         return match state
             .bind_identity(&auth.user, &provider_name, &profile, rectx.ip.as_deref())
             .await
         {
-            Ok(()) => redirect(&format!(
-                "/#/account/security?bound={provider_name}"
-            )),
-            Err(err) => fail_redirect(err.message().as_str()),
+            Ok(()) => with_state_cleared(
+                &state,
+                redirect(&format!("/#/account/security?bound={provider_name}")),
+            ),
+            Err(err) => with_state_cleared(&state, fail_redirect(err.message().as_str())),
         };
     }
 
@@ -187,7 +251,10 @@ pub async fn oauth_callback(
         .await
     {
         Ok(OAuthOutcome::LoggedIn(issued)) => {
-            let cookies = session_cookies(&state, &issued.session_token, &issued.csrf_token, false).await;
+            let cookies = merge_cookies(
+                session_cookies(&state, &issued.session_token, &issued.csrf_token, false).await,
+                clear_state_cookie(&state),
+            );
             let target = if oauth_state.next.is_empty() {
                 "/".to_string()
             } else {
@@ -207,13 +274,14 @@ pub async fn oauth_callback(
                 "/#/complete-signup?ticket={}&provider={provider_name}",
                 urlencode(&ticket)
             );
-            if oauth_state.embed {
+            let response = if oauth_state.embed {
                 html_redirect(&target)
             } else {
                 redirect(&target)
-            }
+            };
+            with_state_cleared(&state, response)
         }
-        Err(err) => fail_redirect(err.message().as_str()),
+        Err(err) => with_state_cleared(&state, fail_redirect(err.message().as_str())),
     }
 }
 
@@ -248,8 +316,16 @@ pub async fn complete_signup(
         .await
     {
         Ok(issued) => {
-            let cookies = session_cookies(&state, &issued.session_token, &issued.csrf_token, false).await;
-            let payload = match super::me_payload(&state, &issued.user, Some(issued.csrf_token), None).await {
+            let cookies =
+                session_cookies(&state, &issued.session_token, &issued.csrf_token, false).await;
+            let payload = match super::me_payload(
+                &state,
+                &issued.user,
+                Some(issued.csrf_token),
+                None,
+            )
+            .await
+            {
                 Ok(payload) => payload,
                 Err(err) => return error_response(err),
             };
@@ -313,11 +389,21 @@ pub async fn phone_login(
         .unwrap_or(false);
     let _ = method;
 
-    match state.phone_login(&phone, &code, &rectx.device(), remember).await {
+    match state
+        .phone_login(&phone, &code, &rectx.device(), remember)
+        .await
+    {
         Ok(issued) => {
             let cookies =
                 session_cookies(&state, &issued.session_token, &issued.csrf_token, remember).await;
-            let payload = match super::me_payload(&state, &issued.user, Some(issued.csrf_token), None).await {
+            let payload = match super::me_payload(
+                &state,
+                &issued.user,
+                Some(issued.csrf_token),
+                None,
+            )
+            .await
+            {
                 Ok(payload) => payload,
                 Err(err) => return error_response(err),
             };
@@ -479,7 +565,10 @@ pub async fn identity_unbind(
 
 /// 302 跳转。
 fn redirect(target: &str) -> Response {
-    match axum::response::Redirect::to(target).into_response().status() {
+    match axum::response::Redirect::to(target)
+        .into_response()
+        .status()
+    {
         StatusCode::SEE_OTHER | StatusCode::TEMPORARY_REDIRECT | StatusCode::FOUND => {
             axum::response::Redirect::to(target).into_response()
         }
@@ -544,4 +633,3 @@ fn urlencode(value: &str) -> String {
     }
     out
 }
-

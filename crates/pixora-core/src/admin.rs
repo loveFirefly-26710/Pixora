@@ -363,7 +363,7 @@ impl AppState {
 
         if let Some(password) = password {
             pixora_crypto::password::check_strength(password)?;
-            let hash = pixora_crypto::password::hash_password(password)?;
+            let hash = self.hash_password(password).await?;
             self.repo.update_user_password(user_id, &hash).await?;
             // 重置密码后旧会话必须失效，否则账号可能仍被别人用着
             let revoked = self.repo.revoke_all_sessions(user_id, Utc::now()).await?;
@@ -384,9 +384,7 @@ impl AppState {
                 )
                 .await?;
             // 明文密码只在这一刻存在：发信告诉用户，免得管理员再口述一遍
-            let delivery = self
-                .send_password_set_mail(&target, password)
-                .await?;
+            let delivery = self.send_password_set_mail(&target, password).await?;
             mail = Some(delivery);
         }
 
@@ -447,7 +445,11 @@ impl AppState {
         let mut failures: Vec<String> = Vec::new();
         for (label, to) in [("新邮箱", new_email), ("旧邮箱", target.email.as_str())] {
             match self
-                .dispatch_mail(to, pixora_mail::template::names::EMAIL_CHANGED, vars.clone())
+                .dispatch_mail(
+                    to,
+                    pixora_mail::template::names::EMAIL_CHANGED,
+                    vars.clone(),
+                )
                 .await
             {
                 Ok(delivery) if delivery.delivered => {}
@@ -652,7 +654,8 @@ impl AppState {
         // 退信，而它本身也登不进来——暂停它就是「按住游客上传」这一个作用
         let mut mail_sent = false;
         let mut mail_error = None;
-        if input.notify && input.action != Disposition::Restore && !crate::guest::is_guest(&target) {
+        if input.notify && input.action != Disposition::Restore && !crate::guest::is_guest(&target)
+        {
             match self
                 .send_disposition_mail(&target, &input, reason.as_deref())
                 .await
@@ -710,7 +713,7 @@ impl AppState {
         };
 
         let (default_quota, _) = self.settings.quota_values().await?;
-        let password_hash = pixora_crypto::password::hash_password(password)?;
+        let password_hash = self.hash_password(password).await?;
         let user = self
             .create_user_with_uid(NewUser {
                 uid: String::new(),
@@ -1117,7 +1120,14 @@ mod tests {
 
         // 别的管理员：改邮箱、改角色、切进去、删除，四条路都堵上
         assert!(state
-            .admin_update_user(&other, owner.id, Some("hijack@example.com"), None, None, None)
+            .admin_update_user(
+                &other,
+                owner.id,
+                Some("hijack@example.com"),
+                None,
+                None,
+                None
+            )
             .await
             .is_err());
         assert!(state
@@ -1140,7 +1150,14 @@ mod tests {
 
         // 它自己可以改自己
         assert!(state
-            .admin_update_user(&owner, owner.id, Some("owner2@example.com"), None, None, None)
+            .admin_update_user(
+                &owner,
+                owner.id,
+                Some("owner2@example.com"),
+                None,
+                None,
+                None
+            )
             .await
             .is_ok());
         // 但它不能把自己降成普通用户，那样这个身份就废了
@@ -1172,24 +1189,14 @@ mod tests {
             .admin_delete_user(&admin, user.id, Some("别的邮箱@example.com"), None)
             .await
             .is_err());
-        assert!(state
-            .repo
-            .find_user_by_id(user.id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(state.repo.find_user_by_id(user.id).await.unwrap().is_some());
 
         let outcome = state
             .admin_delete_user(&admin, user.id, Some("User@Example.com"), None)
             .await
             .expect("对上邮箱就能删（大小写不敏感）");
         assert_eq!(outcome.uid, user.uid);
-        assert!(state
-            .repo
-            .find_user_by_id(user.id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(state.repo.find_user_by_id(user.id).await.unwrap().is_none());
 
         // 自己与不存在的账号都删不了
         assert!(state
