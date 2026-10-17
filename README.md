@@ -67,7 +67,7 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 
 Pixora 由三部分组成：**后端**（一个 Rust 进程，负责接口、直链、上传与后台任务）、**前端**（静态文件，嵌在后端二进制里）、**数据**（数据库与图片，都在数据目录里）。只要起一个进程，网站就能用。
 
-完整的部署方案单独成文：[**docs/Pixora-部署方案.md**](docs/Pixora-部署方案.md)。文档开头有一张从零到上线的清单，Docker、Linux 二进制、Windows 二进制三条路都给到每一步的命令、预期结果和排障对照；还包含三套完整 compose 与本机实测记录。当前版本 0.1.2。
+完整的部署方案单独成文：[**docs/Pixora-部署方案.md**](docs/Pixora-部署方案.md)。文档开头有一张从零到上线的清单，Docker、Linux 二进制、Windows 二进制三条路都给到每一步的命令、预期结果和排障对照；还包含三套完整 compose 与本机实测记录。当前版本 0.1.3。
 
 | 你想怎么装 | 看哪儿 |
 |---|---|
@@ -86,7 +86,7 @@ docker compose ps                    # pixora 应为 Up (healthy)
 docker compose logs --tail=50 pixora # 看到「Pixora 已启动」就说明起来了
 ```
 
-镜像默认用 `:latest`；生产建议固定成具体版本号（如 `:0.1.2`），升级时再改。PostgreSQL/MySQL 请用 0.1.1 及以上：0.1.0 的镜像建表就会失败。
+镜像默认用 `:latest`；生产建议固定成具体版本号（如 `:0.1.3`），升级时再改。PostgreSQL/MySQL 请用 0.1.1 及以上：0.1.0 的镜像建表就会失败。
 
 不需要 `.env`，也不用先建目录：数据落在同目录的 `./data`，Docker 会自己建；Caddy 的配置内嵌在编排文件末尾（`configs.content`），自动申请 https 证书。Compose 需要 2.23 以上（`docker compose version` 查）。
 
@@ -328,10 +328,10 @@ PIXORA_TEST_DB_DSN="mysql://root:pass@127.0.0.1/pixora" \
 ### 版本号放在哪、怎么发版
 
 版本号只有一个来源：`Cargo.toml` 里 `[workspace.package]` 的 `version`。二进制启动日志里那句
-`version="0.1.2"`、发版的标签、容器镜像的标签，全都按它算。
+`version="0.1.3"`、发版的标签、容器镜像的标签，全都按它算。
 
 ```bash
-sh scripts/version.sh              # 看当前版本号（0.1.2）
+sh scripts/version.sh              # 看当前版本号（0.1.3）
 sh scripts/bump-version.sh 0.2.0   # 改成 0.2.0：Cargo.toml、Cargo.lock、web/package.json、package-lock 一起改
 git add -A && git commit -m "chore: 版本号 0.2.0"
 git push                           # 推上去 → 自动建 v0.2.0 标签、发 Release、推镜像
