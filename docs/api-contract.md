@@ -79,7 +79,7 @@
 
 浏览器端：
 
-- 会话 Cookie：`pixora_session`（HttpOnly + SameSite=Lax + Secure）
+- 会话 Cookie：`pixora_session`（HttpOnly + SameSite=Lax；HTTPS 下带 Secure）
 - 每个写请求带 CSRF 头：`X-CSRF-Token: <pixora_csrf Cookie 的值>`
 - 登录与 `GET /api/v1/me` 会在响应体里带回 `csrf_token`，前端存内存；同时写一个非 HttpOnly 的 `pixora_csrf` Cookie 供刷新后还原
 
@@ -87,15 +87,25 @@ API 客户端：
 
 - `Authorization: Bearer px_live_xxx` 或 `X-API-Key: px_live_xxx`
 - Token 权限范围：`upload` / `read` / `write` / `admin`，路由要求声明见各条目
+- 创建 Token 时省略 `scopes` 或传空数组，都按最小可用范围 `["upload","read"]` 处理；要改删再加 `write`
 - 带上 Token 时不校验 CSRF
 
-### 1.4 时间与大小
+### 1.4 限流与响应头
+
+- 鉴权通过后按用户生效策略检查 API 额度：读接口用 `api_read_per_minute`，写接口用 `api_per_minute`；管理员豁免
+- 超限返回 429，`code=RATE_LIMITED`，带 `Retry-After` 秒数
+- 当前强制的是每分钟额度；`api_per_hour` 与 `api_burst` 还在策略表里，但尚未接入准入逻辑，客户端不要把它们当成已生效的硬限制
+- 浏览器会话的读请求只过进程内令牌桶；Token 请求与写操作会落库计数，管理页的“实时用量”据此展示
+- 所有 JSON 响应带安全响应头：`X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`Referrer-Policy: strict-origin-when-cross-origin`、`Permissions-Policy`、`Content-Security-Policy: frame-ancestors 'self'`
+- 直链与站点资产的响应头见 §10
+
+### 1.5 时间与大小
 
 - 时间一律是 RFC3339 UTC 字符串：`2026-10-14T15:30:00Z`
 - 字节数是整数（`size`、`quota_bytes`、`used_bytes`）
 - 前端负责把字节数与时间本地化展示
 
-### 1.5 字段命名
+### 1.6 字段命名
 
 - 图片列表项统一叫 `ImageItem`（见 4.1），页面之间复用同一形状，避免每个页面定义一套
 - 可见性取值：`public` / `private`
@@ -525,13 +535,15 @@ API 客户端：
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `file` | 是 | 图片本体（字段名固定 `file`） |
-| `sha256` | 否 | 客户端算好的哈希，带上可省一次服务端计算 |
-| `thumb` | 否 | 客户端生成的 WebP 缩略图，服务端只存不缩放 |
+| `sha256` | 否 | 客户端算好的哈希，用于和服务端实测值对账；服务端仍会边收边算，不能靠它跳过校验 |
+| `thumb` | 否 | 客户端生成的 WebP/PNG/JPEG 缩略图（最长边建议 1024px）；服务端只存不缩放，会校验体积、像素与尺寸 |
 | `album_id` | 否 | 目标相册 |
-| `tags` | 否 | 逗号分隔 |
+| `tags` | 否 | 逗号分隔，单标签最多 32 字，最多保留 20 个 |
 | `visibility` | 否 | 默认 `private`；**访客上传恒为公开**，服务端按账号定，不听这个值 |
-| `original_name` | 否 | 原始文件名，仅内部记录 |
+| `original_name` | 否 | 原始文件名，仅内部记录；服务端会去掉路径与控制字符，截到 255 字符 |
 | `reuse_existing` | 否 | `1` / `true` 表示「这份内容我图库里已有就复用它」，不新增一条引用（头像那套用它） |
+
+SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`、`foreignObject` 与带命名空间前缀的脚本标签都会被去掉，正常图形保留。净化后哈希会重算，因此不要拿上传前的客户端哈希去直链里找这张图。
 
 响应：
 
@@ -554,7 +566,8 @@ API 客户端：
 
 ### `GET /api/v1/plaza` — 公开
 
-`q`、`tag`、`sort`（`new` / `hot`）、`page`、`per_page`（默认 24，上限 100）。
+`q`、`tag`、`sort`、`seed`、`page`、`per_page`（默认 24，上限 100）。
+`sort` 认 `new` / `newest`、`old` / `oldest`、`largest` / `size`、`smallest`、`name_asc`、`name_desc`、`type_asc`、`hot` / `hottest`，以及默认的 `shuffle`；`shuffle` 用 `seed` 固定一次洗牌，翻页时带上同一个 seed 就不会重复或漏图。
 响应：分页信封，`data` 为 `[ImageItem]`（`original_name` 为 null）。
 若站点关闭广场公开浏览（`plaza_public=false`），未登录调用返回 `FORBIDDEN`。
 
@@ -598,6 +611,8 @@ API 客户端：
 ### `POST /api/v1/terms/consent` — write
 
 `{ "version_id": 3 }`，记录同意（只增不改，冗余存版本号）。响应 `{ "data": { "agreed_at": "…" } }`。
+
+`required=true` 表示当前账号还没同意生效版本。前端登录后会弹通告并引导到这里；**通用鉴权目前不会返回 `TERMS_REQUIRED` 强制拦截**，API Token 可以绕过这条提示。若条款需要法律意义上的强制同意，部署侧需要在服务端补拦截，或在注册/建 Token 的流程里绑定同意记录。
 
 ## 8. 管理后台
 
@@ -805,6 +820,14 @@ API 客户端：
   `max_file_size`（字节，`0` = 跟随全局），生效值出现在 `GET /me` 的 `limits.max_file_size`；
   上传时既拦在收流那一步，也通过 `/me` 让客户端队列提前拒绝。
 
+当前版本的实际执行口径：
+
+- 读/写 API 的**每分钟**额度在鉴权后强制，超限 429 + `Retry-After`；管理员豁免。
+- `api_per_hour` 与 `api_burst` 仍在策略表与界面里，但没有接入准入逻辑，不能当成已生效的限制。
+- 浏览器会话的读请求只过进程内令牌桶，不落库；Token 请求与写操作落库计数，供 `realtime` 展示。
+- 上传额度按实际落盘的新文件计数，去重跳过的不算；下载额度只算 `?download=1`。
+- 多实例部署时进程内令牌桶与下载分钟桶各自独立，实际额度会按实例数放大。
+
 - `PUT /api/v1/admin/ratelimit/global` ← `global` 对象
 - `PUT /api/v1/admin/ratelimit/users/{uid}` ← `{ "unlimited": false, "api_per_minute": 300, "upload_per_minute": 60,
   "upload_per_day": 5000, "upload_bytes_per_day": …, "api_per_hour": …, "api_read_per_minute": …,
@@ -871,6 +894,8 @@ API 客户端：
 - `POST /api/v1/admin/ip/rules` → `{ "cidr": "…", "kind": "deny", "scope": "all", "note": "…", "expires_at": null }`
 - `DELETE /api/v1/admin/ip/rules/{id}` → 亦用于「提前解除」自动规则
 - `PUT /api/v1/admin/ip/policy` ← `policy` 对象
+
+`scope=all` 的规则由全站中间件执行：浏览广场、直链、静态资源都会被拦；注册/登录/上传再按场景检查一次。`policy.trust_proxy` / `proxy_hops` 保存后覆盖环境变量 `PIXORA_TRUST_PROXY` 的默认值；直接暴露公网且没有反向代理时两者都应为 `0` 或关闭信任，否则客户端可以伪造 `X-Forwarded-For`。命中次数按规则每分钟最多记一次，拦下的请求不会每来一次就写一次库。
 
 ### 系统设置里的注册开关与自动关闭
 
@@ -973,7 +998,8 @@ GET /{upload_prefix}/{sha256}.{ext}?download=1 # 强制下载（Content-Disposit
   回收站只能看到一排碎图标。对外仍然是 404
 - 响应头带 `ETag: "<sha256>"` 与 `X-Content-Type-Options: nosniff`
 - `ext` 与库中记录不一致时返回 404（防止用伪造扩展名探测）
-- SVG 额外带 `Content-Security-Policy: sandbox`；不可信来源（非本人且非公开）强制 `attachment`
+- SVG 额外带 `Content-Security-Policy: sandbox; default-src 'none'; script-src 'none'; object-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'`；不可信来源（非本人且非公开）强制 `attachment`
+- 应用层统一带 `X-Frame-Options: SAMEORIGIN`、`Referrer-Policy`、`Permissions-Policy` 与 `frame-ancestors 'self'`；直链如果是 SVG，自身的沙箱 CSP 会覆盖这一层
 - 一级目录可在后台改（`/api/v1/admin/storage/prefix`），改完旧链依然有效
 - 本地驱动可直接由 Caddy 走 `X-Accel-Redirect` 交给内核发送，此时响应头由本站在前一步设置
 - **下载（`?download=1`）匿名也能用**：拿到的是一份真正的图片文件，文件名带真实扩展名
@@ -1007,7 +1033,11 @@ DELETE /me/identities/{provider} # 解绑（email 拒绝；最后一根稻草也
   带去站内路由（直接 302 只会把站内页面塞进那一小块框里）。对方页面拒绝被嵌时，
   界面上另有「在新窗口打开」的退路。
 - `state` 是用主密钥签名的短令牌（15 分钟）：里面带 `mode`、`next`、随机数与发起绑定的人，
-  外面验签就能读，不查库。`next` 只接受站内相对路径（`//evil.com` 这类会被改写成 `/`）。
+  外面验签就能读，不查库。`next` 只接受站内相对路径（`//evil.com`、`/\evil.com` 这类会被改写成 `/`）。
+- **`state` 同时绑定发起流程的浏览器**：`/start` 会把 state 的 SHA-256 写进 HttpOnly Cookie
+  （`pixora_oauth_state`，Path `/api/v1/auth/oauth`，10 分钟），callback 必须带上同一份。
+  只发签名 state 的链接给受害者不再能完成登录，login CSRF 被挡住。
+- `redirect_uri` 用站点设置里的基础 URL（后台/安装向导写的那个），不是只看环境变量；换域名后两边要一致。
 - 登录：`(provider, subject)` 已绑定就直接发会话；没绑过但对方给了**已验证的邮箱**就建号并绑定；
   没邮箱（QQ、微信从来不给）则回一张签名令牌，前端跳到 `#/complete-signup` 让用户填邮箱、
   走一次注册验证码，再调 `POST /auth/oauth/complete`——邮箱是账号本身，不能凭一句话当成他的。
