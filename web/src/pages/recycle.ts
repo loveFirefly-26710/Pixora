@@ -148,7 +148,7 @@ function albumRow(album: Album, reload: () => void): HTMLElement {
 
   return h(
     "div.flexline",
-    { style: { padding: "10px 0", borderBottom: "1px solid #f3f4f6" } },
+    { style: { padding: "10px 0", borderBottom: "1px solid var(--border)" } },
     h(
       "div",
       { style: { flex: "1", minWidth: "160px" } },
@@ -453,6 +453,8 @@ function gridView(
       imageTile(item, {
         checkbox: true,
         selected: state.selected.has(item.id),
+        title: item.title ?? item.original_name,
+        showViews: false,
         // 回收站里的图仍然能看大图：确认「是不是这张」才能放心恢复
         onOpen: (clicked) => openLightbox(state.items, clicked),
         onSelect: (clicked, event) => toggle(clicked, event),

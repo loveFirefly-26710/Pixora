@@ -56,7 +56,7 @@ export async function render(ctx: PageContext): Promise<void> {
         h("h4", { text: "基础信息" }),
         h(
           "div",
-          { style: { fontSize: "12.5px", lineHeight: "2.1", color: "#374151" } },
+          { style: { fontSize: "12.5px", lineHeight: "2.1", color: "var(--muted)" } },
           "接口根地址 ", h("span.mono", { text: base }), h("br"),
           "鉴权方式 ", h("span.mono", { text: "Authorization: Bearer <token>" }), h("br"),
           "备用方式 ", h("span.mono", { text: "X-API-Key: <token>" }), h("br"),
@@ -70,7 +70,7 @@ export async function render(ctx: PageContext): Promise<void> {
         h("h4", { text: "Token 与权限" }),
         h(
           "div",
-          { style: { fontSize: "12.5px", lineHeight: "2.1", color: "#374151" } },
+          { style: { fontSize: "12.5px", lineHeight: "2.1", color: "var(--muted)" } },
           "在「账号 → API Token」生成，只在创建时完整显示一次。",
         ),
         h(

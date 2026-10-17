@@ -6,7 +6,8 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 
 ![广场](docs/screenshots/plaza.webp)
 
-设计文档在 [`docs/Pixora-技术方案.md`](docs/Pixora-技术方案.md)，接口契约在
+设计文档在 [`docs/Pixora-技术方案.md`](docs/Pixora-技术方案.md)，主题方案在
+[`docs/Pixora-主题美化方案.md`](docs/Pixora-主题美化方案.md)，接口契约在
 [`docs/api-contract.md`](docs/api-contract.md)，界面原型在 [`docs/ui-preview.html`](docs/ui-preview.html)。
 
 ## 它解决什么问题

@@ -3,9 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-    <meta name="color-scheme" content="light" />
-    <meta name="theme-color" content="#2563eb" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#040c0e" />
     <title>Pixora</title>
+    <script>
+      // 首绘前定主题：保存过用手动选择，否则跟随系统；避免深色用户先看到一帧白屏。
+      (() => {
+        let saved = null;
+        try {
+          saved = localStorage.getItem("pixora-theme");
+        } catch {
+          /* 存储不可用时按系统走 */
+        }
+        const theme =
+          saved === "light" || saved === "dark"
+            ? saved
+            : window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
     <link rel="stylesheet" href="/main.css" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="manifest" href="/manifest.webmanifest" />

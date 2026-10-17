@@ -15,6 +15,8 @@ import { getState, impersonator, isAdmin, loadSite, setUser, subscribe } from ".
 import { request } from "../core/api";
 import { absUrl } from "../core/config";
 import { toast, toastError } from "../core/toast";
+import { currentTheme, toggleTheme } from "../core/theme";
+import { brandLockup, MOON_ICON, SUN_ICON } from "./brand";
 
 export interface NavItem {
   path: string;
@@ -81,9 +83,17 @@ function bestMatch(): string | null {
   return best;
 }
 
-function active(items: NavItem[]): boolean {
-  const best = bestMatch();
-  return best !== null && items.some((item) => (item.match ?? [item.path]).includes(best));
+/**
+ * 顶部主入口的高亮只看本层路径。
+ *
+ * bestMatch 把 `/` 当成广场的前缀，登录页、账号页也会命中 `/`；
+ * 侧栏没有广场这一项所以以前没暴露，顶栏和底栏加上广场之后就会
+ * 让「广场」在任何页面都亮着。这里单独判根路径。
+ */
+function topnavActive(item: NavItem): boolean {
+  const path = currentPath();
+  if (item.path === "/") return path === "/" || path === "/plaza";
+  return path === item.path || path.startsWith(`${item.path}/`);
 }
 
 /**
@@ -106,14 +116,14 @@ function navLink(item: NavItem): HTMLElement {
   }, h("span", { text: item.icon }), h("span", { text: item.label }));
 }
 
-/** 顶栏。图标 + 搜索框 + 账号 + API 文档，别的一律不放。 */
+/** 顶栏。品牌 + 主入口 + 搜索 + 主题/账号，别的一律不放。 */
 export function renderNavbar(): HTMLElement {
   const user = getState().user;
   // 顶栏照常留着：它是回广场的入口（登录页上的品牌不是链接），也带着账号菜单
   const navbar = h("div.navbar");
 
   // 品牌文字跟着站点名走：`data-brand` 是给 state.applySiteIdentity 改文字用的。
-  // 站名还是默认的 Pixora 时保留原来的双色写法——那是 Logo，不是文字
+  // 站名还是默认的 Pixora 时保留双色写法——那是 Logo，不是文字。
   const name = (getState().site?.name ?? "").trim() || "Pixora";
   const logo = h("a.logo", {
     href: "/",
@@ -130,12 +140,22 @@ export function renderNavbar(): HTMLElement {
       },
     },
   });
-  if (name === "Pixora") {
-    logo.innerHTML = `Pi<em>x</em>ora`;
-  } else {
-    logo.append(h("span", { "data-brand": "1", text: name }));
+  logo.append(brandLockup(name));
+
+  // 主入口只放广场、相册、上传：账号与后台在头像里，侧栏负责其余入口。
+  const topnav = h("nav.topnav", { "aria-label": "主导航" });
+  for (const item of [PLAZA, ALBUMS, UPLOAD]) {
+    const isActive = topnavActive(item);
+    topnav.append(
+      h("a", {
+        href: navHref(item.path),
+        class: isActive ? "on" : "",
+        "aria-current": isActive ? "page" : null,
+        text: item.label,
+      }),
+    );
   }
-  navbar.append(logo);
+  navbar.append(logo, topnav);
 
   // 搜索框固定在顶栏（不再只在广场与相册页出现）：在哪儿搜都落到当前板块的结果页
   const path = currentPath();
@@ -150,20 +170,31 @@ export function renderNavbar(): HTMLElement {
     const keyword = input.value.trim();
     navigate(keyword ? `${target}?q=${encodeURIComponent(keyword)}` : target);
   });
-  navbar.append(form);
 
-  navbar.append(h("span.spacer"));
+  const dark = currentTheme() === "dark";
+  const actionLabel = dark ? "切换到萤昼主题" : "切换到夜航主题";
+  const themeButton = h("button.theme-toggle", {
+    type: "button",
+    "data-act": "theme",
+    "aria-label": actionLabel,
+    "aria-pressed": String(!dark),
+    title: actionLabel,
+  });
+  themeButton.innerHTML = `${SUN_ICON}${MOON_ICON}`;
 
+  const navActions = h("div.nav-actions", null, themeButton);
   if (user) {
     // 管理后台的入口只在头像下拉里：顶栏再多一个按钮，和「账号」挤在一起
     // 反而让人分不清点哪个
-    navbar.append(userMenu(user));
+    navActions.append(userMenu(user));
   } else {
     // 未登录只留一个入口，注册挪进登录页（右下角）。
     // 游客看到两个按钮会先纠结「我该点哪个」，而这两步的落点本来就是同一个表单。
-    navbar.append(h("a.btn.pri", { href: "#/login", text: "登录" }));
+    navActions.append(h("a.btn.pri", { href: "#/login", text: "登录" }));
   }
-  navbar.append(h("a.btn.gho.sm", { href: "#/docs/api", text: "API 文档" }));
+  navActions.append(h("a.btn.gho.sm", { href: "#/docs/api", text: "API 文档" }));
+
+  navbar.append(h("span.spacer"), form, navActions);
 
   return navbar;
 }
@@ -285,9 +316,9 @@ export function avatarNode(size: "md" | "sm"): HTMLElement {
  */
 const DEFAULT_AVATAR_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
-  '<rect width="64" height="64" fill="#e2e8f0"/>' +
-  '<circle cx="32" cy="25" r="11" fill="#94a3b8"/>' +
-  '<path d="M10 62c0-13 10-20 22-20s22 7 22 20z" fill="#94a3b8"/>' +
+  '<rect width="64" height="64" fill="#0b201f"/>' +
+  '<circle cx="32" cy="25" r="11" fill="#4b7a70"/>' +
+  '<path d="M10 62c0-13 10-20 22-20s22 7 22 20z" fill="#4b7a70"/>' +
   "</svg>";
 export const BUILTIN_AVATAR = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(DEFAULT_AVATAR_SVG)}`;
 
@@ -311,7 +342,7 @@ export function renderTabbar(): HTMLElement {
   const user = getState().user;
   const items = user ? [PLAZA, ALBUMS, UPLOAD, MINE] : [PLAZA, { ...ALBUMS }, MINE];
   for (const item of items) {
-    const isActive = active([item]);
+    const isActive = topnavActive(item);
     tabbar.append(
       h(
         "a.it",
@@ -390,6 +421,18 @@ export async function logoutNow(): Promise<void> {
 document.addEventListener("click", (event) => {
   const target = event.target as HTMLElement | null;
   if (target?.closest('[data-act="logout"]')) void logoutNow();
+});
+
+/**
+ * 主题切换也走事件委托：顶栏会随路由重建，逐次绑监听会重复。
+ * 按钮的图标由 CSS 根据 html[data-theme] 切换，标签由 theme.ts 统一更新。
+ */
+document.addEventListener("click", (event) => {
+  const target = event.target as HTMLElement | null;
+  if (target?.closest('[data-act="theme"]')) {
+    event.preventDefault();
+    toggleTheme();
+  }
 });
 
 /**
@@ -505,7 +548,7 @@ export function userViewBanner(
     {
       style: {
         background: "var(--purple-soft)",
-        border: "1px solid #ddd6fe",
+        border: "1px solid var(--border)",
         borderRadius: "10px",
         padding: "10px 14px",
         marginBottom: "14px",
@@ -517,7 +560,7 @@ export function userViewBanner(
     },
     h(
       "div",
-      { style: { flex: "1", minWidth: "200px", fontSize: "13px", color: "#5b21b6" } },
+      { style: { flex: "1", minWidth: "200px", fontSize: "13px", color: "var(--purple)" } },
       h("b", { text: `正在查看用户 u_${uid}（${email}）的空间` }),
       h("div", { style: { fontSize: "12px", marginTop: "2px" }, text: "管理员自身相册已隐藏 · 本次访问已记录审计日志" }),
     ),
@@ -557,8 +600,8 @@ export function impersonationBanner(
     "div",
     {
       style: {
-        background: "var(--warning-soft, #fef3c7)",
-        border: "1px solid #fcd34d",
+        background: "var(--warning-soft)",
+        border: "1px solid var(--border)",
         borderRadius: "10px",
         padding: "10px 14px",
         marginBottom: "14px",
@@ -570,7 +613,7 @@ export function impersonationBanner(
     },
     h(
       "div",
-      { style: { flex: "1", minWidth: "200px", fontSize: "13px", color: "#92400e" } },
+      { style: { flex: "1", minWidth: "200px", fontSize: "13px", color: "var(--warning)" } },
       h("b", { text: `你正在以 u_${info.uid}（${info.email}）的身份登录` }),
       h("div", {
         style: { fontSize: "12px", marginTop: "2px" },

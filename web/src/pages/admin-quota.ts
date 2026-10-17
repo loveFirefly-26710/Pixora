@@ -238,7 +238,7 @@ function allocationCard(data: QuotaAdmin): HTMLElement {
   const line = (label: string, value: Node | string, divided = false): HTMLElement =>
     h(
       "div.flexline",
-      divided ? { style: { borderTop: "1px solid #f3f4f6", paddingTop: "6px" } } : null,
+      divided ? { style: { borderTop: "1px solid var(--border)", paddingTop: "6px" } } : null,
       h("span", { text: label }),
       h("span.spacer"),
       typeof value === "string" ? h("b", { text: value }) : value,

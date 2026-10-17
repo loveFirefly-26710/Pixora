@@ -13,7 +13,9 @@
 import { request, ApiError } from "../core/api";
 import { h } from "../core/dom";
 import { navigate, type PageContext } from "../core/router";
+import { getState } from "../core/state";
 import { toastError } from "../core/toast";
+import { brandLockup } from "../ui/brand";
 import { field, qtip, textInput } from "../ui/widgets";
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -98,12 +100,18 @@ export async function render(ctx: PageContext): Promise<void> {
 
   const form = h(
     "form",
-    { style: { maxWidth: "440px", margin: "0 auto", padding: "34px 18px" } },
+    { class: "auth-card" },
     h(
-      "div",
-      { style: { textAlign: "center", marginBottom: "20px" } },
-      h("div.logo", { style: { fontSize: "19px" }, html: "Pi<em>x</em>ora" }),
-      h("div.tip", { text: "重置密码" }),
+      "div.auth-head",
+      null,
+      h(
+        "div.auth-brand",
+        null,
+        brandLockup((getState().site?.name ?? "").trim() || "Pixora"),
+      ),
+      h("div.auth-eyebrow", { text: "Reset access" }),
+      h("h1.auth-title", { text: "重置密码" }),
+      h("div.auth-sub", { text: "用邮箱验证码设置新密码。新密码生效后，所有设备会下线。" }),
     ),
     errorBox,
     infoBox,
@@ -180,14 +188,20 @@ export async function render(ctx: PageContext): Promise<void> {
  * 有效验证码——那两样转发一次链接就跟着走了。令牌用一次即废。
  */
 async function renderFromLink(ctx: PageContext, token: string): Promise<void> {
-  const root = h("div", { style: { maxWidth: "440px", margin: "0 auto", padding: "34px 18px" } });
+  const root = h("div.auth-card");
   ctx.outlet.append(root);
 
   const header = h(
-    "div",
-    { style: { textAlign: "center", marginBottom: "20px" } },
-    h("div.logo", { style: { fontSize: "19px" }, html: "Pi<em>x</em>ora" }),
-    h("div.tip", { text: "设置新密码" }),
+    "div.auth-head",
+    null,
+    h(
+      "div.auth-brand",
+      null,
+      brandLockup((getState().site?.name ?? "").trim() || "Pixora"),
+    ),
+    h("div.auth-eyebrow", { text: "Reset access" }),
+    h("h1.auth-title", { text: "设置新密码" }),
+    h("div.auth-sub", { text: "链接已验证。保存后旧会话会全部下线，请用新密码重新登录。" }),
   );
 
   let account = "…";

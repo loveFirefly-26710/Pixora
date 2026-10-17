@@ -146,7 +146,9 @@ export function phoneForm(
   return h(
     "div.oauth-box",
     null,
-    h("div.oauth-sep", null, h("span", { text: hooks.mode === "bind" ? "绑定手机号" : "或用手机号验证码登录" })),
+    hooks.mode === "bind"
+      ? h("div.oauth-sep", null, h("span", { text: "绑定手机号" }))
+      : null,
     h(
       "div",
       { style: { display: "grid", gap: "8px" } },

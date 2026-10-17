@@ -371,7 +371,7 @@ function usageCard(user: UserProfile): HTMLElement {
       style: {
         marginTop: "12px",
         paddingTop: "12px",
-        borderTop: "1px solid #f3f4f6",
+        borderTop: "1px solid var(--border)",
         fontSize: "12.5px",
         color: "var(--muted)",
       },

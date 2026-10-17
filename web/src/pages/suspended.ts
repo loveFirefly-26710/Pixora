@@ -69,7 +69,7 @@ export async function render(ctx: PageContext): Promise<void> {
     rows.push(
       h(
         "div",
-        { style: { fontSize: "13px", lineHeight: "2.1", color: "#374151" } },
+        { style: { fontSize: "13px", lineHeight: "2.1", color: "var(--muted)" } },
         "账号 ",
         h("b", { text: profile.email }),
         `（UID ${profile.uid}）`,
@@ -113,7 +113,7 @@ export async function render(ctx: PageContext): Promise<void> {
             height: "54px",
             borderRadius: "50%",
             background: banned ? "var(--danger-soft)" : "var(--warning-soft)",
-            border: `1px solid ${banned ? "#fca5a5" : "#fcd34d"}`,
+            border: "1px solid var(--border2)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -159,7 +159,7 @@ export async function render(ctx: PageContext): Promise<void> {
         { style: { marginBottom: "14px" } },
         h("h4", { text: "如何恢复" }),
         h("div", {
-          style: { fontSize: "13px", lineHeight: "1.9", color: "#374151" },
+          style: { fontSize: "13px", lineHeight: "1.9", color: "var(--muted)" },
           text: "封禁需要管理员解封。请联系管理员说明情况，是否解封由管理员判断。你也可以在邮件里提出申诉。",
         }),
         copyRow(appealEmail),
@@ -228,7 +228,7 @@ export async function render(ctx: PageContext): Promise<void> {
           height: "22px",
           borderRadius: "50%",
           background: "var(--primary)",
-          color: "#fff",
+          color: "var(--primary-fg)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",

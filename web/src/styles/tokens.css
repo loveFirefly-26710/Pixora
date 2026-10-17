@@ -1,25 +1,64 @@
 /* 设计令牌与基础样式。
-   取值直接来自 UI 原型，改这里等于改全站观感。 */
+   主题由 index.html 在首绘前写入 html[data-theme]：
+   没选过跟随系统，选过就记住。所有颜色都从这里取，
+   页面里不要再写死某一套主题的色值。 */
 
 :root {
-  --bg: #f6f7f9;
-  --surface: #fff;
-  --border: #e5e7eb;
-  --border2: #d1d5db;
-  --text: #1f2328;
-  --muted: #6b7280;
-  --faint: #9ca3af;
-  --primary: #2563eb;
-  --primary-soft: #eff6ff;
-  --success: #16a34a;
-  --success-soft: #f0fdf4;
-  --warning: #d97706;
-  --warning-soft: #fffbeb;
-  --danger: #dc2626;
-  --danger-soft: #fef2f2;
-  --purple: #7c3aed;
-  --purple-soft: #f5f3ff;
-  --r: 10px;
+  color-scheme: dark;
+
+  /* 夜航：深墨绿底、银白正文、薄荷萤光、微金点缀 */
+  --bg: #040c0e;
+  --bg-2: #071817;
+  --surface: rgba(9, 25, 25, .72);
+  --surface-2: rgba(15, 37, 35, .46);
+  --surface-solid: #081918;
+  --elev: #0b201f;
+  --border: rgba(158, 236, 214, .12);
+  --border2: rgba(158, 236, 214, .24);
+  --border-strong: rgba(158, 236, 214, .4);
+  --text: #e8f7f1;
+  --muted: #93b2a9;
+  --faint: #647f78;
+  --primary: #a3f7dd;
+  --primary-2: #4fe0b6;
+  --primary-fg: #03241b;
+  --primary-soft: rgba(79, 224, 182, .12);
+  --gold: #efc887;
+  --gold-soft: rgba(239, 200, 135, .12);
+  --success: #7ce6bf;
+  --success-soft: rgba(79, 224, 182, .1);
+  --warning: #efc887;
+  --warning-soft: rgba(239, 200, 135, .1);
+  --danger: #ff8a94;
+  --danger-soft: rgba(255, 125, 136, .1);
+  --purple: #c7b3ff;
+  --purple-soft: rgba(167, 139, 250, .12);
+  --glow: rgba(79, 224, 182, .28);
+  --glow-strong: rgba(79, 224, 182, .52);
+  --shadow: 0 24px 70px rgba(0, 0, 0, .46);
+  --shadow-soft: 0 12px 34px rgba(0, 0, 0, .2);
+  --mask: rgba(2, 8, 9, .72);
+  --stage-bg: #020a0a;
+  --stage-text: #e8f7f1;
+  --code-bg: #020c0c;
+  --code-fg: #d9fff2;
+  --ambient-a: rgba(53, 190, 160, .17);
+  --ambient-b: rgba(238, 200, 135, .055);
+  --ambient-c: rgba(35, 133, 120, .07);
+  --ph-1: #0c1f1d;
+  --ph-2: #121f1b;
+  --ph-3: #0d201c;
+  --ph-4: #1a2024;
+  --ph-5: #171f2a;
+  --ph-6: #1b1d18;
+
+  /* 字体：正文走系统中文字体，标题用系统宋体/思源宋体，数据用等宽 */
+  --font-body: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-display: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+  --r: 16px;
+  --r-sm: 10px;
+  --r-pill: 999px;
 
   /* 五个断点，移动优先，统一用 min-width 往上增强 */
   --bp-sm: 480px;
@@ -29,6 +68,58 @@
 
   --content-max: 100%;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* 顶栏高度：脚本会按实际渲染结果覆盖这个值 */
+  --nav-h: 64px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* 萤昼：珍珠白与浅薄荷，正文深绿，避免在亮底上发灰 */
+  --bg: #eef7f1;
+  --bg-2: #e0f0e8;
+  --surface: rgba(255, 255, 255, .8);
+  --surface-2: rgba(255, 255, 255, .58);
+  --surface-solid: #fbfefc;
+  --elev: #ffffff;
+  --border: rgba(17, 70, 56, .12);
+  --border2: rgba(17, 70, 56, .23);
+  --border-strong: rgba(17, 70, 56, .38);
+  --text: #102c25;
+  --muted: #55756b;
+  --faint: #78948b;
+  --primary: #0e8f71;
+  --primary-2: #11a985;
+  --primary-fg: #f3fffb;
+  --primary-soft: rgba(17, 169, 133, .1);
+  --gold: #a06e1e;
+  --gold-soft: rgba(160, 110, 30, .1);
+  --success: #0e8f71;
+  --success-soft: rgba(14, 143, 113, .1);
+  --warning: #a06e1e;
+  --warning-soft: rgba(160, 110, 30, .1);
+  --danger: #c03949;
+  --danger-soft: rgba(192, 57, 73, .08);
+  --purple: #6b4fb8;
+  --purple-soft: rgba(107, 79, 184, .08);
+  --glow: rgba(17, 169, 133, .18);
+  --glow-strong: rgba(17, 169, 133, .34);
+  --shadow: 0 24px 70px rgba(24, 75, 62, .14);
+  --shadow-soft: 0 12px 34px rgba(24, 75, 62, .08);
+  --mask: rgba(17, 46, 39, .38);
+  --stage-bg: #061211;
+  --stage-text: #e8f7f1;
+  --code-bg: #08201c;
+  --code-fg: #d9fff2;
+  --ambient-a: rgba(59, 198, 161, .2);
+  --ambient-b: rgba(238, 196, 123, .17);
+  --ambient-c: rgba(66, 169, 143, .1);
+  --ph-1: #dfe7f3;
+  --ph-2: #e6e2dc;
+  --ph-3: #ddeae2;
+  --ph-4: #ece0e6;
+  --ph-5: #e3e0f0;
+  --ph-6: #e8e6d9;
 }
 
 * {
@@ -41,17 +132,51 @@ body {
   padding: 0;
 }
 
-body {
-  font:
-    14px/1.6 system-ui,
-    -apple-system,
-    "Segoe UI",
-    "Microsoft YaHei",
-    sans-serif;
+html {
+  min-height: 100%;
   background: var(--bg);
+}
+
+body {
+  min-height: 100vh;
+  font: 14px/1.65 var(--font-body);
   color: var(--text);
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(1100px 760px at 82% -6%, var(--ambient-a), transparent 64%),
+    radial-gradient(860px 620px at 4% 18%, var(--ambient-b), transparent 60%),
+    radial-gradient(720px 520px at 52% 58%, var(--ambient-c), transparent 68%);
+  background-attachment: fixed;
   /* 任何断点下都不该出现横向滚动条，这是最基础的验收项 */
   overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--primary-soft);
+  color: var(--text);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border2);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* 站点背景图。
@@ -62,13 +187,20 @@ body.has-site-bg::before {
   content: "";
   position: fixed;
   inset: 0;
-  z-index: -1;
+  z-index: -2;
   background-image: var(--site-bg-image);
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  /* 压一层半透明白，保证前景文字在任何背景图上都读得清 */
-  opacity: 0.35;
+  /* 暗底上把背景图压暗；亮色主题再抬回来一点 */
+  opacity: .2;
+  filter: saturate(.8) brightness(.75);
+  pointer-events: none;
+}
+
+:root[data-theme="light"] body.has-site-bg::before {
+  opacity: .22;
+  filter: saturate(.9) brightness(1.05);
 }
 
 a {
@@ -80,7 +212,7 @@ a {
 .hash,
 code,
 kbd {
-  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   overflow-wrap: anywhere;
 }
@@ -97,15 +229,9 @@ kbd {
   min-width: 0;
 }
 
-/* 顶栏高度：由脚本按实际渲染结果写进来（见 shell.ts 的 syncNavHeight）。
-   粘性定位的元素（侧边栏、相册工具栏）靠它对齐，不再猜 49px 还是 59px。 */
-:root {
-  --nav-h: 49px;
-}
-
 /* 内容区限宽：LG 1200px、XL 1400px 居中 */
 .pad {
-  padding: 14px;
+  padding: 18px 16px 40px;
   max-width: var(--content-max);
   margin: 0 auto;
   width: 100%;
@@ -116,7 +242,7 @@ kbd {
     --content-max: 1200px;
   }
   .pad {
-    padding: 18px 22px 60px;
+    padding: 26px 24px 70px;
   }
 }
 
@@ -127,25 +253,29 @@ kbd {
 }
 
 @media (max-width: 479px) {
-  /* XS：卡片内边距收紧到 10px */
+  /* XS：卡片内边距收紧到 12px */
   .card {
-    padding: 10px;
+    padding: 12px;
   }
   .pad {
-    padding: 10px;
+    padding: 14px 12px 32px;
   }
 }
 
 :focus-visible {
   outline: 2px solid var(--primary);
-  outline-offset: 1px;
+  outline-offset: 2px;
   border-radius: 4px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

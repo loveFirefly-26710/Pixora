@@ -12,7 +12,7 @@ import { navigate, type PageContext } from "../core/router";
 import { getState, setViewingUid } from "../core/state";
 import type { AdminUserRow } from "../core/types";
 import { userViewBanner } from "../ui/shell";
-import { emptyState, pageHead, qtip, skeletonGrid } from "../ui/widgets";
+import { emptyState, qtip, skeletonGrid, viewHead } from "../ui/widgets";
 import { createUploadPanel, loadAlbumOptions, type UploadPanelHandle } from "../upload/panel";
 
 /** 目标相册下拉的候选形状，与面板的 options.albums 对齐。 */
@@ -37,7 +37,11 @@ export async function render(ctx: PageContext): Promise<void> {
 
   mount(
     headHost,
-    pageHead("上传", "拖拽、选文件、选文件夹、粘贴都能进队列，队列逐张上传。"),
+    viewHead(
+      "Upload / Transfer",
+      "投递萤火",
+      "拖拽、选文件、选文件夹、粘贴都能进队列，队列逐张上传。传完之后可以在相册里复制直链。",
+    ),
   );
 
   const viewingUid = getState().viewingUid;

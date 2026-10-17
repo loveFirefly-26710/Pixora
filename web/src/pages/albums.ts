@@ -32,13 +32,13 @@ import {
   emptyState,
   imageTile,
   newShuffleSeed,
-  pageHead,
   progressBar,
   qtip,
   skeletonGrid,
   sortSelect,
   spinner,
   thumbImage,
+  viewHead,
 } from "../ui/widgets";
 
 type SortKey = string;
@@ -151,9 +151,10 @@ export async function render(ctx: PageContext): Promise<void> {
     );
   }
   headHost.append(
-    pageHead(
+    viewHead(
+      "Library / Collection",
       "我的相册",
-      "每张图左上角有勾选框；左键单击图片打开预览，Shift 连选一段、Ctrl 点选多张；移动端长按即选中。",
+      "每张图都在自己的轨道上。点击图片打开预览；勾选后可批量打标签、移动、复制直链或删除。",
     ),
   );
 
@@ -205,7 +206,7 @@ export async function render(ctx: PageContext): Promise<void> {
   });
 
   const normalToolbar = h(
-    "div.toolbar",
+    "div.toolbar.normal-toolbar",
     null,
     gridChip,
     listChip,
@@ -524,6 +525,9 @@ export async function render(ctx: PageContext): Promise<void> {
           selected: state.selected.has(item.id),
           // 勾选框常驻：选图不用先点「选择」进模式
           checkbox: true,
+          // 自己的相册里显示文件名；广场卡片仍然只看用户写的标题
+          title: titleOf(item),
+          showViews: false,
           onOpen: () => openLightbox(state.offset + index),
           onSelect: (target, event) => handleTileSelect(target, event),
         }),
