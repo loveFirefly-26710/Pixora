@@ -44,7 +44,12 @@ awk -v old="$old" -v new="$new" '
 ' "$root/Cargo.toml" > "$tmp"
 mv "$tmp" "$root/Cargo.toml"
 
-# 2) Cargo.lock：紧跟 name = "pixora-*" 的那行 version
+# 2) Cargo.toml 里 [workspace.dependencies] 对内部 crate 的版本要求
+sed -E "s/(pixora-[a-z-]+ = \{ path = \"crates\/[a-z-]+\", version = \")$old(\")/\1$new\2/" \
+  "$root/Cargo.toml" > "$tmp"
+mv "$tmp" "$root/Cargo.toml"
+
+# 3) Cargo.lock：紧跟 name = "pixora-*" 的那行 version
 awk -v new="$new" '
   /^name = "pixora-/ { print; local_pkg = 1; next }
   local_pkg && /^version = "/ { print "version = \"" new "\""; local_pkg = 0; next }
@@ -52,13 +57,18 @@ awk -v new="$new" '
 ' "$root/Cargo.lock" > "$tmp"
 mv "$tmp" "$root/Cargo.lock"
 
-# 3) web/package.json
+# 4) web/package.json
 sed "s/\"version\": \"$old\"/\"version\": \"$new\"/" "$root/web/package.json" > "$tmp"
 mv "$tmp" "$root/web/package.json"
+
+# 5) web/package-lock.json 的根版本（文件头部两处镜像 package.json 的 version）
+#    只改前 12 行，避免误伤依赖自己的 version 字段
+sed "1,12s/\"version\": \"$old\"/\"version\": \"$new\"/" "$root/web/package-lock.json" > "$tmp"
+mv "$tmp" "$root/web/package-lock.json"
 
 echo "版本号：$old → $new"
 echo
 echo "接下来："
-echo "  git add Cargo.toml Cargo.lock web/package.json"
+echo "  git add Cargo.toml Cargo.lock web/package.json web/package-lock.json"
 echo "  git commit -m \"chore: 版本号 $new\""
 echo "  git push            # 推上去会自动发版 + 出镜像"
