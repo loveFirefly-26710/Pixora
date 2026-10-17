@@ -12,11 +12,17 @@
 # 需要 Docker Compose 2.23 以上（用 configs.content 内嵌了 Caddy 配置）：
 #   docker compose version
 #
+# 镜像默认用 :latest（最近一次发版）。生产环境建议固定成具体版本号（如 :0.1.1），
+# 升级时再改，出问题好回滚；主干上尚未发版的修复在 :edge 里。
+#
+# 安装向导第 4 步的「基础 URL」会写进数据库，之后以数据库里的值为准。
+# 向导会预填这里的环境变量值；换域名时记得两边一起改。
+#
 # 想从源码构建镜像，见 README 的「从源码构建」一节。
 
 services:
   pixora:
-    # 换成你自己的用户名（fork 过的话）；没发过版的仓库只有 :edge
+    # fork 过仓库就换成自己的用户名。生产建议把 :latest 固定成具体版本号
     image: ghcr.io/lovefirefly-26710/pixora:latest
     restart: unless-stopped
     environment:
@@ -45,6 +51,12 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+    # 默认的 json-file 日志不封顶，长时间跑会把磁盘写满
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2-alpine
@@ -61,12 +73,19 @@ services:
     deploy:
       resources:
         limits: { memory: 48M }
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 # Caddy 的配置就写在这里，不用另外放一个 Caddyfile
 configs:
   caddyfile:
     content: |
-      {$PIXORA_DOMAIN} {
+      # Compose 对 content 里的变量符号也会插值，这里写两遍做转义；
+      # Caddy 实际读到的是单个变量引用，再从容器环境取域名。
+      {$$PIXORA_DOMAIN} {
           encode zstd gzip
           # 上传体积上限，与应用侧的上限保持一致
           request_body {

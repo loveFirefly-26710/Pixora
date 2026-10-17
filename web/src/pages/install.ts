@@ -13,6 +13,7 @@ import { ApiError, request } from "../core/api";
 import { h, mount } from "../core/dom";
 import { formatNumber } from "../core/format";
 import type { PageContext } from "../core/router";
+import { getState } from "../core/state";
 import { toastError } from "../core/toast";
 import type { InstallStatus } from "../core/types";
 import { card, cardNode, field, kvRow, pageHead, qtip, select, spinner, textInput } from "../ui/widgets";
@@ -120,6 +121,21 @@ export async function installPage(ctx: PageContext): Promise<void> {
   }
 }
 
+/**
+ * 向导第 4 步预填的站点地址。
+ *
+ * 优先用后端已经知道的地址（来自 PIXORA_BASE_URL 或此前保存过的设置）：
+ * 通过 IP 打开向导时，不会把 IP 写进数据库、盖掉配置里的正式域名；
+ * 前后端分开部署时，也不会把前端域名当成后端直链地址。
+ * 后端没配时这里会拿到监听地址（0.0.0.0），它不能访问，仍用浏览器地址。
+ */
+function initialBaseUrl(): string {
+  const configured = getState().site?.base_url?.trim().replace(/\/+$/, "") ?? "";
+  if (!/^https?:\/\//i.test(configured)) return location.origin;
+  if (/^https?:\/\/(0\.0\.0\.0|\[::\]|::)(:\d+)?$/i.test(configured)) return location.origin;
+  return configured;
+}
+
 function wizard(reload: () => void, status: InstallStatus): Node[] {
   // 已经装好了：这组接口已经关闭，只能去登录
   if (status.installed) {
@@ -158,7 +174,7 @@ function wizard(reload: () => void, status: InstallStatus): Node[] {
     siteName: textInput({ value: "Pixora" }),
   };
   const site = {
-    baseUrl: textInput({ value: location.origin, mono: true }),
+    baseUrl: textInput({ value: initialBaseUrl(), mono: true }),
     prefix: textInput({ value: "images", mono: true }),
     smtpHost: textInput({ placeholder: "smtp.qiye.aliyun.com", mono: true }),
     smtpPort: textInput({ value: "465", mono: true }),
@@ -360,7 +376,7 @@ function wizard(reload: () => void, status: InstallStatus): Node[] {
   const panel4 = cardNode(
     null,
     h("h4", { text: "站点与邮件" }),
-    field("基础 URL", site.baseUrl, "直链与邮件里的链接都用它，末尾不要带斜杠"),
+    field("基础 URL", site.baseUrl, "直链与邮件里的链接都用它。保存后以这里为准，末尾不要带斜杠"),
     field("直链前缀", site.prefix, "例如 /images/xxx.jpg 里的 images，之后可以改"),
     h("div.row", null, field("SMTP 服务器", site.smtpHost), field("端口", site.smtpPort)),
     h("div.row", null, field("安全方式", site.smtpSecurity), field("发信账号", site.smtpUser)),
