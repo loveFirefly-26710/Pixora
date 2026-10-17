@@ -105,6 +105,7 @@ interface PlazaHeroHandle {
   setFeatured(item: ImageItem | null): void;
   setTotal(total: number): void;
   setAutoState(enabled: boolean): void;
+  setAutoCountdown(remaining: number): void;
 }
 
 interface PlazaHeroOptions {
@@ -115,10 +116,13 @@ interface PlazaHeroOptions {
   autoEnabled: boolean;
 }
 
-/** 把秒数写成人能读的间隔，3600 秒写成 1 小时而不是一串数字。 */
-function autoIntervalLabel(seconds: number): string {
-  if (seconds >= 3600 && seconds % 3600 === 0) return `${seconds / 3600} 小时`;
-  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60} 分钟`;
+/** 倒计时显示：一分钟以内写秒，超过一分钟写成 m:ss。 */
+function autoCountdownText(seconds: number): string {
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    return `${minutes}:${String(rest).padStart(2, "0")}`;
+  }
   return `${seconds} 秒`;
 }
 
@@ -242,17 +246,22 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
 
   function setAutoState(enabled: boolean): void {
     if (!autoButton || !autoLabel) return;
-    const interval = autoIntervalLabel(options.autoSeconds);
     autoButton.classList.toggle("on", enabled);
     autoButton.setAttribute("aria-pressed", String(enabled));
-    autoLabel.textContent = enabled ? `自动漫游 · ${interval}` : "自动漫游已暂停";
+    autoLabel.textContent = enabled ? "自动漫游" : "自动漫游已暂停";
     const action = enabled ? "暂停自动漫游" : "继续自动漫游";
     autoButton.setAttribute("aria-label", action);
-    autoButton.title = `${action}（每 ${interval}刷新）`;
+    autoButton.title = action;
+  }
+
+  function setAutoCountdown(remaining: number): void {
+    if (!autoLabel) return;
+    autoLabel.textContent = `自动漫游 · ${autoCountdownText(Math.max(0, remaining))}`;
   }
 
   setAutoState(options.autoEnabled);
-  return { root: hero, setFeatured, setTotal, setAutoState };
+  if (options.autoEnabled) setAutoCountdown(options.autoSeconds);
+  return { root: hero, setFeatured, setTotal, setAutoState, setAutoCountdown };
 }
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -287,6 +296,7 @@ export async function render(ctx: PageContext): Promise<void> {
   const autoSeconds =
     isPlazaHome && configuredAuto > 0 ? Math.min(3600, Math.max(5, configuredAuto)) : 0;
   let autoEnabled = autoSeconds > 0;
+  let autoRemaining = autoSeconds;
   let autoTimer: number | null = null;
   let heroState: PlazaHeroHandle | null = null;
   if (isPlazaHome) {
@@ -502,18 +512,32 @@ export async function render(ctx: PageContext): Promise<void> {
   function startAutoTimer(): void {
     stopAutoTimer();
     if (!autoEnabled || autoSeconds <= 0) return;
+    autoRemaining = autoSeconds;
+    heroState?.setAutoCountdown(autoRemaining);
     autoTimer = window.setInterval(() => {
       // 离开广场后页面节点会被路由替换掉；等到下一次 tick 自己收掉，不用额外卸载钩子
       if (!root.isConnected) {
         stopAutoTimer();
         return;
       }
-      if (!autoEnabled || loading) return;
-      // 后台标签页、看图浮层、弹窗期间不抢画面
+      if (!autoEnabled) {
+        stopAutoTimer();
+        return;
+      }
+      autoRemaining = Math.max(0, autoRemaining - 1);
+      if (autoRemaining > 0) {
+        heroState?.setAutoCountdown(autoRemaining);
+        return;
+      }
+      // 到点先重置倒计时，再判断这一轮能不能换图。后台标签页、看图浮层、
+      // 弹窗或正在加载时跳过，下一轮重新计满。
+      autoRemaining = autoSeconds;
+      heroState?.setAutoCountdown(autoRemaining);
+      if (loading) return;
       if (document.visibilityState !== "visible") return;
       if (document.querySelector(".lb, .modal")) return;
       void quietRefresh();
-    }, autoSeconds * 1000);
+    }, 1000);
   }
 
   function toggleAuto(): void {
@@ -526,7 +550,7 @@ export async function render(ctx: PageContext): Promise<void> {
 
   /**
    * 自动漫游的刷新：不先清空网格，等第一页回来再整体替换。
-   * 这样不会每 30 秒闪一次骨架屏；请求失败时也保留当前画面。
+   * 这样不会每次换图都闪一次骨架屏；请求失败时也保留当前画面。
    */
   async function quietRefresh(): Promise<void> {
     if (loading) return;

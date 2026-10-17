@@ -382,7 +382,7 @@ try {
 
     $siteInfo = HttpText @("$script:Base/api/v1/site")
     ExpectJson $siteInfo { $d.data.plaza_grid_columns -eq 3 } "站点信息带广场列数（默认 3）"
-    ExpectJson $siteInfo { $d.data.plaza_auto_refresh_seconds -eq 30 } "站点信息带自动漫游间隔（默认 30 秒）"
+    ExpectJson $siteInfo { $d.data.plaza_auto_refresh_seconds -eq 5 } "站点信息带自动漫游间隔（默认 5 秒）"
 
 
     $tree = Api GET "/api/v1/fs/tree"
@@ -499,7 +499,7 @@ try {
     # 可分配上限 = 总额 − 系统占用：配额校验与分配进度都按它算
     ExpectJson (Api GET "/api/v1/admin/quota") { $d.data.allocatable -eq ($d.data.capacity.total - $d.data.capacity.host_used) } "可分配上限 = 总额 − 系统占用"
     ExpectJson (Api GET "/api/v1/admin/settings") { $d.data.site.name -eq "Pixora" } "系统设置：站点名"
-    ExpectJson (Api GET "/api/v1/admin/settings") { $d.data.site.plaza_auto_refresh_seconds -eq 30 } "系统设置：自动漫游间隔默认 30 秒"
+    ExpectJson (Api GET "/api/v1/admin/settings") { $d.data.site.plaza_auto_refresh_seconds -eq 5 } "系统设置：自动漫游间隔默认 5 秒"
 
     Api PUT "/api/v1/admin/settings" @("-H", "Content-Type: application/json",
         "-d", (JsonBody "auto0" @{ site = @{ plaza_auto_refresh_seconds = 0 } })) | Out-Null
@@ -511,8 +511,8 @@ try {
         "-d", (JsonBody "auto9999" @{ site = @{ plaza_auto_refresh_seconds = 9999 } })) | Out-Null
     ExpectJson (Api GET "/api/v1/admin/settings") { $d.data.site.plaza_auto_refresh_seconds -eq 3600 } "过长的间隔被钳到 3600 秒"
     Api PUT "/api/v1/admin/settings" @("-H", "Content-Type: application/json",
-        "-d", (JsonBody "auto30" @{ site = @{ plaza_auto_refresh_seconds = 30 } })) | Out-Null
-    ExpectJson (HttpText @("$script:Base/api/v1/site")) { $d.data.plaza_auto_refresh_seconds -eq 30 } "前台 /site 同步自动漫游间隔"
+        "-d", (JsonBody "auto5" @{ site = @{ plaza_auto_refresh_seconds = 5 } })) | Out-Null
+    ExpectJson (HttpText @("$script:Base/api/v1/site")) { $d.data.plaza_auto_refresh_seconds -eq 5 } "前台 /site 同步自动漫游间隔"
 
     Api PUT "/api/v1/admin/storage/prefix" @("-H", "Content-Type: application/json",
         "-d", (JsonBody "prefix" @{ upload_prefix = "i" })) | Out-Null

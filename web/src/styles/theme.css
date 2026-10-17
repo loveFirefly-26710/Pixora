@@ -1401,6 +1401,7 @@ tr.pick td {
 
 .auto-roam .auto-label {
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .auto-dot {

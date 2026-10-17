@@ -117,7 +117,7 @@ API 客户端：
   // 站点允许未登录上传时才有这一段：客户端队列按访客账号那套额度限流
   "guest_upload": { "enabled": true, "max_file_bytes": 20971520, "max_batch_size": 1000,
                     "max_concurrent_uploads": 5, "queue_depth": 500, "formats": ["jpg","png"] },
-  "plaza_public": true, "plaza_grid_columns": 3, "plaza_auto_refresh_seconds": 30, "recycle_retention_days": 30,
+  "plaza_public": true, "plaza_grid_columns": 3, "plaza_auto_refresh_seconds": 5, "recycle_retention_days": 30,
   "formats": ["jpg","png","gif","webp","avif","heic","tiff","bmp","svg"],
   "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
   "thumb_client": true, "thumb_server_fallback": false,
@@ -130,7 +130,7 @@ API 客户端：
 
 `terms.required` 表示「当前登录用户是否必须先同意条款」；未登录时为 `false`。
 
-`plaza_auto_refresh_seconds` 控制广场的自动漫游：`0` 关闭，正数表示每隔多少秒换一批公开图片；服务端把正数钳在 5–3600 秒，默认 30。
+`plaza_auto_refresh_seconds` 控制广场的自动漫游：`0` 关闭，正数表示每隔多少秒换一批公开图片；服务端把正数钳在 5–3600 秒，默认 5。
 
 ### 收件域名校验（反临时邮箱的第三层）
 
@@ -896,7 +896,7 @@ API 客户端：
   "site": { "name": "Pixora", "base_url": "https://img.example.com",
             "plaza_public": true, "require_login_to_upload": true, "register_enabled": true,
             "email_domains": "example.com",
-            "plaza_grid_columns": 3, "plaza_auto_refresh_seconds": 30, "recycle_retention_days": 30 },
+            "plaza_grid_columns": 3, "plaza_auto_refresh_seconds": 5, "recycle_retention_days": 30 },
   "upload": { "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
               "queue_depth": 500, "formats": ["jpg","png"] },
   "thumb": { "client": true, "server_fallback": false },
