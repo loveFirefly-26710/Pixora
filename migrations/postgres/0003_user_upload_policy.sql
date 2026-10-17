@@ -7,5 +7,5 @@
 -- 约定：数值 0 与空格式串都表示「跟随上一层」，解析顺序见
 -- crates/pixora-core/src/uploads.rs 的 effective_upload_limits。
 
-ALTER TABLE rate_limit_policies ADD COLUMN max_pixels INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rate_limit_policies ADD COLUMN max_pixels BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE rate_limit_policies ADD COLUMN formats TEXT;

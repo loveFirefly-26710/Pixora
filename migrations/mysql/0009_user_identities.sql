@@ -14,8 +14,9 @@ CREATE TABLE user_identities (
     subject    VARCHAR(191) NOT NULL,
     display    VARCHAR(255),
     meta       TEXT,
-    created_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    updated_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    -- 时间一律存 RFC3339 文本、由应用写入，与其余表一致
+    created_at VARCHAR(32)  NOT NULL,
+    updated_at VARCHAR(32)  NOT NULL,
     UNIQUE (provider, subject),
     UNIQUE (user_id, provider)
 );

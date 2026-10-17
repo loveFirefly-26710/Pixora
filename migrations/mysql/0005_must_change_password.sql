@@ -8,4 +8,6 @@
 --
 -- 走自助重置（邮件里的链接/验证码）设的密码不打这个标记：那是用户自己选的。
 
-ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
+-- 约定与其余布尔列一致：BIGINT 0/1。MySQL 的 BOOLEAN 是 TINYINT，
+-- sqlx 的 Any 驱动认不出这个类型，读取时会直接报错。
+ALTER TABLE users ADD COLUMN must_change_password BIGINT NOT NULL DEFAULT 0;

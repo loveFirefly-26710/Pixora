@@ -392,6 +392,13 @@ impl Repo {
                 .await?;
         }
 
+        // MySQL 那份表结构里，频率策略行的外键不能挂级联（生成列的基列不允许），
+        // 只能在这里自己清；另外两种方言上这条也是幂等的空操作。
+        sqlx::query(&self.db.sql("DELETE FROM rate_limit_policies WHERE user_id = ?"))
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+
         sqlx::query(&self.db.sql("DELETE FROM users WHERE id = ?"))
             .bind(id)
             .execute(&mut *tx)
