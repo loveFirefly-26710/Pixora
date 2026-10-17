@@ -134,9 +134,11 @@ impl Repo {
         let row = self
             .db
             .fetch_one(
-                "SELECT COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS queued, \
-                        COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS running \
-                   FROM upload_jobs",
+                &format!(
+                    "SELECT {} AS queued, {} AS running FROM upload_jobs",
+                    self.db.dialect().sum_i64("CASE WHEN status = ? THEN 1 ELSE 0 END"),
+                    self.db.dialect().sum_i64("CASE WHEN status = ? THEN 1 ELSE 0 END"),
+                ),
                 Args::new()
                     .text(job_status::QUEUED)
                     .text(job_status::RUNNING),
@@ -171,9 +173,12 @@ impl Repo {
     pub async fn sum_bytes_since(&self, owner_id: i64, since: DateTime<Utc>) -> Result<i64> {
         self.db
             .count(
-                "SELECT COALESCE(SUM(size), 0) AS total FROM upload_jobs \
-                  WHERE owner_id = ? AND status = ? AND dedup = ? \
-                    AND COALESCE(finished_at, created_at) >= ?",
+                &format!(
+                    "SELECT {} AS total FROM upload_jobs \
+                      WHERE owner_id = ? AND status = ? AND dedup = ? \
+                        AND COALESCE(finished_at, created_at) >= ?",
+                    self.db.dialect().sum_i64("size")
+                ),
                 Args::new()
                     .int(owner_id)
                     .text(job_status::DONE)

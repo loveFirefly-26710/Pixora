@@ -2,7 +2,7 @@
 
 这份文档把 Pixora 的部署拆成三条路线：纯 Docker、Linux 单二进制、Windows 单二进制，外加可选的「前后端分离」。每条路线都从「准备好这几样东西」讲到「怎么确认装好了」，命令可以直接复制。
 
-第 10 节是实测记录：这台机器上真的跑过哪些组合、各自什么结果、哪些因为环境限制没跑。第 9 节单独说数据库的现状——**目前只有 SQLite 是端到端验证过的**，PostgreSQL 与 MySQL 的迁移能跑通、运行时还差一层适配，细节和报错原文都在那一节。
+第 10 节是实测记录：这台机器上真的跑过哪些组合、各自什么结果、哪些因为环境限制没跑。第 9 节单独说数据库——三种方言都跑过同一套 298 项冒烟，这次修掉的方言差异也列在那里。
 
 ## 0. 怎么用这份文档
 
@@ -99,13 +99,13 @@ PIXORA_BASE_URL=https://img.example.com
 
 数据库怎么选：
 
-| 数据库 | 适合 | 现状（2026-10） |
+| 数据库 | 适合 | 验证情况（2026-10） |
 |---|---|---|
-| **SQLite**（默认） | 单机、个人、最省事 | **端到端验证过**，298 项冒烟全过 |
-| PostgreSQL | 想用正经数据库、单机多人 | 迁移能跑通（9 条、26 张表），运行时还差类型映射，见第 9 节 |
-| MySQL / MariaDB | 公司统一用 MySQL | 迁移能跑通，运行时还差类型映射，见第 9 节 |
+| **SQLite**（默认） | 单机、个人、最省事 | 298 项冒烟全过；依赖最少，不需要单独的数据库进程 |
+| PostgreSQL | 想用正经数据库、单机多人 | 298 项冒烟全过（PostgreSQL 17.6） |
+| MySQL | 公司统一用 MySQL | 298 项冒烟全过（MySQL 8.4.0）；MariaDB 共用同一套迁移，这次没单独验 |
 
-**当前版本请选 SQLite。** 它并不是「凑数的单机库」：WAL 模式、外键、真实事务都有，几万张图片、几十个用户完全没问题；数据文件就是一个 `pixora.db`，备份就是拷文件。
+三种都实测过，切换只改 `PIXORA_DB_DRIVER` 与 `PIXORA_DB_DSN`，细节见第 9 节。SQLite 依然是默认：它不依赖额外的进程与备份工具，几十个用户、几万张图完全够用，备份就是拷一个文件。
 
 ## 4. 方案 A：纯 Docker
 
@@ -243,14 +243,8 @@ curl -s https://img.example.com/healthz        # {"db":"ok","status":"ok",...}
 
 ### 4.3 A2：PostgreSQL 版
 
-> ⚠ 先看第 9 节：PostgreSQL 的迁移能跑通，运行期还差一层类型适配，接口会报 `NUMERIC` 解码错误。配置先留着，修好之后可以直接用。
-
 ```yaml
 # Pixora 单机部署 —— PostgreSQL 版（一个文件跑完整站）。
-#
-# ⚠ 状态说明（2026-10）：迁移能建完，运行期还差 sqlx Any 的类型映射
-#   （SUM 在 PG 返回 NUMERIC）。当前版本请用 SQLite 版，见
-#   docs/Pixora-部署方案.md 的「数据库支持现状」。
 #
 # 用法三步：存成 docker-compose.yml → 改三处「必改」与数据库密码 → docker compose up -d
 # 数据库密码在文件里出现 2 处（DSN 与 POSTGRES_PASSWORD），改成同一个值。
@@ -349,14 +343,8 @@ configs:
 
 ### 4.4 A3：MySQL 版
 
-> ⚠ 同 4.3：迁移能跑通，运行期还差类型适配（MySQL 的 `TEXT` 被当成 BLOB、`TINYINT` 不识别），见第 9 节。
-
 ```yaml
 # Pixora 单机部署 —— MySQL 8.0.13+ / MariaDB 版（一个文件跑完整站）。
-#
-# ⚠ 状态说明（2026-10）：迁移能建完，运行期还差 sqlx Any 的类型映射
-#   （MySQL 的 TEXT 被当成 BLOB、TINYINT 不识别）。当前版本请用 SQLite 版，
-#   见 docs/Pixora-部署方案.md 的「数据库支持现状」。
 #
 # 用法三步：存成 docker-compose.yml → 改三处「必改」与数据库密码 → docker compose up -d
 # 数据库密码在文件里出现 3 处（DSN、MYSQL_PASSWORD、MYSQL_ROOT_PASSWORD），
@@ -565,8 +553,6 @@ postgres://user:pass@pgm-xxx.pg.rds.aliyuncs.com:5432/pixora?sslmode=require
 # 云厂商 MySQL / PlanetScale
 mysql://user:pass@host:3306/pixora?ssl-mode=REQUIRED
 ```
-
-> 提醒：按第 9 节的实测结论，PostgreSQL 与 MySQL 目前能完成建表，接口层还过不了 sqlx Any 的类型映射。这一段配置先备着，修好之后直接可用；现在要上线还是选 SQLite。
 
 ### 4.6 不用 Caddy
 
@@ -1154,67 +1140,64 @@ curl -s -D - -o /dev/null -X OPTIONS \
 
 ## 9. 数据库支持现状
 
-这一节是实测出来的，不是设计意图。结论先放：**当前版本只有 SQLite 可以端到端使用**。
+三种方言都跑过同一套端到端冒烟（298 项），结果一致：
 
-| 数据库 | 迁移（自动建表） | 接口可用 | 说明 |
-|---|---|---|---|
-| SQLite 3 | ✅ 9/9 | ✅ | 298 项冒烟全过（第 10 节） |
-| PostgreSQL 17.6 | ✅ 9/9、26 张表 | ❌ | 运行时 sqlx Any 驱动解不了 `NUMERIC` |
-| MySQL 8.4.0 | ✅ 9/9 | ❌ | 运行时 sqlx Any 驱动不认 `TEXT` 与 `TINYINT` |
+| 数据库 | 验证版本 | 迁移 | 冒烟 | 服务端 5xx |
+|---|---|---|---|---|
+| SQLite | 内置 | 9/9 | ✅ 298/298 | 0 |
+| PostgreSQL | 17.6 | 9/9，26 张表 | ✅ 298/298 | 0 |
+| MySQL | 8.4.0 | 9/9 | ✅ 298/298 | 0 |
 
-### PostgreSQL：差在 `SUM(...)` 的返回类型
+SQLite 是默认，也是依赖最少的一条；PostgreSQL / MySQL 按 4.3 / 4.4 填连接串就行，数据库已经单独部署的接法见 4.5。
 
-现象（登录后任意读接口）：
+### 这次修掉的方言差异
 
-```
-数据访问失败：数据库错误：error occurred while decoding column total:
-error in Any driver mapping: Any driver does not support the Postgres type PgTypeInfo(Numeric)
-```
+之前 CI 只跑 SQLite，另外两条方言的迁移与查询一直没被走过（建表就失败）。这次装了便携版 PostgreSQL 17.6 与 MySQL 8.4.0 逐条跑，修了这些：
 
-原因：`SUM(bigint)` 在 PostgreSQL 里返回 `NUMERIC`（不是 bigint），而本项目统一用 `sqlx::Any` + `i64` 解码。修法是给那些求和表达式包一层方言相关的 `CAST(... AS BIGINT)`，或者在 PostgreSQL 上改用 `count`/分组聚合的写法。涉及的大约十来处查询（容量统计、限流额度、任务计数）。
+**迁移（建表阶段）**
 
-这次顺带修掉的 PostgreSQL 迁移问题（修之前连启动都过不去）：
+- PostgreSQL：部分唯一索引的 `WHERE is_default` 要布尔表达式（改成 `= 1`）；`must_change_password` 与几处 int4 列统一成 `BIGINT`（代码统一按 `i64` 读写）；`user_identities` 的时间列从 `TIMESTAMPTZ` 改回文本。
+- MySQL：生成列的基列上不能挂级联外键（1215；改成 `RESTRICT`，删账号时由应用显式清频率策略行）；`TEXT` 列不能进索引（1170；时间列统一 `VARCHAR(32)`）；`BOOLEAN` 改 `BIGINT`（Any 驱动认不出 `TINYINT`）；`DATETIME(3)` 改回文本。
 
-- `storage_backends` 的部分唯一索引写了 `WHERE is_default`，而这一列是 `BIGINT`，PG 要求布尔表达式 → 改为 `WHERE is_default = 1`；
-- `must_change_password` 声明成 `BOOLEAN`，代码按 `i64` 解码 → 改为 `BIGINT 0/1`；
-- 几处 `INTEGER`（int4）列被按 `i64` 读取 → 改为 `BIGINT`；
-- `user_identities` 的时间列写成 `TIMESTAMPTZ`、代码按文本写入/读取 → 改为 `TEXT`。
+**查询（运行期）**
 
-### MySQL：差在 `TEXT` 与 `TINYINT` 的类型映射
+- `SUM(...)` 在 PostgreSQL 返回 `NUMERIC`、MySQL 返回 `DECIMAL`，Any 驱动都解不成 i64：新增 `Dialect::sum_i64()`，按方言包 `CAST(... AS BIGINT)` / `CAST(... AS SIGNED)`。
+- 两参数 `MAX(a, b)` 只有 SQLite 认：PostgreSQL 与 MySQL 改用 `GREATEST`。
+- `ON CONFLICT ... DO UPDATE SET count = count + ?` 在 PostgreSQL 上列名有歧义（新行也在作用域里）：改成 `rate_counters.count + ?`。
+- MySQL 的 `TEXT` 在 Any 里被报成 BLOB，按 `String` 解会失败：仓储层的文本读取加了「按字节读再转 UTF-8」的兜底。
+- MySQL 的 `LAST_INSERT_ID()` 是连接级的：插入与取 id 原来分两次走连接池，可能落到不同连接；改成同一条连接上完成。
+- MySQL 的 `key` 是保留字：`storage_objects` 的几条语句加反引号。
+- MySQL 不认 `CAST(... AS BIGINT)`：平均大小的查询按方言给 `SIGNED`。
+- `ESCAPE '\'` 在 MySQL 的字符串字面量里会把结束引号转义掉：SQL 改写层对 MySQL 直接去掉这个子句（MySQL 的 LIKE 默认就用反斜杠转义）。
+- MySQL 的唯一冲突报的是 SQLSTATE（23000）、数字码只在消息里：`is_unique_violation()` 增加按消息（`Duplicate entry`）识别。
 
-现象（登录后任意读接口）：
+### 自己怎么验
 
-```
-error in Any driver mapping: Any driver does not support MySql type ... type: Tiny ...
-数据解码失败（value）：mismatched types; Rust type `Option<String>` is not compatible with SQL type `BLOB`
-```
-
-原因：MySQL 把 `TEXT` 列报告成 BLOB 家族的类型，`TINYINT` 也不在 sqlx Any 的映射表里。而代码到处用 `Option<String>` 读文本、用 `i64` 读布尔。这一条比 PostgreSQL 那条更深：要么把 MySQL 侧的长文本列改成 `VARCHAR`（受行宽限制，邮件模板这类放不下），要么在仓储层按字节读文本再转字符串。
-
-这次顺带修掉的 MySQL 迁移问题（修之前建表就失败）：
-
-- `rate_limit_policies` 的生成列基列上挂了 `ON DELETE CASCADE`（MySQL 8 直接报 1215）→ 改成 `RESTRICT`，删账号前由应用显式清掉策略行；
-- `albums.deleted_at` 用 `TEXT` 又建了索引（报 1170）→ 改为 `VARCHAR(32)`；
-- `must_change_password` 声明成 `BOOLEAN`（即 `TINYINT`）→ 改为 `BIGINT 0/1`；
-- `user_identities` 的时间列用 `DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3)`，代码写入的是 RFC3339 文本 → 改为 `VARCHAR(32)`。
-
-### 在那之前怎么办
-
-用 SQLite。它不是玩具库：WAL 模式、外键约束、真实事务都有，单机几十个用户、几万张图完全够。将来要换 PostgreSQL/MySQL，数据迁移路径是「导出 → 建新库 → 改环境变量 → 重启」，图片文件不用动。
-
-如果你自己有动手能力，想接着把这两条方言修完，最小验证路径是：
+仓储层的方言用例，一个连接串跑一整套：
 
 ```bash
-# PostgreSQL（需要一台能连的库）
 PIXORA_TEST_DB_DSN="postgres://user:pass@127.0.0.1/pixora" \
-  cargo test -p pixora-repo --test dialects -- --nocapture
-
-# MySQL
-PIXORA_TEST_DB_DSN="mysql://root:pass@127.0.0.1/pixora" \
-  cargo test -p pixora-repo --test dialects -- --nocapture
+  cargo test -p pixora-repo --test dialects
+PIXORA_TEST_DB_DSN="mysql://user:pass@127.0.0.1/pixora" \
+  cargo test -p pixora-repo --test dialects
+# 逗号分隔可以一次跑完
 ```
 
-这套方言用例覆盖布尔往返、唯一冲突识别、UPSERT、内容寻址复用、引用计数归零、批量预检的占位符改写、标签筛选与时间戳比较——方言差异最容易出问题的几处都在里面。跑绿了，再拿第 10 节那套冒烟（298 项）过一遍，基本就稳了。
+端到端冒烟（先按 4/5/6 起一台服务，再跑 `scripts/smoke-new.sh`）：默认读 `target/smoke/pixora.db`；跑在别的方言上时，给一条「从 stdin 读 SQL、输出制表符分隔结果」的客户端命令：
+
+```bash
+SMOKE_DB_CLIENT='psql postgres://user:pass@127.0.0.1/pixora -tA' \
+  bash scripts/smoke-new.sh
+
+SMOKE_DB_CLIENT='mysql --batch --skip-column-names --default-character-set=utf8mb4 \
+  -h127.0.0.1 -uroot pixora' bash scripts/smoke-new.sh
+```
+
+MySQL 那条记得带 `--default-character-set=utf8mb4`：客户端默认按系统代码页输出，中文邮件正文会被解成乱码。
+
+### 换库与迁移
+
+三种方言的表结构一致，数据本身不通用。换库按「导出 → 建新库 → 改环境变量 → 重启」走，图片文件不用动；建表在启动时自动执行。同一个库升级版本也是启动时自动迁移。
 
 ## 10. 本次实测记录
 
@@ -1226,8 +1209,9 @@ PIXORA_TEST_DB_DSN="mysql://root:pass@127.0.0.1/pixora" \
 | Windows 二进制（发行包） | 解压 zip → 全新数据目录启动 → `/healthz`、`/api/v1/site`、`--health-probe` | ✅ 自动生成主密钥、healthz 返回 `{"db":"ok"}`、探针退出码 0 |
 | SQLite 端到端 | 起服务 → 安装向导 → CI 同款冒烟 `scripts/smoke-new.sh` | ✅ **298 项全过** |
 | 单元与集成测试 | `cargo test --workspace` | ✅ 279 项全过 |
-| PostgreSQL 17.6 | 建库 → 启动 → 迁移 9 条/26 张表 → 冒烟 | ⚠ 迁移通过；接口层报 `NUMERIC` 解码错误（第 9 节） |
-| MySQL 8.4.0 | 建库 → 启动 → 迁移 9 条 → 冒烟 | ⚠ 迁移通过；接口层报 `TEXT`/`TINYINT` 映射错误（第 9 节） |
+| PostgreSQL 17.6 | 建库 → 启动 → 迁移 → 冒烟（`SMOKE_DB_CLIENT` 指向 psql） | ✅ 迁移 9 条/26 张表、冒烟 298/298、服务端 0 个 5xx |
+| MySQL 8.4.0 | 建库 → 启动 → 迁移 → 冒烟（客户端带 utf8mb4） | ✅ 迁移 9 条、冒烟 298/298、服务端 0 个 5xx |
+| 方言用例 | `PIXORA_TEST_DB_DSN=pg,mysql cargo test -p pixora-repo --test dialects` | ✅ 两种方言一起通过 |
 | 前后端分离：Cloudflare Pages 式跨域 | 静态站 8098（含 SPA 回落）+ 后端 8099（`PIXORA_CORS_ORIGINS` 放行 8098），用真实 Cookie 走完向导、登录、上传、取直链 | ✅ 首页/回落/预检/凭据 Cookie（`SameSite=None; Secure`）/跨域上传全部通过；名单外来源拿不到跨域头 |
 | 前后端分离：Vercel / EdgeOne 式边缘反代 | 站点 8097 把 `/api/*`、`/images/*` 转发到 8099，浏览器只看到 8097 | ✅ 向导、登录（`SameSite=Lax`）、上传、直链（按站点地址拼）、取图全部通过 |
 | 前后端分离：GitHub Pages 子路径 | 把产物放到 `/Pixora/` 下，用 `404.html` 做回落 | ✅ 子路径下能开、陌生路径命中 404 页面但内容是前端；`/main.js` 在根上 404 —— 印证了 8.6 的限制 |

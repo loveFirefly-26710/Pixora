@@ -316,7 +316,7 @@ impl Repo {
             "INSERT INTO rate_counters (scope, subject, kind, window_start, count, bytes, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (scope, subject, kind, window_start) DO UPDATE SET \
-                 count = count + ?, bytes = bytes + ?, updated_at = ?",
+                 count = rate_counters.count + ?, bytes = rate_counters.bytes + ?, updated_at = ?",
             "INSERT INTO rate_counters (scope, subject, kind, window_start, count, bytes, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?) \
              ON DUPLICATE KEY UPDATE count = count + VALUES(count), \
@@ -324,7 +324,7 @@ impl Repo {
             "INSERT INTO rate_counters (scope, subject, kind, window_start, count, bytes, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (scope, subject, kind, window_start) DO UPDATE SET \
-                 count = count + ?, bytes = bytes + ?, updated_at = ?",
+                 count = rate_counters.count + ?, bytes = rate_counters.bytes + ?, updated_at = ?",
         );
 
         let start = ts(window_start);
@@ -404,9 +404,12 @@ impl Repo {
     pub async fn sum_bytes_today(&self, user_id: i64, window_start: DateTime<Utc>) -> Result<i64> {
         self.db
             .count(
-                "SELECT COALESCE(SUM(bytes), 0) AS total FROM rate_counters \
-                 WHERE scope = 'user' AND subject = ? AND kind = 'upload_bytes_day' \
-                   AND window_start = ?",
+                &format!(
+                    "SELECT {} AS total FROM rate_counters \
+                     WHERE scope = 'user' AND subject = ? AND kind = 'upload_bytes_day' \
+                       AND window_start = ?",
+                    self.db.dialect().sum_i64("bytes")
+                ),
                 Args::new().text(user_id.to_string()).text(ts(window_start)),
             )
             .await

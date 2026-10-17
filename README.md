@@ -93,7 +93,7 @@ docker compose logs -f pixora        # 看到「Pixora 已启动」就说明起�
 
 ### 数据库
 
-默认 SQLite，数据文件就在数据目录里，备份就是拷目录。数据库已经单独部署了（宿主机、局域网另一台机器、面板或云上），把连接串指向它即可，步骤见[部署方案 §4.5](docs/Pixora-部署方案.md)。PostgreSQL 与 MySQL 的配置写法在[部署方案 §4.3 / §4.4](docs/Pixora-部署方案.md)，但**当前版本只有 SQLite 端到端验证过**（298 项冒烟全过）；另外两种方言的迁移能跑通、运行时还差一层类型适配，报错原文与根因见[部署方案 §9](docs/Pixora-部署方案.md)。
+默认 SQLite，数据文件就在数据目录里，备份就是拷目录。三种方言都跑过同一套 298 项端到端冒烟（SQLite、PostgreSQL 17.6、MySQL 8.4.0 全过），切换只改连接串；配置在[部署方案 §4.3 / §4.4](docs/Pixora-部署方案.md)，数据库已经单独部署了的接法（宿主机、局域网、面板、云上）见[§4.5](docs/Pixora-部署方案.md)，修复过哪些方言差异见[§9](docs/Pixora-部署方案.md)。
 
 ### 常见问题
 
@@ -382,10 +382,8 @@ CI 里的冒烟是「起真服务、走真 HTTP」那一套，和本地 `scripts
   自动化测试覆盖不到。
 - 缩略图与哈希的 WASM 解码器（HEIC/TIFF/JXL）按需加载，本项目没有内置解码器：
   这些格式的缩略图由客户端的原生解码能力决定，解不动就退化成「不带缩略图」。
-- **数据库方言**：只有 SQLite 端到端验证过（298 项冒烟）。PostgreSQL 与 MySQL 的建表
-  脚本能跑通，运行时还差 sqlx Any 驱动的类型映射（`SUM` 在 PG 返回 `NUMERIC`；MySQL 的
-  `TEXT` 被当成 BLOB、`TINYINT` 不识别），报错原文与待修清单见
-  [部署方案 §9](docs/Pixora-部署方案.md)。在此之前请用 SQLite。
+- **数据库方言**：SQLite / PostgreSQL / MySQL 三种都跑过同一套 298 项端到端冒烟；
+  MariaDB 共用 MySQL 的迁移与查询，这次没有单独验证。
 - 多实例部署需要额外的共享设施（限流计数与会话表），当前按单实例设计。
   前后端分开部署（静态托管 + 单个 API 实例）不受这条限制。
 - Cloudflare Workers / Vercel Functions 这类纯 JS 边缘运行时跑不了这个二进制

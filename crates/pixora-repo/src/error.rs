@@ -37,13 +37,16 @@ impl RepoError {
     pub fn is_unique_violation(&self) -> bool {
         match self {
             RepoError::Sqlx(sqlx::Error::Database(db)) => {
-                // PostgreSQL 23505 / MySQL 1062 / SQLite 2067（UNIQUE）
+                // PostgreSQL 23505 / MySQL 1062 / SQLite 2067（UNIQUE）。
+                // sqlx 在 MySQL 上报告的是 SQLSTATE（23000），数字码只出现在消息里，
+                // 所以再按消息认一次；不用 23000 泛判——外键冲突也是这一类。
                 let code = db.code().map(|c| c.to_string()).unwrap_or_default();
                 code == "23505"
                     || code == "1062"
                     || code == "2067"
                     || code == "1555"
                     || db.message().contains("UNIQUE constraint failed")
+                    || db.message().contains("Duplicate entry")
             }
             _ => false,
         }
