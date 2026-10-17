@@ -10,6 +10,7 @@
 
 import { request } from "../core/api";
 import { h } from "../core/dom";
+import { getState } from "../core/state";
 import type { LoginMethods } from "../core/types";
 import { toastError } from "../core/toast";
 import { qtip, textInput } from "./widgets";
@@ -73,8 +74,11 @@ export function phoneForm(
     mode: "login" | "bind";
   },
 ): HTMLElement | null {
-  const site = (window as unknown as { __pixoraSite?: LoginMethods }).__pixoraSite;
-  void site;
+  // 手机号入口只在后台真的开通、且短信凭据配全时出现。`/site` 的
+  // `login_methods.phone` 已经把这两层判断合过了；这里再挡一次，避免
+  // 登录页摆出一个点了才报“服务配置有误”的标签。
+  if (!getState().site?.login_methods?.phone) return null;
+
   const phoneInput = textInput({ placeholder: "13800138000", type: "tel", name: "phone" });
   const codeInput = textInput({ placeholder: "6 位验证码", name: "phone-code" });
   codeInput.setAttribute("inputmode", "numeric");

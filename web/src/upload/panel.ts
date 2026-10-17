@@ -224,7 +224,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   if (options.compact) {
     hintEl.append(
       document.createTextNode(" · "),
-      h("a", { href: "#/upload", text: "相册、标签与并发在完整上传页设置" }),
+      h("a", { href: "#/upload", text: "并发与更多设置在完整上传页调整" }),
     );
   }
   const refreshHint = (): void => {
@@ -232,7 +232,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     if (options.compact) {
       hintEl.append(
         document.createTextNode(" · "),
-        h("a", { href: "#/upload", text: "相册、标签与并发在完整上传页设置" }),
+        h("a", { href: "#/upload", text: "并发与更多设置在完整上传页调整" }),
       );
     }
     // 相册清单也可能刚变（新建/删除相册），下拉跟着重画

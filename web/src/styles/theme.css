@@ -2079,10 +2079,13 @@ tr.pick td {
   margin: 0 !important;
 }
 
-.upload-panel.is-compact .settings-card .album-field,
-.upload-panel.is-compact .settings-card .tags-field,
 .upload-panel.is-compact .settings-card .concurrency-field {
   display: none;
+}
+
+.upload-panel.is-compact .settings-card .album-field,
+.upload-panel.is-compact .settings-card .tags-field {
+  flex: 1 1 150px;
 }
 
 .upload-panel.is-compact .settings-card .visibility-field {
