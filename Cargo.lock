@@ -1933,7 +1933,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pixora-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1962,7 +1962,7 @@ dependencies = [
 
 [[package]]
 name = "pixora-crypto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1979,7 +1979,7 @@ dependencies = [
 
 [[package]]
 name = "pixora-mail"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "lettre",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "pixora-queue"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "pixora-repo"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2031,7 +2031,7 @@ dependencies = [
 
 [[package]]
 name = "pixora-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "pixora-storage"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
