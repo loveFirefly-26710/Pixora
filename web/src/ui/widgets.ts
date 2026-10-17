@@ -264,14 +264,16 @@ export function emptyState(icon: string, text: string, action?: Node): HTMLEleme
   );
 }
 
-export function skeletonGrid(count = 8): HTMLElement {
-  return h(
-    "div.grid.igrid",
-    null,
-    ...Array.from({ length: count }, () =>
-      h("div.skel", { style: { height: "150px", borderRadius: "10px" } }),
-    ),
+/** 网格的骨架屏格子。直接作为外层网格的子节点，别再套一层 `.grid`。 */
+export function skeletonTiles(count = 8): HTMLElement[] {
+  return Array.from({ length: count }, () =>
+    h("div.skel", { style: { height: "150px", borderRadius: "10px" } }),
   );
+}
+
+/** 自带网格容器的骨架屏。页面直接用它替换整块列表时使用。 */
+export function skeletonGrid(count = 8): HTMLElement {
+  return h("div.grid.igrid", null, ...skeletonTiles(count));
 }
 
 /** 分页条。总数不超过一页时不显示。 */
@@ -535,11 +537,12 @@ export function spinner(): HTMLElement {
  */
 export const IMAGE_SORT_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "shuffle", label: "随机" },
-  { value: "new", label: "上传时间 · 最新" },
-  { value: "old", label: "上传时间 · 最久" },
-  { value: "size", label: "文件大小 · 大到小" },
-  { value: "smallest", label: "文件大小 · 小到大" },
-  { value: "name", label: "文件名" },
+  { value: "new", label: "最新" },
+  { value: "old", label: "最久" },
+  { value: "name_desc", label: "文件名↓" },
+  { value: "name", label: "文件名↑" },
+  { value: "size", label: "文件大小↓" },
+  { value: "smallest", label: "文件大小↑" },
   { value: "type", label: "文件类型" },
 ];
 
