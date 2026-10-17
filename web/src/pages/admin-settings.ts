@@ -222,7 +222,7 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     plazaPublic: data.site.plaza_public,
     plazaColumns: select(GRID_COLUMN_OPTIONS, String(data.site.plaza_grid_columns ?? 3)),
     plazaAutoRefresh: textInput({
-      value: String(data.site.plaza_auto_refresh_seconds ?? 30),
+      value: String(data.site.plaza_auto_refresh_seconds ?? 5),
       type: "number",
       mono: true,
       min: "0",

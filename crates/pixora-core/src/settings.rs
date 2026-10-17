@@ -202,8 +202,8 @@ pub mod defaults {
     /// 网格列数的可配置范围。少于 2 列不成网格，多于 6 列缩略图就糊了
     pub const GRID_COLUMNS_MIN: i64 = 2;
     pub const GRID_COLUMNS_MAX: i64 = 6;
-    /// 广场自动漫游默认 30 秒：够看一眼，又不会一直重排
-    pub const PLAZA_AUTO_REFRESH_SECONDS: i64 = 30;
+    /// 广场自动漫游默认 5 秒：打开页面就能看到下一批图
+    pub const PLAZA_AUTO_REFRESH_SECONDS: i64 = 5;
     /// 自动刷新间隔的可配置范围。0 = 关闭；太短会打断浏览，太长就不叫漫游了
     pub const PLAZA_AUTO_REFRESH_MIN: i64 = 5;
     pub const PLAZA_AUTO_REFRESH_MAX: i64 = 3600;
@@ -935,7 +935,7 @@ mod tests {
         assert_eq!(defaults::SMTP_PORT, 465);
         assert_eq!(defaults::SMTP_HOST, "smtp.qiye.aliyun.com");
         assert_eq!(defaults::GRID_COLUMNS, 3);
-        assert_eq!(defaults::PLAZA_AUTO_REFRESH_SECONDS, 30);
+        assert_eq!(defaults::PLAZA_AUTO_REFRESH_SECONDS, 5);
     }
 
     #[test]
