@@ -78,26 +78,18 @@ Pixora 由三部分组成：**后端**（一个 Rust 进程，负责接口、直
 
 ### 最快跑起来（Docker + SQLite）
 
-把仓库 `deploy/` 目录里的 `docker-compose.yml` 与 `Caddyfile` 放进一个新目录，再写一个 `.env`：
+把仓库 `deploy/docker-compose.yml` 的内容存成一个 `docker-compose.yml`，改里面标着「必改」的三处——域名、站点地址、主密钥（`openssl rand -hex 32` 的输出）——然后：
 
 ```bash
-mkdir -p pixora && cd pixora && mkdir -p data
-# 从仓库 deploy/ 取来 docker-compose.yml 与 Caddyfile
-
-cat > .env <<'EOF'
-PIXORA_DOMAIN=img.example.com
-PIXORA_BASE_URL=https://img.example.com
-PIXORA_MASTER_KEY=<openssl rand -hex 32 的输出>
-EOF
-chmod 600 .env
-
 docker compose up -d
 docker compose logs -f pixora        # 看到「Pixora 已启动」就说明起来了
 ```
 
+不需要 `.env`，也不用先建目录：数据落在同目录的 `./data`，Docker 会自己建；Caddy 的配置内嵌在编排文件末尾（`configs.content`），自动申请 https 证书。Compose 需要 2.23 以上（`docker compose version` 查）。
+
 浏览器打开 `https://你的域名`，会进五步安装向导：环境检查 → 数据库（自检）→ 管理员 → 站点与邮件 → 完成。装完向导入口就锁上了。没配 SMTP 也能用，验证码在服务端日志里。
 
-没有域名时：把 compose 里的 `caddy` 整段删掉，给 `pixora` 加 `ports: ["8080:8080"]`，`PIXORA_BASE_URL` 写成 `http://服务器IP:8080`。
+没有域名时：把编排里的 `caddy` 服务与末尾的 `configs:` 整段删掉，给 `pixora` 加 `ports: ["8080:8080"]`，`PIXORA_BASE_URL` 写成 `http://服务器IP:8080`。
 
 ### 数据库
 

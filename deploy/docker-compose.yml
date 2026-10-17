@@ -1,44 +1,39 @@
-# Pixora 单机部署 —— SQLite 版（默认，最省事：整站只有一个应用容器 + 一个反代）。
+# Pixora 单机部署 —— 一个文件跑完整站（应用 + 自动 https 的反向代理）。
 #
-# 另外两种数据库的编排是同目录的 docker-compose.postgres.yml 与
-# docker-compose.mysql.yml（当前版本尚未适配完成，见 docs/Pixora-部署方案.md）。
-#
-# 用法：
-#   1. 同目录放三样东西：本文件（重命名成 docker-compose.yml）、Caddyfile、.env
-#      （.env 照 deploy/.env.example 抄，填 PIXORA_DOMAIN / PIXORA_BASE_URL /
-#       PIXORA_MASTER_KEY）
-#   2. mkdir -p data
+# 用法三步：
+#   1. 把这份文件存成 docker-compose.yml
+#   2. 改下面标着「必改」的三处：域名、站点地址、主密钥
 #   3. docker compose up -d
-#   4. 浏览器打开你的域名，走安装向导
 #
-# 没有域名、或前面已有别的反代：把 caddy 整段删掉，给 pixora 加
-# `ports: ["8080:8080"]`，PIXORA_BASE_URL 填实际访问地址。
+# 数据落在同目录的 ./data（Docker 会自动建），备份就是备份这个目录。
+# 没有域名：删掉 caddy 服务与文件末尾的 configs，给 pixora 加 ports: ["8080:8080"]，
+# PIXORA_BASE_URL 写 http://服务器IP:8080。
+#
+# 需要 Docker Compose 2.23 以上（用 configs.content 内嵌了 Caddy 配置）：
+#   docker compose version
+#
+# 想从源码构建镜像，见 README 的「从源码构建」一节。
 
 services:
   pixora:
+    # 换成你自己的用户名（fork 过的话）；没发过版的仓库只有 :edge
     image: ghcr.io/lovefirefly-26710/pixora:latest
-    # 想从源码现编就用这两行替换上面那行 image
-    # build:
-    #   context: ..
-    #   dockerfile: deploy/Dockerfile
     restart: unless-stopped
     environment:
-      # ---------- 数据库：SQLite，文件落在数据目录里 ----------
       PIXORA_DB_DRIVER: sqlite
       PIXORA_DB_DSN: /data/pixora.db
-      # ---------- 数据与站点 ----------
       PIXORA_DATA_DIR: /data
       PIXORA_BIND: 0.0.0.0:8080
-      # 站点对外地址：直链、邮件里的链接都按它拼。写错的表现是「页面能开、图全裂」
-      PIXORA_BASE_URL: ${PIXORA_BASE_URL:?在 .env 里填站点对外地址}
-      # 主密钥：加密存储后端凭据与 SMTP 密码。丢了它只能重新填一遍
-      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?在 .env 里填 PIXORA_MASTER_KEY}
+      # 必改：站点对外地址。直链、邮件里的链接都按它拼，写错的表现是「页面能开、图全裂」
+      PIXORA_BASE_URL: https://img.example.com
+      # 必改：openssl rand -hex 32 的输出。留着这串占位符会启动失败（故意的）
+      PIXORA_MASTER_KEY: REPLACE_WITH_openssl_rand_hex_32
       # 前面有反向代理时保持 1：只信最靠近服务端的一层转发头
       PIXORA_TRUST_PROXY: "1"
       PIXORA_WORKERS: "2"
       RUST_LOG: info
     volumes:
-      - ./data:/data          # 数据库、图片、主密钥都在这里，备份就是备份它
+      - ./data:/data
     expose:
       - "8080"
     deploy:
@@ -51,25 +46,38 @@ services:
       retries: 3
       start_period: 10s
 
-  # 反向代理 + 自动 https 证书。平台自带 https 时整段删掉
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     environment:
-      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?在 .env 里填域名}
-      ACME_EMAIL: ${ACME_EMAIL:-}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./data:/srv/data:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      # 必改：你的域名，Caddy 用它申请证书
+      PIXORA_DOMAIN: img.example.com
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
     depends_on:
       - pixora
     deploy:
       resources:
         limits: { memory: 48M }
 
-volumes:
-  caddy_data:
-  caddy_config:
+# Caddy 的配置就写在这里，不用另外放一个 Caddyfile
+configs:
+  caddyfile:
+    content: |
+      {$PIXORA_DOMAIN} {
+          encode zstd gzip
+          # 上传体积上限，与应用侧的上限保持一致
+          request_body {
+              max_size 64MB
+          }
+          reverse_proxy pixora:8080
+          header {
+              Strict-Transport-Security "max-age=31536000; includeSubDomains"
+              X-Frame-Options "SAMEORIGIN"
+              X-Content-Type-Options "nosniff"
+              Referrer-Policy "strict-origin-when-cross-origin"
+              -Server
+          }
+      }

@@ -1,30 +1,26 @@
-# Pixora 单机部署 —— PostgreSQL 版。
+# Pixora 单机部署 —— PostgreSQL 版（一个文件跑完整站）。
 #
-# ⚠ 状态说明（2026-10）：迁移能建到 26 张表，但运行期还过不了 sqlx Any 驱动的
-#   类型映射（SUM 在 PG 返回 NUMERIC）。当前版本请用 SQLite 版，见
+# ⚠ 状态说明（2026-10）：迁移能建完，运行期还差 sqlx Any 的类型映射
+#   （SUM 在 PG 返回 NUMERIC）。当前版本请用 SQLite 版，见
 #   docs/Pixora-部署方案.md 的「数据库支持现状」。
 #
-# 用法：
-#   1. 同目录放：本文件（重命名成 docker-compose.yml）、Caddyfile、.env
-#   2. mkdir -p data pgdata
-#   3. docker compose up -d
-#   4. 浏览器打开你的域名，走安装向导
+# 用法三步：存成 docker-compose.yml → 改三处「必改」与数据库密码 → docker compose up -d
+# 数据库密码在文件里出现 2 处（DSN 与 POSTGRES_PASSWORD），改成同一个值。
+#
+# 需要 Docker Compose 2.23 以上（configs.content 内嵌了 Caddy 配置）。
 
 services:
   pixora:
     image: ghcr.io/lovefirefly-26710/pixora:latest
-    # build:
-    #   context: ..
-    #   dockerfile: deploy/Dockerfile
     restart: unless-stopped
     environment:
       PIXORA_DB_DRIVER: postgres
-      # 主机名 db 就是下面那个服务的名字，容器之间用服务名互找
-      PIXORA_DB_DSN: postgres://pixora:${DB_PASSWORD:?在 .env 里填 DB_PASSWORD}@db:5432/pixora
+      # 必改：密码两处一起改（这一行与下面 db 服务的 POSTGRES_PASSWORD）
+      PIXORA_DB_DSN: postgres://pixora:REPLACE_WITH_A_STRONG_PASSWORD@db:5432/pixora
       PIXORA_DATA_DIR: /data
       PIXORA_BIND: 0.0.0.0:8080
-      PIXORA_BASE_URL: ${PIXORA_BASE_URL:?在 .env 里填站点对外地址}
-      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?在 .env 里填 PIXORA_MASTER_KEY}
+      PIXORA_BASE_URL: https://img.example.com
+      PIXORA_MASTER_KEY: REPLACE_WITH_openssl_rand_hex_32
       PIXORA_TRUST_PROXY: "1"
       PIXORA_WORKERS: "2"
       RUST_LOG: info
@@ -48,14 +44,14 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
-    # 小机器上把 PostgreSQL 的默认值压下来，否则它会按机器内存的 1/4 去申请
     command: >
       postgres -c shared_buffers=64MB -c work_mem=4MB
                -c max_connections=50 -c effective_cache_size=128MB
     environment:
       POSTGRES_DB: pixora
       POSTGRES_USER: pixora
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?在 .env 里填 DB_PASSWORD}
+      # 必改：与上面 DSN 里的密码保持一致
+      POSTGRES_PASSWORD: REPLACE_WITH_A_STRONG_PASSWORD
     volumes:
       - ./pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -72,18 +68,30 @@ services:
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     environment:
-      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?在 .env 里填域名}
-      ACME_EMAIL: ${ACME_EMAIL:-}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      PIXORA_DOMAIN: img.example.com
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
     depends_on:
       - pixora
     deploy:
       resources:
         limits: { memory: 48M }
 
-volumes:
-  caddy_data:
-  caddy_config:
+configs:
+  caddyfile:
+    content: |
+      {$PIXORA_DOMAIN} {
+          encode zstd gzip
+          request_body {
+              max_size 64MB
+          }
+          reverse_proxy pixora:8080
+          header {
+              Strict-Transport-Security "max-age=31536000; includeSubDomains"
+              X-Frame-Options "SAMEORIGIN"
+              X-Content-Type-Options "nosniff"
+              Referrer-Policy "strict-origin-when-cross-origin"
+              -Server
+          }
+      }
