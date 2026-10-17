@@ -2,7 +2,7 @@
 
 Pixora 的前端就是 `web/dist` 里那一堆静态文件，可以单独发到 Vercel、Cloudflare Pages、
 EdgeOne Makers 这类平台上，后端（那个 Rust 进程）放在别处。这个目录里的文件是给那几个
-平台用的配置，主 README 的[「前后端分开部署」](../../README.md#前后端分开部署)一节讲了
+平台用的配置，主 README 的[「前后端分开部署」](../../docs/Pixora-部署方案.md)一节讲了
 整体思路，这里只说每个文件怎么用。
 
 | 文件 | 干什么 | 怎么用 |
