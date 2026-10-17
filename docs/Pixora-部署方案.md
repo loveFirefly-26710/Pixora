@@ -95,7 +95,7 @@ PIXORA_BASE_URL=https://img.example.com
 | 有台 Linux 服务器，不想装 Docker | Linux 单二进制 + systemd | 第 5 节 |
 | 只有 Windows 机器 / Windows 小主机 | Windows 单二进制 + 服务 | 第 6 节 |
 | 后端在自己机器上，想让前端走 CDN | 先按 4/5/6 跑通后端，再拆前端 | 第 8 节 |
-| 想用云数据库 | Docker 或二进制都行，把 `PIXORA_DB_DSN` 换掉 | 第 4.5 / 9 节 |
+| 数据库已经单独部署了（自建或云上） | Docker 或二进制都行，把连接指向它 | 第 4.5 / 9 节 |
 
 数据库怎么选：
 
@@ -458,18 +458,104 @@ configs:
 
 字符集固定 `utf8mb4`，否则中文标签、emoji 相册名插不进去。MySQL 比 PostgreSQL 重一些，同配置下多留 100MB 内存。MariaDB 把镜像换成 `mariadb:11`、环境变量换成 `MARIADB_DATABASE` / `MARIADB_USER` / `MARIADB_PASSWORD` / `MARIADB_ROOT_PASSWORD`，迁移共用一套，但同样受第 9 节的限制。
 
-### 4.5 A4：托管数据库
+### 4.5 A4：数据库已经单独部署了
 
-不用自己维护数据库时，从 4.2 的 SQLite 版出发改两行，其它不动：
+数据库不在这个编排里。两种来源：自己在这台机器（或局域网另一台机器、面板里）装的 PostgreSQL / MySQL；云厂商的托管库。做法都是同一套——从 4.2 的 SQLite 版出发（那份里本来就没有数据库服务），把连接指向那个库。二进制部署时更省事：把连接串写进 `/etc/pixora.env` 就行（第 5.3 节）。
 
-```yaml
-    environment:
-      PIXORA_DB_DRIVER: postgres        # 云的 MySQL 写 mysql
-      # 厂商给的连接串，照抄，别自己拼
-      PIXORA_DB_DSN: postgres://user:pass@ep-xxx-pooler.region.aws.neon.tech/pixora?sslmode=require
+#### 先建一个专用库与账号
+
+别和别的应用共用一个库，迁移只管自己这个库里的表。
+
+PostgreSQL（在库所在的那台机器上执行）：
+
+```bash
+sudo -u postgres psql <<'SQL'
+CREATE USER pixora WITH PASSWORD '换成强密码';
+CREATE DATABASE pixora OWNER pixora;
+SQL
 ```
 
-常见连接串长这样：
+MySQL / MariaDB：
+
+```sql
+CREATE DATABASE pixora CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'pixora'@'%' IDENTIFIED BY '换成强密码';
+GRANT ALL PRIVILEGES ON pixora.* TO 'pixora'@'%';
+FLUSH PRIVILEGES;
+```
+
+#### 让容器连到它
+
+从 4.2 的 SQLite 版出发，改三处：
+
+1. `PIXORA_DB_DRIVER` 改成 `postgres` 或 `mysql`；
+2. `PIXORA_DB_DSN` 换成连接串（见下面的示例）；
+3. 给 `pixora` 服务加 `extra_hosts`，这样容器里可以用 `host.docker.internal` 指回宿主机。Docker Desktop（Windows / macOS）天生支持这个名字，Linux 上靠这一行把它映射到网关：
+
+```yaml
+  pixora:
+    environment:
+      PIXORA_DB_DRIVER: postgres
+      # 密码就是上面建账号时填的那个
+      PIXORA_DB_DSN: postgres://pixora:换成强密码@host.docker.internal:5432/pixora
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+地址怎么写，看库在哪：
+
+| 库的位置 | DSN 里的主机 | 要不要 `extra_hosts` |
+|---|---|---|
+| 同一台机器（宿主机的 PG/MySQL） | `host.docker.internal` | 要 |
+| 局域网另一台机器 | 那台的 IP，如 `192.168.1.20` | 不要 |
+| 另一个 compose / 面板里的容器 | 开了端口就用 `host.docker.internal`；或把两个编排接到同一个 Docker 网络，用服务名互访 | 前者要 |
+| 云托管 | 厂商给的主机名 | 不要 |
+
+容器从哪个网段来？默认 bridge 是 `172.17.0.0/16`，compose 自建的网络一般落在 `172.16.0.0/12` 里。下面两小节都按这个网段放行。
+
+#### PostgreSQL 侧要放开的地方
+
+1. `postgresql.conf` 里 `listen_addresses = '*'`，或者写具体网卡的地址；
+2. `pg_hba.conf` 加一行，允许容器网段用密码登录：
+
+   ```
+   host    all    all    172.16.0.0/12    scram-sha-256
+   ```
+
+3. 重启：`sudo systemctl restart postgresql`；
+4. 防火墙放行 5432，范围收在需要的网段：
+
+   ```bash
+   sudo ufw allow from 172.16.0.0/12 to any port 5432 proto tcp
+   ```
+
+在面板（1Panel / 宝塔这类）里装的库，数据库详情页通常有个「允许访问的 IP」，把 `172.16.0.0/12` 加进去，等于上面第 2、4 步。
+
+跨机器访问建议走 SSL：连接串末尾加 `?sslmode=require`。
+
+#### MySQL 侧要放开的地方
+
+1. `mysqld.cnf` 里 `bind-address = 0.0.0.0`，或者写具体网卡的地址；
+2. 账号授权按来源收紧（上面写的 `'pixora'@'%'` 是放开所有来源；只想让容器网段连就写 `'pixora'@'172.%'`，记得重新授权）；
+3. 重启：`sudo systemctl restart mysql`；
+4. 防火墙放行 3306。
+
+跨机器访问同样建议走 SSL：连接串末尾加 `?ssl-mode=REQUIRED`。
+
+#### 验证
+
+```bash
+docker compose up -d
+docker compose logs pixora | tail -5          # 日志摘要里应是 db="postgres" 或 db="mysql"
+docker compose exec pixora /pixora --health-probe && echo ok
+curl -s https://你的域名/healthz              # {"db":"ok","status":"ok",...}
+```
+
+迁移在第一次启动时自动执行，看到「Pixora 已启动」就说明连接池和建表都过了。连不上时先看 `docker compose logs pixora` 的最后几行，再对照 4.8 里那条「连不上库」。
+
+#### 云托管数据库
+
+只是把 DSN 换成厂商给的那一串，不需要 `extra_hosts`，其它步骤一样。SSL 参数别删：
 
 ```dotenv
 # Neon / Vercel Postgres / Supabase
@@ -480,7 +566,7 @@ postgres://user:pass@pgm-xxx.pg.rds.aliyuncs.com:5432/pixora?sslmode=require
 mysql://user:pass@host:3306/pixora?ssl-mode=REQUIRED
 ```
 
-建表在应用启动时自动执行，不用手动跑 SQL。
+> 提醒：按第 9 节的实测结论，PostgreSQL 与 MySQL 目前能完成建表，接口层还过不了 sqlx Any 的类型映射。这一段配置先备着，修好之后直接可用；现在要上线还是选 SQLite。
 
 ### 4.6 不用 Caddy
 
@@ -527,6 +613,8 @@ docker compose exec db pg_dump -U pixora pixora > pixora-$(date +%F).sql
 docker compose exec db mysqldump -u pixora -p'你的密码' pixora > pixora-$(date +%F).sql
 ```
 
+数据库在别的机器或面板里时（4.5 那种接法），上面两条 `docker compose exec db ...` 换成在那台机器上直接跑 `pg_dump` / `mysqldump`。
+
 恢复就是把 `data/` 解回去、或把 dump 导入空库，再 `docker compose up -d`。`PIXORA_MASTER_KEY` 单独记一份：数据库里的存储凭据与 SMTP 密码是它加密的，丢了只能重填。
 
 ### 4.8 Docker 这条路的常见坑
@@ -538,6 +626,7 @@ docker compose exec db mysqldump -u pixora -p'你的密码' pixora > pixora-$(da
 | 容器起来又退出 | `docker compose logs pixora` 看最后几行；最常见是主密钥没换，或者数据目录写不进去 |
 | `80/443 端口被占用` | 宿主机上另有 Nginx/Apache；改 Caddy 的端口，或先停掉别的服务 |
 | 浏览器打开是 502 | Caddy 起来了但应用没起来，`docker compose ps` 看 `pixora` 是否 healthy |
+| 连不上单独部署的库 | 按 4.5 逐项对：`host.docker.internal` 有没有配 `extra_hosts`；PG 的 `pg_hba.conf` / `listen_addresses` 放开了没；MySQL 的 `bind-address` 与账号来源；防火墙 5432 / 3306 |
 | 图片裂开、地址是 `172.x.x.x` | `PIXORA_BASE_URL` 没填对 |
 | 上传报 413 | 内嵌配置里的 `request_body` 上限被改小了；默认 64MB，与应用侧一致 |
 | `./data` 权限报错 | 镜像基于 `scratch`、以 root 运行，宿主机上一般不用改权限；只有开了 rootless / 用户命名空间时才按映射的 UID 授权 |
