@@ -1,63 +1,49 @@
-# Pixora 单机部署。
+# Pixora 单机部署 —— SQLite 版（默认，最省事：整站只有一个应用容器 + 一个反代）。
 #
-# 三个服务的内存上限加起来 376M（应用 128 + 数据库 200 + Caddy 48），
-# 给系统留了余量，整栈压在 500MB 预算之内。
+# 另外两种数据库的编排是同目录的 docker-compose.postgres.yml 与
+# docker-compose.mysql.yml（当前版本尚未适配完成，见 docs/Pixora-部署方案.md）。
 #
 # 用法：
-#   1. 复制 .env.example 为 .env，填好 POSTGRES_PASSWORD 与 PIXORA_MASTER_KEY
-#   2. docker compose up -d
-#   3. 打开 https://你的域名/install 走安装向导
+#   1. 同目录放三样东西：本文件（重命名成 docker-compose.yml）、Caddyfile、.env
+#      （.env 照 deploy/.env.example 抄，填 PIXORA_DOMAIN / PIXORA_BASE_URL /
+#       PIXORA_MASTER_KEY）
+#   2. mkdir -p data
+#   3. docker compose up -d
+#   4. 浏览器打开你的域名，走安装向导
 #
-# 想更省内存就用 SQLite：把 db 服务与 depends_on 去掉，
-# 环境变量改成 PIXORA_DB_DRIVER=sqlite / PIXORA_DB_DSN=/data/pixora.db，
-# 整栈可以压到 80MB 以内。
-#
-# 想用托管数据库（Neon / Supabase / RDS / 云厂商 MySQL）同样把 db 服务去掉，
-# 把 PIXORA_DB_DRIVER 与 PIXORA_DB_DSN 指向那台实例即可（连接串带 SSL 参数）。
-# 图片存储改到对象存储（R2 / OSS / COS / MinIO）在后台「存储」页配，不需要动这里。
+# 没有域名、或前面已有别的反代：把 caddy 整段删掉，给 pixora 加
+# `ports: ["8080:8080"]`，PIXORA_BASE_URL 填实际访问地址。
 
 services:
   pixora:
-    # 本地构建（默认）。用 CI 推上来的镜像就删掉 build 两行，改成：
-    #   image: ghcr.io/<你的 GitHub 用户名>/pixora:latest
-    image: pixora:latest
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-      # 想让这份镜像里的前端指向别的后端时给这个参数：
-      # args: { PIXORA_API_BASE: "https://img-api.example.com" }
+    image: ghcr.io/lovefirefly-26710/pixora:latest
+    # 想从源码现编就用这两行替换上面那行 image
+    # build:
+    #   context: ..
+    #   dockerfile: deploy/Dockerfile
     restart: unless-stopped
     environment:
-      PIXORA_DB_DRIVER: ${PIXORA_DB_DRIVER:-postgres}
-      PIXORA_DB_DSN: ${PIXORA_DB_DSN:-postgres://pixora:${POSTGRES_PASSWORD}@db:5432/pixora}
+      # ---------- 数据库：SQLite，文件落在数据目录里 ----------
+      PIXORA_DB_DRIVER: sqlite
+      PIXORA_DB_DSN: /data/pixora.db
+      # ---------- 数据与站点 ----------
       PIXORA_DATA_DIR: /data
-      # 主密钥：用于加密存储后端凭据与 SMTP 密码。生产环境必须显式注入，
-      # 换掉它等于让已加密的凭据全部失效（要重新填一遍）。
-      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?必须设置 PIXORA_MASTER_KEY}
-      # 反向代理后面必须显式设置，否则直链地址会变成容器内网地址
-      PIXORA_BASE_URL: ${PIXORA_BASE_URL:-}
-      # 只信最靠近服务端的一层代理，防止客户端伪造 X-Forwarded-For 绕过 IP 黑名单
+      PIXORA_BIND: 0.0.0.0:8080
+      # 站点对外地址：直链、邮件里的链接都按它拼。写错的表现是「页面能开、图全裂」
+      PIXORA_BASE_URL: ${PIXORA_BASE_URL:?在 .env 里填站点对外地址}
+      # 主密钥：加密存储后端凭据与 SMTP 密码。丢了它只能重新填一遍
+      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?在 .env 里填 PIXORA_MASTER_KEY}
+      # 前面有反向代理时保持 1：只信最靠近服务端的一层转发头
       PIXORA_TRUST_PROXY: "1"
-      # 想让反向代理直接发文件（零拷贝）时打开，并同步配置 Caddyfile 的
-      # 内部路径与来源限制；默认关闭是因为 Caddy 没有 nginx internal 的等价物，
-      # 直接把 CAS 目录暴露成公开路径会绕过私有图片的访问判断。
-      # PIXORA_ACCEL_PREFIX: /data-files
-      PIXORA_WORKERS: ${PIXORA_WORKERS:-4}
-      # 前后端分开部署（前端在 Vercel / Cloudflare Pages / EdgeOne）时填前端来源，
-      # 逗号分隔；留空即前后端同源，一个跨域头都不发。见 README 的部署一节
-      PIXORA_CORS_ORIGINS: ${PIXORA_CORS_ORIGINS:-}
-      RUST_LOG: ${RUST_LOG:-info}
+      PIXORA_WORKERS: "2"
+      RUST_LOG: info
     volumes:
-      - ./data:/data
+      - ./data:/data          # 数据库、图片、主密钥都在这里，备份就是备份它
     expose:
       - "8080"
-    depends_on:
-      db:
-        condition: service_healthy
     deploy:
       resources:
         limits: { memory: 128M }
-        reservations: { memory: 64M }
     healthcheck:
       test: ["CMD", "/pixora", "--health-probe"]
       interval: 30s
@@ -65,39 +51,16 @@ services:
       retries: 3
       start_period: 10s
 
-  db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    command: >
-      postgres -c shared_buffers=64MB -c work_mem=4MB
-               -c max_connections=50 -c effective_cache_size=128MB
-    environment:
-      POSTGRES_DB: pixora
-      POSTGRES_USER: pixora
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}
-    volumes:
-      - ./pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pixora -d pixora"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    deploy:
-      resources:
-        limits: { memory: 200M }
-
+  # 反向代理 + 自动 https 证书。平台自带 https 时整段删掉
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+    ports: ["80:80", "443:443"]
     environment:
-      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?必须设置域名，Caddy 用它申请证书}
+      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?在 .env 里填域名}
       ACME_EMAIL: ${ACME_EMAIL:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      # 只读挂载数据目录：Caddy 靠 X-Accel-Redirect 直接发文件
       - ./data:/srv/data:ro
       - caddy_data:/data
       - caddy_config:/config
