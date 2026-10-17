@@ -39,6 +39,19 @@ impl Dialect {
     pub fn hour_expr(self, column: &str) -> String {
         format!("substr({column}, 1, 13)")
     }
+
+    /// 求和并且保证结果读得回来整数。
+    ///
+    /// PostgreSQL 的 `SUM(bigint)` 返回 NUMERIC、MySQL 的 `SUM` 返回 DECIMAL，
+    /// `sqlx::Any` 都解不成 i64（报 `Any driver does not support ... Numeric`）；
+    /// 包一层 CAST 回到整数。SQLite 的 SUM 本来就是整数，不加料。
+    pub fn sum_i64(self, expr: &str) -> String {
+        match self {
+            Dialect::Postgres => format!("CAST(COALESCE(SUM({expr}), 0) AS BIGINT)"),
+            Dialect::MySql => format!("CAST(COALESCE(SUM({expr}), 0) AS SIGNED)"),
+            Dialect::Sqlite => format!("COALESCE(SUM({expr}), 0)"),
+        }
+    }
 }
 
 /// 环境变量里写的驱动名。
@@ -231,11 +244,22 @@ impl Db {
     pub async fn insert_returning_id(&self, sql: &str, args: Args) -> Result<i64> {
         match self.dialect {
             Dialect::MySql => {
-                let affected = self.execute(sql, args).await?;
+                // LAST_INSERT_ID() 是连接级的：插入与取 id 必须在同一条连接上。
+                // 走连接池会落到另一条连接，读回来是 0（建账号、建相册时就看不出来
+                // 是 id 错了，症状是「记录不存在：新建相册 0」）。
+                let mut conn = self.pool.acquire().await?;
+                let prepared = self.sql(sql);
+                let affected = sqlx::query_with(&prepared, args.take())
+                    .execute(&mut *conn)
+                    .await?
+                    .rows_affected();
                 if affected == 0 {
                     return Err(RepoError::NotFound("插入未生效".into()));
                 }
-                self.last_insert_id().await
+                let row = sqlx::query("SELECT LAST_INSERT_ID() AS id")
+                    .fetch_one(&mut *conn)
+                    .await?;
+                crate::model::get_i64(&row, "id")
             }
             _ => {
                 let sql = format!("{} RETURNING id", sql.trim_end().trim_end_matches(';'));
@@ -344,7 +368,15 @@ fn normalize_dsn(driver: DbDriver, dsn: &str) -> Result<String> {
 }
 
 /// PostgreSQL 用 `$1..$n`，其余两种方言保留 `?`。
+///
+/// 另外替 MySQL 把 LIKE 里的 `ESCAPE '\'` 去掉：反斜杠在 MySQL 的字符串
+/// 字面量里自己就是转义符，写 `ESCAPE '\'` 会把结束引号转义掉、直接报语法错误；
+/// 而 MySQL 的 LIKE 默认就拿反斜杠当转义符，删掉这个子句语义不变
+/// （`like_pattern()` 产出的 `\%` / `\_` 仍然按字面匹配）。
 fn rewrite_placeholders(dialect: Dialect, sql: &str) -> String {
+    if dialect == Dialect::MySql {
+        return sql.replace(r"ESCAPE '\'", "");
+    }
     if dialect != Dialect::Postgres {
         return sql.to_string();
     }

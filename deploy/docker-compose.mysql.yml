@@ -1,9 +1,5 @@
 # Pixora 单机部署 —— MySQL 8.0.13+ / MariaDB 版（一个文件跑完整站）。
 #
-# ⚠ 状态说明（2026-10）：迁移能建完，运行期还差 sqlx Any 的类型映射
-#   （MySQL 的 TEXT 被当成 BLOB、TINYINT 不识别）。当前版本请用 SQLite 版，
-#   见 docs/Pixora-部署方案.md 的「数据库支持现状」。
-#
 # 用法三步：存成 docker-compose.yml → 改三处「必改」与数据库密码 → docker compose up -d
 # 数据库密码在文件里出现 3 处（DSN、MYSQL_PASSWORD、MYSQL_ROOT_PASSWORD），
 # 三处改成同一个值。

@@ -178,7 +178,11 @@ impl Repo {
     pub async fn dec_blob_ref(&self, id: i64) -> Result<()> {
         self.db
             .execute(
-                "UPDATE blobs SET ref_count = MAX(ref_count - 1, 0) WHERE id = ?",
+                &self.db.sql_v(
+                    "UPDATE blobs SET ref_count = GREATEST(ref_count - 1, 0) WHERE id = ?",
+                    "UPDATE blobs SET ref_count = GREATEST(ref_count - 1, 0) WHERE id = ?",
+                    "UPDATE blobs SET ref_count = MAX(ref_count - 1, 0) WHERE id = ?",
+                ),
                 Args::new().int(id),
             )
             .await?;
@@ -316,10 +320,13 @@ impl Repo {
         let row = self
             .db
             .fetch_optional(
-                "SELECT COUNT(*) AS total, COALESCE(SUM(b.size), 0) AS bytes \
-                   FROM blobs b \
-                  WHERE NOT EXISTS ( \
-                        SELECT 1 FROM images i WHERE i.blob_id = b.id OR i.thumb_blob_id = b.id)",
+                &format!(
+                    "SELECT COUNT(*) AS total, {} AS bytes \
+                       FROM blobs b \
+                      WHERE NOT EXISTS ( \
+                            SELECT 1 FROM images i WHERE i.blob_id = b.id OR i.thumb_blob_id = b.id)",
+                    self.db.dialect().sum_i64("b.size")
+                ),
                 Args::new(),
             )
             .await?;
@@ -366,14 +373,15 @@ impl Repo {
             .db
             .fetch_all(
                 &format!(
-                    "SELECT driver, COALESCE(SUM(size), 0) AS bytes FROM ( \
+                    "SELECT driver, {} AS bytes FROM ( \
                         SELECT DISTINCT b.id AS id, b.storage_driver AS driver, b.size AS size \
                           FROM images i JOIN blobs b ON b.id = i.blob_id WHERE {condition} \
                         UNION \
                         SELECT DISTINCT b.id, b.storage_driver, b.size \
                           FROM images i JOIN blobs b ON b.id = i.thumb_blob_id \
                          WHERE {condition} AND i.thumb_blob_id IS NOT NULL \
-                     ) AS refs GROUP BY driver"
+                     ) AS refs GROUP BY driver",
+                    self.db.dialect().sum_i64("size")
                 ),
                 Args::new(),
             )
@@ -387,8 +395,10 @@ impl Repo {
     pub async fn logical_bytes_all(&self) -> Result<i64> {
         self.db
             .count(
-                "SELECT COALESCE(SUM(b.size), 0) AS total FROM images i \
-                   JOIN blobs b ON b.id = i.blob_id",
+                &format!(
+                    "SELECT {} AS total FROM images i JOIN blobs b ON b.id = i.blob_id",
+                    self.db.dialect().sum_i64("b.size")
+                ),
                 Args::new(),
             )
             .await
@@ -416,8 +426,11 @@ impl Repo {
         let rows = self
             .db
             .fetch_all(
-                "SELECT mime_type AS mime, COUNT(*) AS total, COALESCE(SUM(size), 0) AS bytes \
-                   FROM blobs WHERE kind = 'original' GROUP BY mime_type ORDER BY total DESC LIMIT ?",
+                &format!(
+                    "SELECT mime_type AS mime, COUNT(*) AS total, {} AS bytes \
+                       FROM blobs WHERE kind = 'original' GROUP BY mime_type ORDER BY total DESC LIMIT ?",
+                    self.db.dialect().sum_i64("size")
+                ),
                 Args::new().int(limit.clamp(1, 100)),
             )
             .await?;
@@ -437,7 +450,10 @@ impl Repo {
     pub async fn sum_blob_bytes_by_driver(&self, driver: &str) -> Result<i64> {
         self.db
             .count(
-                "SELECT COALESCE(SUM(size), 0) AS total FROM blobs WHERE storage_driver = ?",
+                &format!(
+                    "SELECT {} AS total FROM blobs WHERE storage_driver = ?",
+                    self.db.dialect().sum_i64("size")
+                ),
                 Args::new().text(driver),
             )
             .await
@@ -446,7 +462,10 @@ impl Repo {
     /// 实体的字节合计（全部驱动）。
     pub async fn sum_blob_bytes(&self) -> Result<i64> {
         self.db
-            .count("SELECT COALESCE(SUM(size), 0) AS total FROM blobs", Args::new())
+            .count(
+                &format!("SELECT {} AS total FROM blobs", self.db.dialect().sum_i64("size")),
+                Args::new(),
+            )
             .await
     }
 
@@ -454,7 +473,14 @@ impl Repo {
     pub async fn average_blob_size(&self) -> Result<i64> {
         self.db
             .count(
-                "SELECT CAST(COALESCE(AVG(size), 0) AS BIGINT) AS total FROM blobs WHERE kind = 'original'",
+                &self.db.sql_v(
+                    "SELECT CAST(COALESCE(AVG(size), 0) AS BIGINT) AS total \
+                       FROM blobs WHERE kind = 'original'",
+                    "SELECT CAST(COALESCE(AVG(size), 0) AS SIGNED) AS total \
+                       FROM blobs WHERE kind = 'original'",
+                    "SELECT CAST(COALESCE(AVG(size), 0) AS INTEGER) AS total \
+                       FROM blobs WHERE kind = 'original'",
+                ),
                 Args::new(),
             )
             .await

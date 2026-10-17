@@ -81,13 +81,30 @@ pub fn get_bytes(row: &AnyRow, column: &str) -> Result<Vec<u8>> {
 }
 
 pub fn get_str(row: &AnyRow, column: &str) -> Result<String> {
-    row.try_get::<String, _>(column)
-        .map_err(|e| RepoError::decode(column, e))
+    match row.try_get::<String, _>(column) {
+        Ok(value) => Ok(value),
+        // MySQL 的 TEXT 列在 `sqlx::Any` 里被报成 BLOB，按 String 解会报
+        // mismatched types；这时按字节读一次再做 UTF-8 转换。PostgreSQL 的
+        // text 与 SQLite 的 TEXT 都在第一步就成功，不走这条兜底。
+        Err(as_text) => match row.try_get::<Vec<u8>, _>(column) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map_err(|e| RepoError::Format(format!("列 {column} 不是合法的 UTF-8：{e}"))),
+            Err(_) => Err(RepoError::decode(column, as_text)),
+        },
+    }
 }
 
 pub fn get_opt_str(row: &AnyRow, column: &str) -> Result<Option<String>> {
-    row.try_get::<Option<String>, _>(column)
-        .map_err(|e| RepoError::decode(column, e))
+    match row.try_get::<Option<String>, _>(column) {
+        Ok(value) => Ok(value),
+        Err(as_text) => match row.try_get::<Option<Vec<u8>>, _>(column) {
+            Ok(Some(bytes)) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|e| RepoError::Format(format!("列 {column} 不是合法的 UTF-8：{e}"))),
+            Ok(None) => Ok(None),
+            Err(_) => Err(RepoError::decode(column, as_text)),
+        },
+    }
 }
 
 /// 布尔列以 0/1 整数存储，这里统一转成 `bool`。

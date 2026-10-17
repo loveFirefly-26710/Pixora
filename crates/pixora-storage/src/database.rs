@@ -46,7 +46,7 @@ impl SqlDialect {
     fn upsert_sql(self) -> &'static str {
         match self {
             SqlDialect::MySql => {
-                "INSERT INTO storage_objects (key, content, size, updated_at) VALUES (?, ?, ?, ?) \
+                "INSERT INTO storage_objects (`key`, content, size, updated_at) VALUES (?, ?, ?, ?) \
                  ON DUPLICATE KEY UPDATE content = VALUES(content), size = VALUES(size), \
                                          updated_at = VALUES(updated_at)"
             }
@@ -54,6 +54,14 @@ impl SqlDialect {
                 "INSERT INTO storage_objects (key, content, size, updated_at) VALUES (?, ?, ?, ?) \
                  ON CONFLICT (key) DO UPDATE SET content = ?, size = ?, updated_at = ?"
             }
+        }
+    }
+
+    /// `key` 是 MySQL 的保留字，标识符要加反引号；另外两种方言直接写。
+    fn key_col(self) -> &'static str {
+        match self {
+            SqlDialect::MySql => "`key`",
+            _ => "key",
         }
     }
 }
@@ -141,7 +149,10 @@ impl StorageDriver for DatabaseDriver {
     }
 
     async fn get(&self, key: &str) -> Result<Box<dyn AsyncRead + Send + Unpin>> {
-        let sql = self.dialect.prepare("SELECT content FROM storage_objects WHERE key = ?");
+        let sql = self.dialect.prepare(&format!(
+            "SELECT content FROM storage_objects WHERE {} = ?",
+            self.dialect.key_col()
+        ));
         let row = sqlx::query(&sql)
             .bind(key)
             .fetch_optional(&self.pool)
@@ -157,7 +168,10 @@ impl StorageDriver for DatabaseDriver {
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        let sql = self.dialect.prepare("DELETE FROM storage_objects WHERE key = ?");
+        let sql = self.dialect.prepare(&format!(
+            "DELETE FROM storage_objects WHERE {} = ?",
+            self.dialect.key_col()
+        ));
         sqlx::query(&sql)
             .bind(key)
             .execute(&self.pool)
@@ -167,9 +181,10 @@ impl StorageDriver for DatabaseDriver {
     }
 
     async fn stat(&self, key: &str) -> Result<ObjectInfo> {
-        let sql = self.dialect.prepare(
-            "SELECT size, updated_at, LENGTH(content) AS verify_len FROM storage_objects WHERE key = ?",
-        );
+        let sql = self.dialect.prepare(&format!(
+            "SELECT size, updated_at, LENGTH(content) AS verify_len FROM storage_objects WHERE {} = ?",
+            self.dialect.key_col()
+        ));
         let row = sqlx::query(&sql)
             .bind(key)
             .fetch_optional(&self.pool)

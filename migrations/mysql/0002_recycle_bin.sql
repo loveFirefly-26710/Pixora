@@ -3,7 +3,8 @@
 
 -- 时间列一律 VARCHAR(32)：TEXT 上建不了索引（1170）
 ALTER TABLE albums ADD COLUMN deleted_at VARCHAR(32);
-ALTER TABLE images ADD COLUMN deleted_by_album INTEGER NOT NULL DEFAULT 0;
+-- 与其余整数列一致用 BIGINT：代码统一按 i64 读
+ALTER TABLE images ADD COLUMN deleted_by_album BIGINT NOT NULL DEFAULT 0;
 
 CREATE INDEX idx_albums_live    ON albums(owner_id, deleted_at);
 CREATE INDEX idx_images_deleted ON images(owner_id, deleted_at);

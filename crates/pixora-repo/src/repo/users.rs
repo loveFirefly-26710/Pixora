@@ -276,7 +276,12 @@ impl Repo {
     pub async fn add_used_bytes(&self, id: i64, delta: i64) -> Result<()> {
         self.db
             .execute(
-                "UPDATE users SET used_bytes = MAX(used_bytes + ?, 0) WHERE id = ?",
+                // 两参数的 MAX 只有 MySQL / SQLite 认，PostgreSQL 要用 GREATEST
+                &self.db.sql_v(
+                    "UPDATE users SET used_bytes = GREATEST(used_bytes + ?, 0) WHERE id = ?",
+                    "UPDATE users SET used_bytes = GREATEST(used_bytes + ?, 0) WHERE id = ?",
+                    "UPDATE users SET used_bytes = MAX(used_bytes + ?, 0) WHERE id = ?",
+                ),
                 Args::new().int(delta).int(id),
             )
             .await?;
@@ -480,7 +485,10 @@ impl Repo {
             Some(id) => {
                 self.db
                     .count(
-                        "SELECT COALESCE(SUM(quota_bytes), 0) AS total FROM users WHERE id <> ?",
+                        &format!(
+                            "SELECT {} AS total FROM users WHERE id <> ?",
+                            self.db.dialect().sum_i64("quota_bytes")
+                        ),
                         Args::new().int(id),
                     )
                     .await
@@ -488,7 +496,10 @@ impl Repo {
             None => {
                 self.db
                     .count(
-                        "SELECT COALESCE(SUM(quota_bytes), 0) AS total FROM users",
+                        &format!(
+                            "SELECT {} AS total FROM users",
+                            self.db.dialect().sum_i64("quota_bytes")
+                        ),
                         Args::new(),
                     )
                     .await
@@ -499,7 +510,10 @@ impl Repo {
     pub async fn sum_used_bytes(&self) -> Result<i64> {
         self.db
             .count(
-                "SELECT COALESCE(SUM(used_bytes), 0) AS total FROM users",
+                &format!(
+                    "SELECT {} AS total FROM users",
+                    self.db.dialect().sum_i64("used_bytes")
+                ),
                 Args::new(),
             )
             .await

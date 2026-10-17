@@ -278,7 +278,7 @@ impl Repo {
         if let Some(old_thumb_id) = old_thumb_id.filter(|old| *old != new_thumb_id) {
             let dec_ref = self.db.sql_v(
                 "UPDATE blobs SET ref_count = GREATEST(ref_count - 1, 0) WHERE id = ?",
-                "UPDATE blobs SET ref_count = MAX(ref_count - 1, 0) WHERE id = ?",
+                "UPDATE blobs SET ref_count = GREATEST(ref_count - 1, 0) WHERE id = ?",
                 "UPDATE blobs SET ref_count = MAX(ref_count - 1, 0) WHERE id = ?",
             );
             sqlx::query(&dec_ref)
@@ -596,7 +596,7 @@ impl Repo {
 
     /// 在事务里把账号的已用额度减掉 `bytes`（不足则归零）。
     ///
-    /// `MAX(a, b)` 两个参数的写法只有 MySQL 与 SQLite 认，PostgreSQL 要
+    /// `MAX(a, b)` 两个参数的写法只有 SQLite 认，PostgreSQL 与 MySQL 都要
     /// `GREATEST`，所以这类「减到 0 为止」的语句统一按方言出。
     async fn subtract_used_bytes(
         &self,
@@ -606,7 +606,7 @@ impl Repo {
     ) -> Result<()> {
         let sql = self.db.sql_v(
             "UPDATE users SET used_bytes = GREATEST(used_bytes - ?, 0) WHERE id = ?",
-            "UPDATE users SET used_bytes = MAX(used_bytes - ?, 0) WHERE id = ?",
+            "UPDATE users SET used_bytes = GREATEST(used_bytes - ?, 0) WHERE id = ?",
             "UPDATE users SET used_bytes = MAX(used_bytes - ?, 0) WHERE id = ?",
         );
         sqlx::query(&sql)
@@ -671,12 +671,15 @@ impl Repo {
         let rows = self
             .db
             .fetch_all(
-                "SELECT owner_id, SUM(size) AS bytes FROM ( \
-                   SELECT i.owner_id AS owner_id, b.size AS size FROM images i \
-                   JOIN blobs b ON b.id = i.blob_id \
-                   WHERE (i.blob_id = ? OR i.thumb_blob_id = ?) AND i.deleted_at IS NOT NULL \
-                     AND i.deleted_at < ? \
-                 ) AS gone GROUP BY owner_id",
+                &format!(
+                    "SELECT owner_id, {} AS bytes FROM ( \
+                       SELECT i.owner_id AS owner_id, b.size AS size FROM images i \
+                       JOIN blobs b ON b.id = i.blob_id \
+                       WHERE (i.blob_id = ? OR i.thumb_blob_id = ?) AND i.deleted_at IS NOT NULL \
+                         AND i.deleted_at < ? \
+                     ) AS gone GROUP BY owner_id",
+                    self.db.dialect().sum_i64("size")
+                ),
                 Args::new().int(blob_id).int(blob_id).text(ts(cutoff)),
             )
             .await?;
@@ -902,10 +905,13 @@ impl Repo {
         let rows = self
             .db
             .fetch_all(
-                "SELECT i.album_id AS album_id, COUNT(*) AS files, COALESCE(SUM(b.size), 0) AS bytes \
-                   FROM images i JOIN blobs b ON b.id = i.blob_id \
-                  WHERE i.owner_id = ? AND i.deleted_at IS NULL \
-                  GROUP BY i.album_id",
+                &format!(
+                    "SELECT i.album_id AS album_id, COUNT(*) AS files, {} AS bytes \
+                       FROM images i JOIN blobs b ON b.id = i.blob_id \
+                      WHERE i.owner_id = ? AND i.deleted_at IS NULL \
+                      GROUP BY i.album_id",
+                    self.db.dialect().sum_i64("b.size")
+                ),
                 Args::new().int(owner_id),
             )
             .await?;
@@ -1046,14 +1052,16 @@ impl Repo {
                 ),
         )
         .bind(&stamp)
-        .bind(deletion.by_album)
+        // 列是 BIGINT（0/1）：直接绑 bool 在 PostgreSQL 上会报
+        // 「column deleted_by_album is of type bigint but expression is of type boolean」
+        .bind(i64::from(deletion.by_album))
         .bind(deletion.image_id)
         .execute(&mut *tx)
         .await?;
 
         let dec_ref = self.db.sql_v(
             "UPDATE blobs SET ref_count = GREATEST(ref_count - 1, 0) WHERE id = ?",
-            "UPDATE blobs SET ref_count = MAX(ref_count - 1, 0) WHERE id = ?",
+            "UPDATE blobs SET ref_count = GREATEST(ref_count - 1, 0) WHERE id = ?",
             "UPDATE blobs SET ref_count = MAX(ref_count - 1, 0) WHERE id = ?",
         );
         sqlx::query(&dec_ref)
@@ -1071,7 +1079,11 @@ impl Repo {
             sqlx::query(
                 &self
                     .db
-                    .sql("UPDATE albums SET image_count = MAX(image_count - 1, 0), updated_at = ? WHERE id = ?"),
+                    .sql_v(
+                        "UPDATE albums SET image_count = GREATEST(image_count - 1, 0), updated_at = ? WHERE id = ?",
+                        "UPDATE albums SET image_count = GREATEST(image_count - 1, 0), updated_at = ? WHERE id = ?",
+                        "UPDATE albums SET image_count = MAX(image_count - 1, 0), updated_at = ? WHERE id = ?",
+                    ),
             )
             .bind(&stamp)
             .bind(album_id)
@@ -1191,7 +1203,9 @@ impl Repo {
             }
             if let Some(old) = old_album {
                 sqlx::query(
-                    &self.db.sql(
+                    &self.db.sql_v(
+                        "UPDATE albums SET image_count = GREATEST(image_count - 1, 0), updated_at = ? WHERE id = ?",
+                        "UPDATE albums SET image_count = GREATEST(image_count - 1, 0), updated_at = ? WHERE id = ?",
                         "UPDATE albums SET image_count = MAX(image_count - 1, 0), updated_at = ? WHERE id = ?",
                     ),
                 )
@@ -1525,9 +1539,12 @@ impl Repo {
         let row = self
             .db
             .fetch_optional(
-                "SELECT COUNT(*) AS files, COALESCE(SUM(b.size), 0) AS bytes \
-                   FROM images i JOIN blobs b ON b.id = i.blob_id \
-                  WHERE i.album_id = ? AND i.deleted_at IS NOT NULL",
+                &format!(
+                    "SELECT COUNT(*) AS files, {} AS bytes \
+                       FROM images i JOIN blobs b ON b.id = i.blob_id \
+                      WHERE i.album_id = ? AND i.deleted_at IS NOT NULL",
+                    self.db.dialect().sum_i64("b.size")
+                ),
                 Args::new().int(album_id),
             )
             .await?;

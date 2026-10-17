@@ -28,6 +28,47 @@ bad() {
   printf '  FAIL %s\n     %s\n' "$1" "$2"
 }
 
+# 冒烟要直查库（发件箱、验证码、模板、账号历史）。默认按 CI 的 SQLite 布局读
+# target/smoke/pixora.db；跑在 PostgreSQL / MySQL 上时用 SMOKE_DB_CLIENT 给一条
+# 「从 stdin 读 SQL、按制表符输出」的命令，比如：
+#   SMOKE_DB_CLIENT='psql postgres://user:pass@127.0.0.1/db -tA'
+#   SMOKE_DB_CLIENT='mysql --batch --skip-column-names --default-character-set=utf8mb4 -h127.0.0.1 -uroot db'
+db_scalar() {
+  if [ -n "${SMOKE_DB_CLIENT:-}" ]; then
+    printf '%s\n' "$1" | $SMOKE_DB_CLIENT 2>/dev/null | head -1
+  else
+    python - "$DIR/pixora.db" "$1" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute(sys.argv[2]).fetchone()
+print("" if row is None else ("" if row[0] is None else row[0]))
+PY
+  fi
+}
+
+# 直接往库里写一行。换绑邮箱、邮箱验证码登录这类流程，码在真实场景里由邮件
+# 送达，冒烟没法收信，只能自己落一条。
+db_exec() {
+  if [ -n "${SMOKE_DB_CLIENT:-}" ]; then
+    printf '%s\n' "$1" | $SMOKE_DB_CLIENT > /dev/null 2>&1
+  else
+    python - "$DIR/pixora.db" "$1" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(sys.argv[2])
+conn.commit()
+PY
+  fi
+}
+
+db_now_stamp() {
+  python -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')+'Z')"
+}
+
+db_future_stamp() {
+  python -c "import datetime,sys;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(minutes=int(sys.argv[1]))).strftime('%Y-%m-%dT%H:%M:%S.%f')+'Z')" "$1"
+}
+
 # $1 描述 $2 期望子串 $3 实际输出
 expect() {
   case "$3" in
@@ -605,15 +646,7 @@ expect "管理员代发重置邮件：接口可用" '"ok":true' "$out"
 expect "如实报告没投出去" '"delivered":false' "$out"
 expect "说明卡在哪一步" '发件箱' "$out"
 
-MAIL_VARS=$(python - "$DIR/pixora.db" <<'PY'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-row = conn.execute(
-    "SELECT vars FROM mail_outbox WHERE template_name = 'reset_password' ORDER BY id DESC LIMIT 1"
-).fetchone()
-print(row[0] if row else "")
-PY
-)
+MAIL_VARS=$(db_scalar "SELECT vars FROM mail_outbox WHERE template_name = 'reset_password' ORDER BY id DESC LIMIT 1")
 expect "发件箱里那封带重置链接" 'reset-password?token=' "$MAIL_VARS"
 expect "链接用的是随机令牌" 'pxr_' "$MAIL_VARS"
 case "$MAIL_VARS" in
@@ -643,15 +676,7 @@ expect "同一个令牌用第二次被拒" '已经用过' "$out"
 
 out=$(req POST "/admin/users/$USER_ID/password-reset-mail")
 expect "再发一封用作验证码那条路" '"ok":true' "$out"
-MAIL_VARS=$(python - "$DIR/pixora.db" <<'PY'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-row = conn.execute(
-    "SELECT vars FROM mail_outbox WHERE template_name = 'reset_password' ORDER BY id DESC LIMIT 1"
-).fetchone()
-print(row[0] if row else "")
-PY
-)
+MAIL_VARS=$(db_scalar "SELECT vars FROM mail_outbox WHERE template_name = 'reset_password' ORDER BY id DESC LIMIT 1")
 RESET_CODE=$(printf '%s' "$MAIL_VARS" | python -c "
 import json,sys
 print(json.loads(sys.stdin.readline() or '{}').get('code',''))
@@ -693,15 +718,7 @@ expect "剩余数量与刚发的一组对得上" '"remaining":8' "$out"
 out=$(req POST /me/totp '{"action":"send_disable_code"}')
 expect "要邮箱验证码时邮件发不出去，如实报错" '发信服务（SMTP）尚未配置' "$out"
 # 发不出去就不该留一个用户永远收不到的验证码：库里不该多出待用的那条
-PENDING=$(python - "$DIR/pixora.db" <<'PY'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-row = conn.execute(
-    "SELECT COUNT(*) FROM email_verifications WHERE purpose = 'totp_disable' AND consumed_at IS NULL"
-).fetchone()
-print(row[0] if row else 0)
-PY
-)
+PENDING=$(db_scalar "SELECT COUNT(*) FROM email_verifications WHERE purpose = 'totp_disable' AND consumed_at IS NULL")
 [ "$PENDING" = "0" ] && ok "邮件没发出去时不留验证码" || bad "发不出去就不该留码" "pending=$PENDING"
 out=$(req POST /me/totp '{"action":"disable","code":"000000"}')
 expect "错的码带着「验证器丢了」的提示" '验证器不可用' "$out"
@@ -714,15 +731,7 @@ say "管理员直接设密码：发信告知 + 下次登录强制改"
 out=$(req PATCH "/admin/users/$USER_ID" '{"password":"AdminSet-2026x"}')
 expect "设密码成功" '"email"' "$out"
 expect "响应里带上邮件投递结果" '"mail":' "$out"
-MAIL_VARS=$(python - "$DIR/pixora.db" <<'PY'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-row = conn.execute(
-    "SELECT vars FROM mail_outbox WHERE template_name = 'password_set_by_admin' ORDER BY id DESC LIMIT 1"
-).fetchone()
-print(row[0] if row else "")
-PY
-)
+MAIL_VARS=$(db_scalar "SELECT vars FROM mail_outbox WHERE template_name = 'password_set_by_admin' ORDER BY id DESC LIMIT 1")
 expect "邮件里写着新密码" 'AdminSet-2026x' "$MAIL_VARS"
 
 out=$(req POST "/admin/users/$USER_ID/impersonate" '{}')
@@ -748,27 +757,11 @@ expect "带上内置文案（恢复默认用）" 'builtin_subject' "$out"
 out=$(req PUT /admin/mail/templates/verify_code '{"subject":"Smoke Verify Code","body":"Your code is {{code}}."}')
 expect "改一版" '"customized":true' "$out"
 expect "回读到新文案" 'Smoke Verify Code' "$out"
-STORED=$(python - "$DIR/pixora.db" <<'PY'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-row = conn.execute(
-    "SELECT COUNT(*) FROM email_templates WHERE name = 'verify_code' AND subject = 'Smoke Verify Code'"
-).fetchone()
-print(row[0] if row else 0)
-PY
-)
+STORED=$(db_scalar "SELECT COUNT(*) FROM email_templates WHERE name = 'verify_code' AND subject = 'Smoke Verify Code'")
 [ "$STORED" = "1" ] && ok "改过的模板已经落库" || bad "模板该存进库" "rows=$STORED"
 # 发一封走这个模板的信：发件箱里那封的主题应当是刚改的那份
 out=$(req POST /me/totp '{"action":"send_disable_code"}')
-SENT_SUBJECT=$(python - "$DIR/pixora.db" <<'PY'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-row = conn.execute(
-    "SELECT subject FROM email_templates WHERE name = 'verify_code'"
-).fetchone()
-print(row[0] if row else "")
-PY
-)
+SENT_SUBJECT=$(db_scalar "SELECT subject FROM email_templates WHERE name = 'verify_code'")
 [ "$SENT_SUBJECT" = "Smoke Verify Code" ] && ok "发信时用的就是改过的模板"   || bad "该用改过的模板发信" "subject=$SENT_SUBJECT"
 out=$(req PUT /admin/mail/templates/verify_code '{"subject":"subject","body":"{{emial}}"}')
 expect "拼错的占位符被拒" 'emial' "$out"
@@ -813,18 +806,8 @@ out=$(curl -s -X POST "$BASE/auth/login/email-code" -H 'Content-Type: applicatio
 expect "不存在的邮箱答话完全相同" '尚未配置' "$out"
 
 # 邮件发不出去，那就直接把一条验证码塞进库：验「邮箱验证码能登录」这条路
-python - "$DIR/pixora.db" <<'PY'
-import hashlib, sqlite3, sys, datetime
-conn = sqlite3.connect(sys.argv[1])
-now = datetime.datetime.now(datetime.timezone.utc)
-stamp = lambda at: at.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
-conn.execute(
-    "INSERT INTO email_verifications (email, code_hash, purpose, expires_at, consumed_at, attempts, request_ip, created_at) "
-    "VALUES (?, ?, 'login_code', ?, NULL, 0, NULL, ?)",
-    ("admin@pixora.test", hashlib.sha256(b"424242").hexdigest(), stamp(now + datetime.timedelta(minutes=10)), stamp(now)),
-)
-conn.commit()
-PY
+db_exec "INSERT INTO email_verifications (email, code_hash, purpose, expires_at, consumed_at, attempts, request_ip, created_at) \
+VALUES ('admin@pixora.test', '$(python -c "import hashlib;print(hashlib.sha256(b'424242').hexdigest())")', 'login_code', '$(db_future_stamp 10)', NULL, 0, NULL, '$(db_now_stamp)')"
 out=$(curl -s -X POST "$BASE/auth/login" -H 'Content-Type: application/json' -d '{"email":"admin@pixora.test","password":"Smoke-Test-2026x","code_method":"email","totp":"424242"}')
 expect "用邮箱验证码登录成功" 'admin@pixora.test' "$out"
 out=$(curl -s -X POST "$BASE/auth/login" -H 'Content-Type: application/json' -d '{"email":"admin@pixora.test","password":"Smoke-Test-2026x","code_method":"totp","totp":"424242"}')
@@ -887,16 +870,7 @@ expect "未登录也能传上去" '"url"' "$out"
 GUEST_IMAGE=$(printf '%s' "$out" | jq_get "['id']")
 expect "去重标记与登录用户一致" '"dedup"' "$out"
 # 归属与来源：图片挂在访客账号下，IP 与终端都记下了
-GUEST_ROW=$(python - "$DIR/pixora.db" "$GUEST_IMAGE" <<'PY'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-row = conn.execute(
-    "SELECT u.uid, u.email, i.upload_ip, i.upload_agent FROM images i        JOIN users u ON u.id = i.owner_id WHERE i.id = ?",
-    (int(sys.argv[2]),),
-).fetchone()
-print("|".join("" if v is None else str(v) for v in row) if row else "")
-PY
-)
+GUEST_ROW="$(db_scalar "SELECT u.uid FROM images i JOIN users u ON u.id = i.owner_id WHERE i.id = $GUEST_IMAGE")|$(db_scalar "SELECT u.email FROM images i JOIN users u ON u.id = i.owner_id WHERE i.id = $GUEST_IMAGE")|$(db_scalar "SELECT COALESCE(i.upload_ip, '') FROM images i WHERE i.id = $GUEST_IMAGE")|$(db_scalar "SELECT COALESCE(i.upload_agent, '') FROM images i WHERE i.id = $GUEST_IMAGE")"
 case "$GUEST_ROW" in
   0000*SmokeGuest/1.0) ok "挂在访客账号下，IP 与终端都记下了（$GUEST_ROW）" ;;
   *) bad "该挂到访客账号并记录来源" "$GUEST_ROW" ;;
@@ -1097,14 +1071,7 @@ out=$(req PATCH /me "{\"avatar\":\"$AVATAR_DIRECT\"}")
 expect "设为头像（站内直链折成相对路径）" '"avatar":"/images/' "$out"
 out=$(req PATCH /me '{"avatar":"https://example.com/me.png"}')
 expect "换成外链头像" 'https://example.com/me.png' "$out"
-AVATAR_ROWS=$(python - "$DIR/pixora.db" <<'PY'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-print(conn.execute(
-    "SELECT COUNT(*) FROM images WHERE original_name = 'avatar-clean.png' AND deleted_at IS NULL"
-).fetchone()[0])
-PY
-)
+AVATAR_ROWS=$(db_scalar "SELECT COUNT(*) FROM images WHERE original_name = 'avatar-clean.png' AND deleted_at IS NULL")
 [ "$AVATAR_ROWS" = "0" ] && ok "本地那张已从图库消失" || bad "该被清掉" "rows=$AVATAR_ROWS"
 files_after=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
 [ "$files_after" -lt "$files_after_upload" ]   && ok "没有别的引用，物理文件也收了（$files_after_upload → $files_after）"   || bad "无引用时该连文件一起删" "upload=$files_after_upload after=$files_after"
@@ -1121,15 +1088,7 @@ expect "设为头像" '"avatar":"/images/' "$out"
 files_before_shared=$(find "$DIR/blobs" -type f 2>/dev/null | wc -l)
 out=$(req PATCH /me '{"avatar":"https://example.com/me2.png"}')
 expect "再换成外链头像" 'https://example.com/me2.png' "$out"
-SHARED_ROWS=$(python - "$DIR/pixora.db" <<'PY'
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-rows = dict(conn.execute(
-    "SELECT original_name, COUNT(*) FROM images WHERE original_name LIKE 'avatar-shared%' AND deleted_at IS NULL GROUP BY original_name"
-))
-print(f"{rows.get('avatar-shared.png', 0)}|{rows.get('avatar-shared-tag.png', 0)}")
-PY
-)
+SHARED_ROWS="$(db_scalar "SELECT COUNT(*) FROM images WHERE original_name = 'avatar-shared.png' AND deleted_at IS NULL")|$(db_scalar "SELECT COUNT(*) FROM images WHERE original_name = 'avatar-shared-tag.png' AND deleted_at IS NULL")"
 case "$SHARED_ROWS" in
   "1|0") ok "只删了头像那条引用，相册里那份还在（$SHARED_ROWS）" ;;
   *) bad "该只删头像那条" "相册那份|头像那份 = $SHARED_ROWS" ;;
@@ -1142,17 +1101,8 @@ say "换绑邮箱与账号历史"
 out=$(req POST /me/email/code '{"email":"admin-new@pixora.test","password":"Smoke-Test-2026x"}')
 expect "SMTP 没配时换绑发码如实报错" '发信服务（SMTP）尚未配置' "$out"
 # 码在真实流程里由邮件送达；这里直接落一条，走完第二步
-python - "$DIR/pixora.db" <<'PY'
-import datetime, hashlib, sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-stamp = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-conn.execute(
-    "INSERT INTO email_verifications (email, code_hash, purpose, expires_at, consumed_at, attempts, request_ip, created_at) "
-    "VALUES (?, ?, 'change_email', ?, NULL, 0, '127.0.0.1', ?)",
-    ("admin-new@pixora.test", hashlib.sha256(b"135790").hexdigest(), stamp, stamp),
-)
-conn.commit()
-PY
+db_exec "INSERT INTO email_verifications (email, code_hash, purpose, expires_at, consumed_at, attempts, request_ip, created_at) \
+VALUES ('admin-new@pixora.test', '$(python -c "import hashlib;print(hashlib.sha256(b'135790').hexdigest())")', 'change_email', '$(db_future_stamp 10)', NULL, 0, '127.0.0.1', '$(db_now_stamp)')"
 out=$(req POST /me/email '{"email":"admin-new@pixora.test","code":"135790"}')
 expect "带上验证码换绑成功" '"email":"admin-new@pixora.test"' "$out"
 expect "通知没发出去时如实说" '"delivered":false' "$out"

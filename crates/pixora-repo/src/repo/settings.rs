@@ -134,7 +134,7 @@ impl Repo {
         let sql = self.db.sql_v(
             "INSERT INTO storage_objects (key, content, size, updated_at) VALUES (?, ?, ?, ?) \
              ON CONFLICT (key) DO UPDATE SET content = ?, size = ?, updated_at = ?",
-            "INSERT INTO storage_objects (key, content, size, updated_at) VALUES (?, ?, ?, ?) \
+            "INSERT INTO storage_objects (`key`, content, size, updated_at) VALUES (?, ?, ?, ?) \
              ON DUPLICATE KEY UPDATE content = VALUES(content), size = VALUES(size), \
                                      updated_at = VALUES(updated_at)",
             "INSERT INTO storage_objects (key, content, size, updated_at) VALUES (?, ?, ?, ?) \
@@ -166,7 +166,11 @@ impl Repo {
         let row = self
             .db
             .fetch_optional(
-                "SELECT content, updated_at FROM storage_objects WHERE key = ?",
+                &self.db.sql_v(
+                    "SELECT content, updated_at FROM storage_objects WHERE key = ?",
+                    "SELECT content, updated_at FROM storage_objects WHERE `key` = ?",
+                    "SELECT content, updated_at FROM storage_objects WHERE key = ?",
+                ),
                 Args::new().text(key),
             )
             .await?;
@@ -184,7 +188,11 @@ impl Repo {
         let row = self
             .db
             .fetch_optional(
-                "SELECT updated_at FROM storage_objects WHERE key = ?",
+                &self.db.sql_v(
+                    "SELECT updated_at FROM storage_objects WHERE key = ?",
+                    "SELECT updated_at FROM storage_objects WHERE `key` = ?",
+                    "SELECT updated_at FROM storage_objects WHERE key = ?",
+                ),
                 Args::new().text(key),
             )
             .await?;
@@ -194,7 +202,11 @@ impl Repo {
     pub async fn delete_asset(&self, key: &str) -> Result<u64> {
         self.db
             .execute(
-                "DELETE FROM storage_objects WHERE key = ?",
+                &self.db.sql_v(
+                    "DELETE FROM storage_objects WHERE key = ?",
+                    "DELETE FROM storage_objects WHERE `key` = ?",
+                    "DELETE FROM storage_objects WHERE key = ?",
+                ),
                 Args::new().text(key),
             )
             .await
