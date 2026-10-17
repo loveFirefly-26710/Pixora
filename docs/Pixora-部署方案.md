@@ -109,35 +109,55 @@ PIXORA_BASE_URL=https://img.example.com
 
 ## 4. 方案 A：纯 Docker
 
-### 4.1 准备目录与 `.env`
+一个文件跑完整站：下面每份 `docker-compose.yml` 里写着应用、数据库（SQLite 版没有单独的数据库服务）和自动 https 的反向代理。Caddy 的配置内嵌在文件末尾，**没有 `.env`、没有单独的 Caddyfile、也不用先建目录**——Docker 会自己建 `./data`。
+
+三步：
+
+1. 把整段 YAML 存成 `docker-compose.yml`；
+2. 改文件里标着「必改」的几处（见 4.1）；
+3. `docker compose up -d`。
+
+需要 Docker Compose 2.23 以上（用了 `configs.content` 内嵌 Caddy 配置）。版本这么查：
 
 ```bash
-mkdir -p pixora && cd pixora
-mkdir -p data
-
-cat > .env <<'EOF'
-# 域名；Caddy 用它申请 https 证书
-PIXORA_DOMAIN=img.example.com
-# 站点对外地址，与上一行保持一致
-PIXORA_BASE_URL=https://img.example.com
-# 数据库密码（只有选 PostgreSQL / MySQL 时才用到）
-DB_PASSWORD=<数据库密码>
-# 主密钥：第 2.2 节生成的 64 位十六进制
-PIXORA_MASTER_KEY=<你生成的主密钥>
-EOF
-
-chmod 600 .env   # 里面有密钥，别让同机其他用户读
+docker compose version
 ```
+
+### 4.1 要改的就这几处
+
+| 占位符 | 换成 | 在哪 |
+|---|---|---|
+| `img.example.com` | 你的域名 | `PIXORA_DOMAIN`，Caddy 用它申请证书 |
+| `https://img.example.com` | 站点对外地址，和域名一致 | `PIXORA_BASE_URL` |
+| `REPLACE_WITH_openssl_rand_hex_32` | `openssl rand -hex 32` 的输出 | `PIXORA_MASTER_KEY` |
+| `REPLACE_WITH_A_STRONG_PASSWORD` | 一个强密码 | 只有 PostgreSQL / MySQL 版有，出现 2～3 处，改成同一个值 |
+
+主密钥那个占位符故意不是合法的密钥格式：忘了改，应用启动时直接报错，不会拿占位文字当密钥用。
 
 ### 4.2 A1：SQLite 版（推荐）
 
-整个栈两个容器：应用 + Caddy，没有数据库容器。
-
-`docker-compose.yml`（完整）：
+应用 + Caddy 两个容器，数据就是一个 SQLite 文件。
 
 ```yaml
+# Pixora 单机部署 —— 一个文件跑完整站（应用 + 自动 https 的反向代理）。
+#
+# 用法三步：
+#   1. 把这份文件存成 docker-compose.yml
+#   2. 改下面标着「必改」的三处：域名、站点地址、主密钥
+#   3. docker compose up -d
+#
+# 数据落在同目录的 ./data（Docker 会自动建），备份就是备份这个目录。
+# 没有域名：删掉 caddy 服务与文件末尾的 configs，给 pixora 加 ports: ["8080:8080"]，
+# PIXORA_BASE_URL 写 http://服务器IP:8080。
+#
+# 需要 Docker Compose 2.23 以上（用 configs.content 内嵌了 Caddy 配置）：
+#   docker compose version
+#
+# 想从源码构建镜像，见 README 的「从源码构建」一节。
+
 services:
   pixora:
+    # 换成你自己的用户名（fork 过的话）；没发过版的仓库只有 :edge
     image: ghcr.io/lovefirefly-26710/pixora:latest
     restart: unless-stopped
     environment:
@@ -145,8 +165,11 @@ services:
       PIXORA_DB_DSN: /data/pixora.db
       PIXORA_DATA_DIR: /data
       PIXORA_BIND: 0.0.0.0:8080
-      PIXORA_BASE_URL: ${PIXORA_BASE_URL:?在 .env 里填站点对外地址}
-      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?在 .env 里填 PIXORA_MASTER_KEY}
+      # 必改：站点对外地址。直链、邮件里的链接都按它拼，写错的表现是「页面能开、图全裂」
+      PIXORA_BASE_URL: https://img.example.com
+      # 必改：openssl rand -hex 32 的输出。留着这串占位符会启动失败（故意的）
+      PIXORA_MASTER_KEY: REPLACE_WITH_openssl_rand_hex_32
+      # 前面有反向代理时保持 1：只信最靠近服务端的一层转发头
       PIXORA_TRUST_PROXY: "1"
       PIXORA_WORKERS: "2"
       RUST_LOG: info
@@ -169,77 +192,83 @@ services:
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     environment:
-      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?在 .env 里填域名}
-      ACME_EMAIL: ${ACME_EMAIL:-}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./data:/srv/data:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      # 必改：你的域名，Caddy 用它申请证书
+      PIXORA_DOMAIN: img.example.com
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
     depends_on:
       - pixora
     deploy:
       resources:
         limits: { memory: 48M }
 
-volumes:
-  caddy_data:
-  caddy_config:
+# Caddy 的配置就写在这里，不用另外放一个 Caddyfile
+configs:
+  caddyfile:
+    content: |
+      {$PIXORA_DOMAIN} {
+          encode zstd gzip
+          # 上传体积上限，与应用侧的上限保持一致
+          request_body {
+              max_size 64MB
+          }
+          reverse_proxy pixora:8080
+          header {
+              Strict-Transport-Security "max-age=31536000; includeSubDomains"
+              X-Frame-Options "SAMEORIGIN"
+              X-Content-Type-Options "nosniff"
+              Referrer-Policy "strict-origin-when-cross-origin"
+              -Server
+          }
+      }
 ```
 
-`Caddyfile`（两行就够，证书自动申请）：
-
-```
-{$PIXORA_DOMAIN} {
-	reverse_proxy pixora:8080
-}
-```
-
-仓库里的 `deploy/Caddyfile` 是完整版：上传体积上限 64MB、静态资源缓存头、安全响应头都配好了，建议直接用它替换上面这两行。
-
-启动：
+启动与验证：
 
 ```bash
 docker compose up -d
-docker compose ps                 # 两个服务都应是 running / healthy
-docker compose logs -f pixora     # 跟日志，Ctrl+C 退出不影响容器
+docker compose ps                              # 两个服务都应是 running / healthy
+docker compose logs -f pixora                  # 看到「Pixora 已启动」按 Ctrl+C
+
+# 证书批下来之前，直接问应用本身
+docker compose exec pixora /pixora --health-probe && echo ok
+# 证书就绪之后
+curl -s https://img.example.com/healthz        # {"db":"ok","status":"ok",...}
 ```
 
-日志里会有一行摘要，把关键事实都列出来：
+然后浏览器打开 `https://img.example.com`，走安装向导（第 7 节）。
 
-```
-Pixora 已启动 version="0.1.0" listen=0.0.0.0:8080 data_dir=/data db="sqlite"
-  storage_default=local master_key=环境变量 PIXORA_MASTER_KEY web=已嵌入二进制
-```
-
-在服务器本机验证：
-
-```bash
-curl -s http://127.0.0.1:8080/healthz      # 期望 {"db":"ok","status":"ok",...}
-```
-
-然后浏览器打开 `https://img.example.com`，会跳到安装向导（第 7 节）。
-
-> 镜像标签：发过版的版本号才有 `:0.1.0`、`:latest`；主干最新构建是 `:edge`。想固定版本就写 `:0.1.0`，想跟着主干就写 `:edge`。如果你 fork 后自己发镜像，把 `lovefirefly-26710` 换成自己的用户名。
+> 镜像标签：发过版的版本号才有 `:0.1.0`、`:latest`；主干最新构建是 `:edge`。fork 过仓库就把 `lovefirefly-26710` 换成自己的用户名。
 
 ### 4.3 A2：PostgreSQL 版
 
-> ⚠ 先看第 9 节：PostgreSQL 的迁移能跑通，但运行时还差一层类型适配，接口会报 `NUMERIC` 解码错误。这一节保留完整配置，修好之后可以直接用。
-
-比 SQLite 版多一个数据库容器，数据落在 `./pgdata`。`docker-compose.yml`：
+> ⚠ 先看第 9 节：PostgreSQL 的迁移能跑通，运行期还差一层类型适配，接口会报 `NUMERIC` 解码错误。配置先留着，修好之后可以直接用。
 
 ```yaml
+# Pixora 单机部署 —— PostgreSQL 版（一个文件跑完整站）。
+#
+# ⚠ 状态说明（2026-10）：迁移能建完，运行期还差 sqlx Any 的类型映射
+#   （SUM 在 PG 返回 NUMERIC）。当前版本请用 SQLite 版，见
+#   docs/Pixora-部署方案.md 的「数据库支持现状」。
+#
+# 用法三步：存成 docker-compose.yml → 改三处「必改」与数据库密码 → docker compose up -d
+# 数据库密码在文件里出现 2 处（DSN 与 POSTGRES_PASSWORD），改成同一个值。
+#
+# 需要 Docker Compose 2.23 以上（configs.content 内嵌了 Caddy 配置）。
+
 services:
   pixora:
     image: ghcr.io/lovefirefly-26710/pixora:latest
     restart: unless-stopped
     environment:
       PIXORA_DB_DRIVER: postgres
-      PIXORA_DB_DSN: postgres://pixora:${DB_PASSWORD}@db:5432/pixora
+      # 必改：密码两处一起改（这一行与下面 db 服务的 POSTGRES_PASSWORD）
+      PIXORA_DB_DSN: postgres://pixora:REPLACE_WITH_A_STRONG_PASSWORD@db:5432/pixora
       PIXORA_DATA_DIR: /data
       PIXORA_BIND: 0.0.0.0:8080
-      PIXORA_BASE_URL: ${PIXORA_BASE_URL:?在 .env 里填站点对外地址}
-      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?在 .env 里填 PIXORA_MASTER_KEY}
+      PIXORA_BASE_URL: https://img.example.com
+      PIXORA_MASTER_KEY: REPLACE_WITH_openssl_rand_hex_32
       PIXORA_TRUST_PROXY: "1"
       PIXORA_WORKERS: "2"
       RUST_LOG: info
@@ -269,7 +298,8 @@ services:
     environment:
       POSTGRES_DB: pixora
       POSTGRES_USER: pixora
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?在 .env 里填 DB_PASSWORD}
+      # 必改：与上面 DSN 里的密码保持一致
+      POSTGRES_PASSWORD: REPLACE_WITH_A_STRONG_PASSWORD
     volumes:
       - ./pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -286,52 +316,67 @@ services:
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     environment:
-      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?在 .env 里填域名}
-      ACME_EMAIL: ${ACME_EMAIL:-}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./data:/srv/data:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      PIXORA_DOMAIN: img.example.com
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
     depends_on:
       - pixora
     deploy:
       resources:
         limits: { memory: 48M }
 
-volumes:
-  caddy_data:
-  caddy_config:
+configs:
+  caddyfile:
+    content: |
+      {$PIXORA_DOMAIN} {
+          encode zstd gzip
+          request_body {
+              max_size 64MB
+          }
+          reverse_proxy pixora:8080
+          header {
+              Strict-Transport-Security "max-age=31536000; includeSubDomains"
+              X-Frame-Options "SAMEORIGIN"
+              X-Content-Type-Options "nosniff"
+              Referrer-Policy "strict-origin-when-cross-origin"
+              -Server
+          }
+      }
 ```
 
-多出来的操作只有一步：
-
-```bash
-mkdir -p pgdata
-docker compose up -d
-```
-
-备份用 `pg_dump`（第 4.7 节）。
+启动同 4.2，第一次会先初始化数据库，多等十几秒。备份用 `pg_dump`，见 4.7。
 
 ### 4.4 A3：MySQL 版
 
-> ⚠ 同 4.3：迁移能跑通，运行时还差类型适配（MySQL 的 `TEXT` 被 sqlx 当成 BLOB、`TINYINT` 不被识别），见第 9 节。
-
-`docker-compose.yml` 里把 `db` 换成 MySQL：
+> ⚠ 同 4.3：迁移能跑通，运行期还差类型适配（MySQL 的 `TEXT` 被当成 BLOB、`TINYINT` 不识别），见第 9 节。
 
 ```yaml
+# Pixora 单机部署 —— MySQL 8.0.13+ / MariaDB 版（一个文件跑完整站）。
+#
+# ⚠ 状态说明（2026-10）：迁移能建完，运行期还差 sqlx Any 的类型映射
+#   （MySQL 的 TEXT 被当成 BLOB、TINYINT 不识别）。当前版本请用 SQLite 版，
+#   见 docs/Pixora-部署方案.md 的「数据库支持现状」。
+#
+# 用法三步：存成 docker-compose.yml → 改三处「必改」与数据库密码 → docker compose up -d
+# 数据库密码在文件里出现 3 处（DSN、MYSQL_PASSWORD、MYSQL_ROOT_PASSWORD），
+# 三处改成同一个值。
+#
+# 需要 Docker Compose 2.23 以上（configs.content 内嵌了 Caddy 配置）。
+
 services:
   pixora:
     image: ghcr.io/lovefirefly-26710/pixora:latest
     restart: unless-stopped
     environment:
       PIXORA_DB_DRIVER: mysql
-      # 云上 MySQL 通常要加 SSL 参数：末尾补 ?ssl-mode=REQUIRED
-      PIXORA_DB_DSN: mysql://pixora:${DB_PASSWORD}@db:3306/pixora
+      # 必改：密码三处一起改（这一行、MYSQL_PASSWORD、MYSQL_ROOT_PASSWORD）
+      # 云上 MySQL 通常还要加 SSL 参数：末尾补 ?ssl-mode=REQUIRED
+      PIXORA_DB_DSN: mysql://pixora:REPLACE_WITH_A_STRONG_PASSWORD@db:3306/pixora
       PIXORA_DATA_DIR: /data
       PIXORA_BIND: 0.0.0.0:8080
-      PIXORA_BASE_URL: ${PIXORA_BASE_URL:?在 .env 里填站点对外地址}
-      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?在 .env 里填 PIXORA_MASTER_KEY}
+      PIXORA_BASE_URL: https://img.example.com
+      PIXORA_MASTER_KEY: REPLACE_WITH_openssl_rand_hex_32
       PIXORA_TRUST_PROXY: "1"
       PIXORA_WORKERS: "2"
       RUST_LOG: info
@@ -355,6 +400,7 @@ services:
   db:
     image: mysql:8.4
     restart: unless-stopped
+    # 小机器上把 InnoDB 的缓冲池压到 64MB，默认值会吃掉几百兆
     command: >
       --innodb-buffer-pool-size=64M --innodb-log-buffer-size=8M
       --max-connections=50 --performance-schema=OFF
@@ -362,8 +408,9 @@ services:
     environment:
       MYSQL_DATABASE: pixora
       MYSQL_USER: pixora
-      MYSQL_PASSWORD: ${DB_PASSWORD:?在 .env 里填 DB_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?在 .env 里填 DB_PASSWORD}
+      # 必改：与上面 DSN 里的密码保持一致
+      MYSQL_PASSWORD: REPLACE_WITH_A_STRONG_PASSWORD
+      MYSQL_ROOT_PASSWORD: REPLACE_WITH_A_STRONG_PASSWORD
     volumes:
       - ./mysqldata:/var/lib/mysql
     healthcheck:
@@ -380,75 +427,81 @@ services:
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     environment:
-      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?在 .env 里填域名}
-      ACME_EMAIL: ${ACME_EMAIL:-}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./data:/srv/data:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      PIXORA_DOMAIN: img.example.com
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
     depends_on:
       - pixora
     deploy:
       resources:
         limits: { memory: 48M }
 
-volumes:
-  caddy_data:
-  caddy_config:
+configs:
+  caddyfile:
+    content: |
+      {$PIXORA_DOMAIN} {
+          encode zstd gzip
+          request_body {
+              max_size 64MB
+          }
+          reverse_proxy pixora:8080
+          header {
+              Strict-Transport-Security "max-age=31536000; includeSubDomains"
+              X-Frame-Options "SAMEORIGIN"
+              X-Content-Type-Options "nosniff"
+              Referrer-Policy "strict-origin-when-cross-origin"
+              -Server
+          }
+      }
 ```
 
-```bash
-mkdir -p mysqldata
-docker compose up -d
-```
-
-字符集固定 `utf8mb4`，否则中文标签、emoji 相册名插不进去。MySQL 比 PostgreSQL 重一些，同配置下多留 100MB 内存。MariaDB 的镜像与变量名不同（`mariadb:11` + `MARIADB_DATABASE` / `MARIADB_USER` / `MARIADB_PASSWORD` / `MARIADB_ROOT_PASSWORD`），迁移本身与 MySQL 共用一套，但当前版本同样受第 9 节的限制。
+字符集固定 `utf8mb4`，否则中文标签、emoji 相册名插不进去。MySQL 比 PostgreSQL 重一些，同配置下多留 100MB 内存。MariaDB 把镜像换成 `mariadb:11`、环境变量换成 `MARIADB_DATABASE` / `MARIADB_USER` / `MARIADB_PASSWORD` / `MARIADB_ROOT_PASSWORD`，迁移共用一套，但同样受第 9 节的限制。
 
 ### 4.5 A4：托管数据库
 
-把 `db` 服务整个删掉，连接串换成厂商给的那一串。**照抄，别自己拼**：
+不用自己维护数据库时，从 4.2 的 SQLite 版出发改两行，其它不动：
 
 ```yaml
-services:
-  pixora:
-    image: ghcr.io/lovefirefly-26710/pixora:latest
-    restart: unless-stopped
     environment:
-      PIXORA_DB_DRIVER: postgres          # 云上 MySQL 写 mysql
-      PIXORA_DB_DSN: ${PIXORA_DB_DSN:?在 .env 里填连接串}
-      PIXORA_DATA_DIR: /data
-      PIXORA_BIND: 0.0.0.0:8080
-      PIXORA_BASE_URL: ${PIXORA_BASE_URL:?在 .env 里填站点对外地址}
-      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?在 .env 里填 PIXORA_MASTER_KEY}
-      PIXORA_TRUST_PROXY: "1"
-      RUST_LOG: info
-    volumes:
-      - ./data:/data          # 本地图片与主密钥还在磁盘上
-    ports: ["8080:8080"]
+      PIXORA_DB_DRIVER: postgres        # 云的 MySQL 写 mysql
+      # 厂商给的连接串，照抄，别自己拼
+      PIXORA_DB_DSN: postgres://user:pass@ep-xxx-pooler.region.aws.neon.tech/pixora?sslmode=require
 ```
 
-`.env` 里：
+常见连接串长这样：
 
 ```dotenv
 # Neon / Vercel Postgres / Supabase
-PIXORA_DB_DSN=postgres://user:pass@ep-xxx-pooler.region.aws.neon.tech/pixora?sslmode=require
+postgres://user:pass@ep-xxx-pooler.region.aws.neon.tech/pixora?sslmode=require
 # 阿里云 RDS / 腾讯云 CDB（PostgreSQL）
-# PIXORA_DB_DSN=postgres://user:pass@pgm-xxx.pg.rds.aliyuncs.com:5432/pixora?sslmode=require
+postgres://user:pass@pgm-xxx.pg.rds.aliyuncs.com:5432/pixora?sslmode=require
 # 云厂商 MySQL / PlanetScale
-# PIXORA_DB_DSN=mysql://user:pass@host:3306/pixora?ssl-mode=REQUIRED
+mysql://user:pass@host:3306/pixora?ssl-mode=REQUIRED
 ```
 
-建表在应用启动时自动执行，你不用手动跑 SQL。
+建表在应用启动时自动执行，不用手动跑 SQL。
 
 ### 4.6 不用 Caddy
 
-两种常见情况：
+两种情况会走到这里：只有 IP、没有域名；或者前面已经有一层反向代理。
 
-- **只有 IP、没有域名**：删掉 `caddy` 整段，给 `pixora` 加 `ports: ["8080:8080"]`，`PIXORA_BASE_URL` 写 `http://203.0.113.10:8080`。
-- **前面已有 Nginx / 平台负载均衡**：同样删掉 `caddy`，只把 8080 暴露给内网，`PIXORA_TRUST_PROXY` 保持 `1`。
+做法：删掉 `caddy` 服务与文件末尾的 `configs:` 整段，给 `pixora` 加一行端口映射——
 
-注意：平台给了 https 域名（Railway、Render、Koyeb 这类）时，`PIXORA_BASE_URL` 要写那个 https 地址，否则 Cookie 的 `Secure` 推导会错，表现是「登录成功，刷新就掉登录」。
+```yaml
+    ports: ["8080:8080"]
+```
+
+再把 `PIXORA_BASE_URL` 改成实际访问地址：
+
+```dotenv
+# 只有 IP 时
+http://203.0.113.10:8080
+# 平台给了域名（Railway / Render / Koyeb 这类）
+https://pixora-production.up.railway.app
+```
+
+前面有 Nginx / 平台负载均衡时，`PIXORA_TRUST_PROXY` 保持 `1`。平台给了 https 域名却把地址写成 http，表现是「登录成功，刷新就掉登录」——Cookie 的 Secure 推导跟着 Base URL 走。
 
 ### 4.7 升级、备份、恢复
 
@@ -456,13 +509,13 @@ PIXORA_DB_DSN=postgres://user:pass@ep-xxx-pooler.region.aws.neon.tech/pixora?ssl
 
 ```bash
 docker compose pull
-docker compose up -d       # 数据库迁移在启动时自动执行
+docker compose up -d          # 数据库迁移在启动时自动执行
 ```
 
-备份分两块：
+备份：
 
 ```bash
-# 1) 数据目录（SQLite 库、图片、主密钥）——SQLite 要连 -wal/-shm 一起拷
+# 1) 数据目录（SQLite 库、图片、主密钥）
 docker compose stop pixora
 tar -czf pixora-data-$(date +%F).tar.gz data/
 docker compose start pixora
@@ -470,22 +523,24 @@ docker compose start pixora
 # 2) PostgreSQL
 docker compose exec db pg_dump -U pixora pixora > pixora-$(date +%F).sql
 
-#    MySQL
-docker compose exec db mysqldump -u pixora -p"$DB_PASSWORD" pixora > pixora-$(date +%F).sql
+#    MySQL（密码换成你填的那个）
+docker compose exec db mysqldump -u pixora -p'你的密码' pixora > pixora-$(date +%F).sql
 ```
 
-恢复就是把 `data/` 解回去、或把 dump 导入空库，再 `docker compose up -d`。**`PIXORA_MASTER_KEY` 单独备份**：数据库里的存储凭据与 SMTP 密码是它加密的。
+恢复就是把 `data/` 解回去、或把 dump 导入空库，再 `docker compose up -d`。`PIXORA_MASTER_KEY` 单独记一份：数据库里的存储凭据与 SMTP 密码是它加密的，丢了只能重填。
 
 ### 4.8 Docker 这条路的常见坑
 
 | 现象 | 原因与处理 |
 |---|---|
-| 容器起来又退出 | `docker compose logs pixora` 看最后几行；最常见是 `.env` 没填 `PIXORA_MASTER_KEY` |
-| `80/443 端口被占用` | 宿主机上另有 Nginx/Apache；改 Caddy 的端口或先停掉别的服务 |
+| 启动报「主密钥格式不对」 | compose 里的 `PIXORA_MASTER_KEY` 还是占位符，换成 `openssl rand -hex 32` 的输出 |
+| `additional properties 'content' not allowed` | Docker Compose 低于 2.23，不认内嵌的 Caddy 配置。升级 compose；或者把 `configs:` 那段删掉，给 caddy 服务加一行 `command: caddy reverse-proxy --from https://你的域名 --to http://pixora:8080`（不用任何配置文件，代价是没有那几行安全响应头） |
+| 容器起来又退出 | `docker compose logs pixora` 看最后几行；最常见是主密钥没换，或者数据目录写不进去 |
+| `80/443 端口被占用` | 宿主机上另有 Nginx/Apache；改 Caddy 的端口，或先停掉别的服务 |
 | 浏览器打开是 502 | Caddy 起来了但应用没起来，`docker compose ps` 看 `pixora` 是否 healthy |
-| 图片裂开、地址是 `172.x.x.x` | 没设 `PIXORA_BASE_URL` |
-| 上传报 413 | 反向代理的体积上限太小；用仓库里的 `deploy/Caddyfile`（64MB）或调 Nginx 的 `client_max_body_size` |
-| `data/` 权限报错 | 镜像基于 `scratch`、没有切非 root 用户，容器内以 root 运行，宿主机上一般不用改 `data/` 权限；只有开了 rootless / 用户命名空间时才需要按映射的 UID 授权 |
+| 图片裂开、地址是 `172.x.x.x` | `PIXORA_BASE_URL` 没填对 |
+| 上传报 413 | 内嵌配置里的 `request_body` 上限被改小了；默认 64MB，与应用侧一致 |
+| `./data` 权限报错 | 镜像基于 `scratch`、以 root 运行，宿主机上一般不用改权限；只有开了 rootless / 用户命名空间时才按映射的 UID 授权 |
 
 ## 5. 方案 B：Linux 单二进制
 
@@ -1087,7 +1142,7 @@ PIXORA_TEST_DB_DSN="mysql://root:pass@127.0.0.1/pixora" \
 | 前后端分离：Cloudflare Pages 式跨域 | 静态站 8098（含 SPA 回落）+ 后端 8099（`PIXORA_CORS_ORIGINS` 放行 8098），用真实 Cookie 走完向导、登录、上传、取直链 | ✅ 首页/回落/预检/凭据 Cookie（`SameSite=None; Secure`）/跨域上传全部通过；名单外来源拿不到跨域头 |
 | 前后端分离：Vercel / EdgeOne 式边缘反代 | 站点 8097 把 `/api/*`、`/images/*` 转发到 8099，浏览器只看到 8097 | ✅ 向导、登录（`SameSite=Lax`）、上传、直链（按站点地址拼）、取图全部通过 |
 | 前后端分离：GitHub Pages 子路径 | 把产物放到 `/Pixora/` 下，用 `404.html` 做回落 | ✅ 子路径下能开、陌生路径命中 404 页面但内容是前端；`/main.js` 在根上 404 —— 印证了 8.6 的限制 |
-| 三份 compose | 解析成功后逐项检查：服务清单、`image`/`build`、`depends_on` 指向、`healthcheck.test`、端口与卷形状、`${VAR:?}` 必填变量能否满足 | ✅ 三份都通过；**容器实跑未做**（这台机器没有 Docker 守护进程，`docker compose config` 也没跑成：compose 独立二进制在这台机器上下载反复断流） |
+| 三份 compose（单文件内嵌 Caddy 配置） | 解析成功后逐项检查：服务清单、`depends_on` 指向、`healthcheck.test`、端口与卷形状、`configs` 引用是否都有定义、四个占位符是否齐全 | ✅ 三份都通过；**容器实跑未做**（这台机器没有 Docker 守护进程，`docker compose config` 也没跑成：compose 独立二进制在这台机器上下载反复断流） |
 
 没能在这台机器上验的，以及原因：
 
@@ -1108,7 +1163,7 @@ PIXORA_TEST_DB_DSN="mysql://root:pass@127.0.0.1/pixora" \
 | 注册页说「注册入口已暂停」 | 管理员关了注册；或磁盘占用触发了「容量触顶自动关闭」，去「配额与容量」看 |
 | 验证码收不到 | SMTP 没配好（服务端日志会写原因）；开发时验证码也写进日志 |
 | 上传报「域名收不到邮件」 | 收件域名查不到 MX 记录，注册类发信被拦（`antispam.mx_check` 可关） |
-| 容器起来又退出 | `docker compose logs pixora` 看最后几行；常见是 `PIXORA_MASTER_KEY` 没给 |
+| 容器起来又退出 | `docker compose logs pixora` 看最后几行；常见是主密钥还是占位符，或者数据目录写不进去 |
 | Windows 下报 `unable to open database file` | 数据目录不可写（放到普通目录，别放 `Program Files` / `target\`）；也别从 Git Bash 启动 |
 | `Cache-Control` 看起来不对 | 直链是 `immutable` 一年，带 `?thumb=1` 的是缩略图；私有图片是 `private, max-age=300` |
 

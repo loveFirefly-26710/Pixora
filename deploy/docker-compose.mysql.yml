@@ -1,30 +1,28 @@
-# Pixora 单机部署 —— MySQL 8.0.13+ / MariaDB 版。
+# Pixora 单机部署 —— MySQL 8.0.13+ / MariaDB 版（一个文件跑完整站）。
 #
-# ⚠ 状态说明（2026-10）：迁移能建完，但运行期还过不了 sqlx Any 驱动的类型映射
-#   （MySQL 的 TEXT 被当成 BLOB、TINYINT 不被识别）。当前版本请用 SQLite 版，
+# ⚠ 状态说明（2026-10）：迁移能建完，运行期还差 sqlx Any 的类型映射
+#   （MySQL 的 TEXT 被当成 BLOB、TINYINT 不识别）。当前版本请用 SQLite 版，
 #   见 docs/Pixora-部署方案.md 的「数据库支持现状」。
 #
-# 用法：
-#   1. 同目录放：本文件（重命名成 docker-compose.yml）、Caddyfile、.env
-#   2. mkdir -p data mysqldata
-#   3. docker compose up -d
-#   4. 浏览器打开你的域名，走安装向导
+# 用法三步：存成 docker-compose.yml → 改三处「必改」与数据库密码 → docker compose up -d
+# 数据库密码在文件里出现 3 处（DSN、MYSQL_PASSWORD、MYSQL_ROOT_PASSWORD），
+# 三处改成同一个值。
+#
+# 需要 Docker Compose 2.23 以上（configs.content 内嵌了 Caddy 配置）。
 
 services:
   pixora:
     image: ghcr.io/lovefirefly-26710/pixora:latest
-    # build:
-    #   context: ..
-    #   dockerfile: deploy/Dockerfile
     restart: unless-stopped
     environment:
       PIXORA_DB_DRIVER: mysql
-      # 云上 MySQL 通常要加 SSL 参数：末尾补 ?ssl-mode=REQUIRED
-      PIXORA_DB_DSN: mysql://pixora:${DB_PASSWORD:?在 .env 里填 DB_PASSWORD}@db:3306/pixora
+      # 必改：密码三处一起改（这一行、MYSQL_PASSWORD、MYSQL_ROOT_PASSWORD）
+      # 云上 MySQL 通常还要加 SSL 参数：末尾补 ?ssl-mode=REQUIRED
+      PIXORA_DB_DSN: mysql://pixora:REPLACE_WITH_A_STRONG_PASSWORD@db:3306/pixora
       PIXORA_DATA_DIR: /data
       PIXORA_BIND: 0.0.0.0:8080
-      PIXORA_BASE_URL: ${PIXORA_BASE_URL:?在 .env 里填站点对外地址}
-      PIXORA_MASTER_KEY: ${PIXORA_MASTER_KEY:?在 .env 里填 PIXORA_MASTER_KEY}
+      PIXORA_BASE_URL: https://img.example.com
+      PIXORA_MASTER_KEY: REPLACE_WITH_openssl_rand_hex_32
       PIXORA_TRUST_PROXY: "1"
       PIXORA_WORKERS: "2"
       RUST_LOG: info
@@ -56,8 +54,9 @@ services:
     environment:
       MYSQL_DATABASE: pixora
       MYSQL_USER: pixora
-      MYSQL_PASSWORD: ${DB_PASSWORD:?在 .env 里填 DB_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?在 .env 里填 DB_PASSWORD}
+      # 必改：与上面 DSN 里的密码保持一致
+      MYSQL_PASSWORD: REPLACE_WITH_A_STRONG_PASSWORD
+      MYSQL_ROOT_PASSWORD: REPLACE_WITH_A_STRONG_PASSWORD
     volumes:
       - ./mysqldata:/var/lib/mysql
     healthcheck:
@@ -74,19 +73,30 @@ services:
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     environment:
-      PIXORA_DOMAIN: ${PIXORA_DOMAIN:?在 .env 里填域名}
-      ACME_EMAIL: ${ACME_EMAIL:-}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./data:/srv/data:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      PIXORA_DOMAIN: img.example.com
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
     depends_on:
       - pixora
     deploy:
       resources:
         limits: { memory: 48M }
 
-volumes:
-  caddy_data:
-  caddy_config:
+configs:
+  caddyfile:
+    content: |
+      {$PIXORA_DOMAIN} {
+          encode zstd gzip
+          request_body {
+              max_size 64MB
+          }
+          reverse_proxy pixora:8080
+          header {
+              Strict-Transport-Security "max-age=31536000; includeSubDomains"
+              X-Frame-Options "SAMEORIGIN"
+              X-Content-Type-Options "nosniff"
+              Referrer-Policy "strict-origin-when-cross-origin"
+              -Server
+          }
+      }
