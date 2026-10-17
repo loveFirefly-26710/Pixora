@@ -2,7 +2,7 @@
 
 自托管的图片托管服务。浏览器算哈希、生成缩略图、排队上传，服务端只管存与发；
 PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，一台 1C1G 的小机器就能跑。
-可以整栈放一台机器，也可以前端上 CDN、后端留在小机器上——[部署](#部署)一节把四条路都写全了。
+可以整栈放一台机器，或前面挂一层反向代理/CDN——[部署](#部署)一节把三条路写全了。
 
 ![广场](docs/screenshots/plaza.webp)
 
@@ -33,7 +33,7 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 - **登录方式**：邮箱（必需）+ GitHub / Google / QQ / 微信 / 手机号验证码，用户可自行绑定与解绑，管理员能统一启停。
 - **管理后台**：用户与配额、存储后端与容量、频率限制（含按用户覆盖）、IP 黑名单、内容审核、邮件模板、服务条款、系统日志。
 - **存储后端**：本地目录、数据库 BLOB、S3 兼容（Cloudflare R2 / 阿里云 OSS / 腾讯云 COS / MinIO / B2）、WebDAV、GitHub 仓库、Telegram 频道。
-- **部署形态**：单二进制（前端嵌在里面）、Docker 镜像（默认 amd64，需要时手动出 arm64）、前后端分开部署到静态托管 + API。
+- **部署形态**：单二进制（前端嵌在里面）、Docker 镜像（默认 amd64，需要时手动出 arm64）。前端与接口同源，不单独托管。
 
 <img src="docs/screenshots/login.webp" alt="登录页" width="720">
 
@@ -65,16 +65,15 @@ PostgreSQL 方案整栈常驻 145–225MB，SQLite 方案压到 80MB 以内，�
 
 ## 部署
 
-Pixora 由三部分组成：**后端**（一个 Rust 进程，负责接口、直链、上传与后台任务）、**前端**（静态文件，默认嵌在后端二进制里）、**数据**（数据库与图片，都在数据目录里）。默认形态只要起一个进程，网站就能用。
+Pixora 由三部分组成：**后端**（一个 Rust 进程，负责接口、直链、上传与后台任务）、**前端**（静态文件，嵌在后端二进制里）、**数据**（数据库与图片，都在数据目录里）。只要起一个进程，网站就能用。
 
-完整的部署方案单独成文：[**docs/Pixora-部署方案.md**](docs/Pixora-部署方案.md)。文档开头有一张从零到上线的清单，三种装法都给到每一步的命令、预期结果和排障对照；还包含三套完整 compose、Vercel / Cloudflare / EdgeOne / GitHub Pages 的前后端分离步骤，以及本机实测的记录。当前版本 0.1.2。
+完整的部署方案单独成文：[**docs/Pixora-部署方案.md**](docs/Pixora-部署方案.md)。文档开头有一张从零到上线的清单，Docker、Linux 二进制、Windows 二进制三条路都给到每一步的命令、预期结果和排障对照；还包含三套完整 compose 与本机实测记录。当前版本 0.1.2。
 
 | 你想怎么装 | 看哪儿 |
 |---|---|
 | 有 Docker，想最快跑起来 | 下面这一段 |
 | Linux 服务器，不想装 Docker | [部署方案 §5](docs/Pixora-部署方案.md)（二进制 + systemd + Nginx） |
 | 只有 Windows 机器 | [部署方案 §6](docs/Pixora-部署方案.md)（二进制 + NSSM 服务化） |
-| 前端想放 CDN | [部署方案 §8](docs/Pixora-部署方案.md)（Vercel / CF / EdgeOne / Pages） |
 
 ### 最快跑起来（Docker + SQLite）
 
@@ -97,11 +96,11 @@ docker compose logs --tail=50 pixora # 看到「Pixora 已启动」就说明起�
 
 ### 数据库
 
-默认 SQLite，数据文件就在数据目录里，备份就是拷目录。三种方言都跑过同一套 298 项端到端冒烟（SQLite、PostgreSQL 17.6、MySQL 8.4.0 全过），切换只改连接串；配置在[部署方案 §4.3 / §4.4](docs/Pixora-部署方案.md)，数据库已经单独部署了的接法（宿主机、局域网、面板、云上）见[§4.5](docs/Pixora-部署方案.md)，修复过哪些方言差异见[§9](docs/Pixora-部署方案.md)。这些修复从 0.1.1 开始进发行包和镜像。
+默认 SQLite，数据文件就在数据目录里，备份就是拷目录。三种方言都跑过同一套 298 项端到端冒烟（SQLite、PostgreSQL 17.6、MySQL 8.4.0 全过），切换只改连接串；配置在[部署方案 §4.3 / §4.4](docs/Pixora-部署方案.md)，数据库已经单独部署了的接法（宿主机、局域网、面板、云上）见[§4.5](docs/Pixora-部署方案.md)，修复过哪些方言差异见[§8](docs/Pixora-部署方案.md)。这些修复从 0.1.1 开始进发行包和镜像。
 
 ### 常见问题
 
-直链是内网地址、刷新掉登录、图片全裂、容器起来又退出——这些都有对照表，见[部署方案 §11](docs/Pixora-部署方案.md)。
+直链是内网地址、刷新掉登录、图片全裂、容器起来又退出——这些都有对照表，见[部署方案 §10](docs/Pixora-部署方案.md)。
 
 ### 从源码构建
 
@@ -112,7 +111,7 @@ docker compose logs --tail=50 pixora # 看到「Pixora 已启动」就说明起�
 # 1. 前端
 cd web
 npm ci                # 或 npm install
-PIXORA_API_BASE=https://img-api.example.com npm run build   # 同源部署就不给这个变量
+npm run build
 cd ..
 
 # 2. 后端（默认带 embed-web，前端就在二进制里）
@@ -175,9 +174,8 @@ web/                  前端（无框架 TypeScript + esbuild，产物 embed 进
   └── dist/           构建产物，故意提交进仓库：cargo build 依赖它存在
 migrations/           三个方言各一套建表脚本
 deploy/               Dockerfile、docker-compose、Caddyfile、.env.example
-  └── static/         Vercel / Cloudflare / EdgeOne 的静态前端配置样例
 docs/                 技术方案、部署方案、接口契约、ADR、界面原型、截图
-.github/workflows/    CI、Docker 镜像（可按需多架构）、发行版二进制、前端静态站点
+.github/workflows/    CI、Docker 镜像（可按需多架构）、发行版二进制
 scripts/              冒烟测试（bash / PowerShell）与素材生成
 ```
 
@@ -326,7 +324,6 @@ PIXORA_TEST_DB_DSN="mysql://root:pass@127.0.0.1/pixora" \
 |---|---|---|
 | [CI](.github/workflows/ci.yml) | 推主干、开 PR、手动 | 前端类型检查与构建；后端全量测试 + 端到端冒烟；Windows 上 `cargo check` 证明能编过 |
 | [发行版与镜像](.github/workflows/release.yml) | 推主干、推 `v*` 标签、手动 | 按 Cargo.toml 里的版本号发 Release（Linux / Windows 可执行文件 + 校验和）并推容器镜像 |
-| [前端静态站点](.github/workflows/frontend.yml) | 手动，或仓库变量开了开关 | 把前端产物发到 Vercel / Cloudflare Pages / EdgeOne Makers / GitHub Pages |
 
 ### 版本号放在哪、怎么发版
 
@@ -389,11 +386,7 @@ CI 里的冒烟是「起真服务、走真 HTTP」那一套，和本地 `scripts
 - **数据库方言**：SQLite / PostgreSQL / MySQL 三种都跑过同一套 298 项端到端冒烟；
   MariaDB 共用 MySQL 的迁移与查询，这次没有单独验证。
 - 多实例部署需要额外的共享设施（限流计数与会话表），当前按单实例设计。
-  前后端分开部署（静态托管 + 单个 API 实例）不受这条限制。
-- Cloudflare Workers / Vercel Functions 这类纯 JS 边缘运行时跑不了这个二进制
-  （它要常驻进程、TCP 连接和文件系统）；边缘那一层只适合放前端，或者像
-  `deploy/static/worker-proxy.js` 那样做一层反代。要全在 Cloudflare 上，用
-  Containers（x86_64）跑镜像 + R2 存图片 + 托管 Postgres 存数据。
+- 前端只嵌在二进制里，与接口同源部署；不支持把前端单独发到静态托管或 JS 边缘运行时。
 
 ## 许可
 

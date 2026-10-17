@@ -1,8 +1,0 @@
-# Cloudflare Pages 项目配置。用法：
-#
-#   npx wrangler pages deploy web/dist --project-name=pixora
-#
-# （加了 --project-name 的话这个文件可不要；它主要给 wrangler pages dev
-#   与「从 Git 仓库构建」两种方式用。）
-name = "pixora"
-pages_build_output_dir = "web/dist"

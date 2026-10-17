@@ -1,9 +1,0 @@
-# Cloudflare Pages / Netlify 的响应头配置（部署时和产物放在一起）。
-#
-# 前端产物是固定文件名（main.js 就是 main.js，没有内容哈希），所以一律
-# no-cache：浏览器每次带 ETag 校验，内容没变就是 304。给长缓存的话，
-# 换了版本用户那边会一直拿到旧 bundle，只能靠强制刷新。
-/*
-  Cache-Control: no-cache
-  X-Content-Type-Options: nosniff
-  Referrer-Policy: strict-origin-when-cross-origin

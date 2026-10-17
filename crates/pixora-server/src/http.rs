@@ -385,9 +385,8 @@ pub fn verify_csrf(
 
 /// Cookie 的公共属性：`Path` + `Secure` + `SameSite`。
 ///
-/// 集中在这里是因为 `SameSite` 现在是可配的：前端托管在别的域名上时，
-/// 必须换成 `None` 且带 `Secure`，浏览器才会把会话 Cookie 发给跨站接口。
-/// 之前五处各写一遍 `; SameSite=Lax`，改一处漏一处的后果是「登录着登录着就掉了」。
+/// 前后端同源部署，`SameSite` 默认 `Lax`；需要更严格时配置 `strict`。
+/// 集中在这里，避免多个写 Cookie 的地方各写一套、漏一处就掉登录。
 pub fn cookie_attrs(config: &pixora_core::Config) -> String {
     let mut attrs = String::from("; Path=/");
     if config.cookie_secure() {

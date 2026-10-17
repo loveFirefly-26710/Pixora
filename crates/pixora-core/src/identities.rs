@@ -264,7 +264,7 @@ impl AppState {
         Ok(OAuthState {
             provider: provider.to_string(),
             mode: mode.to_string(),
-            next: sanitize_next(next, &self.config.cors_origins),
+            next: sanitize_next(next),
             nonce: pixora_crypto::token::new_session_token()?,
             user_id,
             embed,
@@ -1094,39 +1094,12 @@ fn mask_phone(phone: &str) -> String {
 
 /// 跳转目标只允许站内相对路径：`state` 里带的是可控输入，`//evil.com` 这种
 /// 会被浏览器当成协议相对地址，变成把用户送去别处的开放重定向。
-///
-/// 例外是跨域部署：前端托管在别的域名上时，授权完要跳回那边，否则用户会
-/// 落在 API 域名的首页上。这种绝对地址只在白名单（`PIXORA_CORS_ORIGINS`）
-/// 里放行——白名单本来就是「可信的前端站点」的名单，一个配置管两件事。
-fn sanitize_next(next: &str, allowed_origins: &[String]) -> String {
+fn sanitize_next(next: &str) -> String {
     let trimmed = next.trim();
     if trimmed.starts_with('/') && !trimmed.starts_with("//") {
         return trimmed.to_string();
     }
-    if let Some(origin) = absolute_origin(trimmed) {
-        if allowed_origins
-            .iter()
-            .any(|item| item.eq_ignore_ascii_case(&origin))
-        {
-            return trimmed.to_string();
-        }
-    }
     "/".to_string()
-}
-
-/// 取绝对地址的 `scheme://host[:port]` 部分。不是 http(s) 绝对地址就是 None。
-fn absolute_origin(value: &str) -> Option<String> {
-    for scheme in ["https://", "http://"] {
-        if let Some(rest) = value.strip_prefix(scheme) {
-            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-            let host = &rest[..end];
-            if host.is_empty() || host.contains('@') {
-                return None;
-            }
-            return Some(format!("{scheme}{host}"));
-        }
-    }
-    None
 }
 
 /// `application/x-www-form-urlencoded` 形状的响应（QQ 的 token 接口就是这样）。
@@ -1289,66 +1262,25 @@ impl SmsClient {
 mod tests {
     use super::*;
 
-    fn origins() -> Vec<String> {
-        vec!["https://pixora.example.com".to_string()]
-    }
-
     #[test]
     fn next_keeps_site_relative_paths() {
-        assert_eq!(sanitize_next("/albums?tab=1", &origins()), "/albums?tab=1");
-        assert_eq!(sanitize_next("  /upload ", &origins()), "/upload");
+        assert_eq!(sanitize_next("/albums?tab=1"), "/albums?tab=1");
+        assert_eq!(sanitize_next("  /upload "), "/upload");
         // 站内路径里的 `#` 也照原样带回
-        assert_eq!(sanitize_next("/#/login", &origins()), "/#/login");
+        assert_eq!(sanitize_next("/#/login"), "/#/login");
     }
 
     #[test]
     fn next_rejects_open_redirects() {
         // 协议相对地址会被浏览器当成别家的域名
-        assert_eq!(sanitize_next("//evil.example.com", &origins()), "/");
-        // 不在白名单里的绝对地址一律退回首页
-        assert_eq!(sanitize_next("https://evil.example.com/x", &origins()), "/");
+        assert_eq!(sanitize_next("//evil.example.com"), "/");
+        // 绝对地址一律退回首页
+        assert_eq!(sanitize_next("https://evil.example.com/x"), "/");
         // 前缀像但域名不同
-        assert_eq!(
-            sanitize_next("https://pixora.example.com.evil.net/", &origins()),
-            "/"
-        );
+        assert_eq!(sanitize_next("https://pixora.example.com.evil.net/"), "/");
         // 把域名塞进 userinfo 的写法
-        assert_eq!(
-            sanitize_next("https://pixora.example.com@evil.net/", &origins()),
-            "/"
-        );
-        assert_eq!(sanitize_next("javascript:alert(1)", &origins()), "/");
-        assert_eq!(sanitize_next("", &origins()), "/");
-    }
-
-    #[test]
-    fn next_allows_the_configured_frontend_origin() {
-        // 跨域部署：前端在别的域名上，授权完要跳回那边
-        assert_eq!(
-            sanitize_next("https://pixora.example.com/albums", &origins()),
-            "https://pixora.example.com/albums"
-        );
-        // 大小写与结尾斜杠都按同一个来源处理
-        assert_eq!(
-            sanitize_next("https://PIXORA.example.com", &origins()),
-            "https://PIXORA.example.com"
-        );
-        // 没配白名单时一个绝对地址都不放行
-        assert_eq!(
-            sanitize_next("https://pixora.example.com/", &[]),
-            "/"
-        );
-    }
-
-    #[test]
-    fn origin_extraction_is_strict() {
-        assert_eq!(
-            absolute_origin("https://a.example.com:8443/x?y").as_deref(),
-            Some("https://a.example.com:8443")
-        );
-        assert_eq!(absolute_origin("http://127.0.0.1:8080").as_deref(), Some("http://127.0.0.1:8080"));
-        assert_eq!(absolute_origin("https://"), None);
-        assert_eq!(absolute_origin("/albums"), None);
-        assert_eq!(absolute_origin("ftp://a.example.com"), None);
+        assert_eq!(sanitize_next("https://pixora.example.com@evil.net/"), "/");
+        assert_eq!(sanitize_next("javascript:alert(1)"), "/");
+        assert_eq!(sanitize_next(""), "/");
     }
 }

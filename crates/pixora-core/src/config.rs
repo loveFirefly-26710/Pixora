@@ -19,16 +19,12 @@ use crate::error::{AppError, Result};
 
 /// 会话 Cookie 的 `SameSite`。
 ///
-/// 自托管默认 `Lax`：前后端同源，浏览器本来就只在站内导航时带上它。
-/// 把前端放到别的域名上（Vercel / Cloudflare Pages / EdgeOne 这类静态托管）
-/// 就必须用 `None`——否则浏览器压根不会把 Cookie 发给跨站的接口，
-/// 表现为「登录成功了，下一页又变成未登录」。
+/// 前后端同源部署，默认 `Lax`：站内导航会带 Cookie，跨站请求不带。
+/// 需要更严格时可以在环境变量里选 `strict`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SameSite {
     Lax,
     Strict,
-    /// 跨站携带；浏览器要求必须同时带 `Secure`
-    None,
 }
 
 impl SameSite {
@@ -36,7 +32,6 @@ impl SameSite {
         match raw.trim().to_ascii_lowercase().as_str() {
             "lax" => Some(Self::Lax),
             "strict" => Some(Self::Strict),
-            "none" => Some(Self::None),
             _ => None,
         }
     }
@@ -45,13 +40,7 @@ impl SameSite {
         match self {
             Self::Lax => "Lax",
             Self::Strict => "Strict",
-            Self::None => "None",
         }
-    }
-
-    /// `None` 必须配 `Secure`，浏览器不收没有 Secure 的跨站 Cookie。
-    pub fn requires_secure(&self) -> bool {
-        matches!(self, Self::None)
     }
 }
 
@@ -113,13 +102,7 @@ pub struct Config {
     /// 用别人的邮箱把账号建出来。验证码始终会写进服务端日志，本机开发看日志即可。
     pub dev_return_codes: bool,
     pub log_level: String,
-    /// 允许跨域调接口的前端来源（精确匹配 `scheme://host[:port]`）。
-    ///
-    /// 前端与后端同源时留空——这时一个 CORS 响应头都不发。把前端托管在别处
-    /// 才需要填，填进来的值同时决定三件事：CORS 放行哪些来源、OAuth 的
-    /// `next` 允许跳回哪个站点、以及 Cookie 默认改用 `SameSite=None`。
-    pub cors_origins: Vec<String>,
-    /// 会话 Cookie 的 `SameSite`。显式配置优先；没配时按有没有 `cors_origins` 推断。
+    /// 会话 Cookie 的 `SameSite`。前后端同源部署，默认 `Lax`。
     pub samesite: SameSite,
 }
 
@@ -170,25 +153,14 @@ impl Config {
             .and_then(|raw| raw.parse::<u32>().ok())
             .unwrap_or(if db_driver == DbDriver::Sqlite { 4 } else { 10 });
 
-        let cors_origins = parse_origins(env("PIXORA_CORS_ORIGINS").as_deref().unwrap_or(""));
-        // 没显式配 SameSite 时：跨域前端在别处就必须 None，否则浏览器不带 Cookie
         let samesite = match env("PIXORA_COOKIE_SAMESITE") {
             Some(raw) => SameSite::parse(&raw).ok_or_else(|| {
                 AppError::Config(format!(
-                    "PIXORA_COOKIE_SAMESITE 只认 lax / strict / none，收到的是：{raw}"
+                    "PIXORA_COOKIE_SAMESITE 只认 lax / strict，收到的是：{raw}"
                 ))
             })?,
-            None if cors_origins.is_empty() => SameSite::Lax,
-            None => SameSite::None,
+            None => SameSite::Lax,
         };
-        if samesite.requires_secure() && !secure_cookies {
-            // 还没到「报错」的程度：反向代理终止 TLS 时应用自己看到的是 http，
-            // 这种情况很常见。但必须把结论写进日志，否则症状很难查
-            tracing::warn!(
-                "SameSite=None 的 Cookie 必须带 Secure，已按 Secure 下发；\
-                 如果浏览器仍不接受，请确认站点是通过 https 访问的（PIXORA_BASE_URL / PIXORA_SECURE_COOKIES）"
-            );
-        }
 
         Ok(Self {
             bind,
@@ -212,25 +184,13 @@ impl Config {
                 "1" | "true" | "yes"
             ),
             log_level: env("RUST_LOG").unwrap_or_else(|| "info".into()),
-            cors_origins,
             samesite,
         })
     }
 
-    /// Cookie 是否带 `Secure`。`SameSite=None` 时无论环境变量怎么写都算带。
+    /// Cookie 是否带 `Secure`。
     pub fn cookie_secure(&self) -> bool {
-        self.secure_cookies || self.samesite.requires_secure()
-    }
-
-    /// 这个来源是不是配置里放行的前端站点。用于 CORS 与 OAuth 的回跳白名单。
-    ///
-    /// 精确比较（忽略大小写），不做通配：带凭据的 CORS 本来就不允许 `*`，
-    /// 而「后缀匹配」那种写法（`*.example.com`）最容易写成别人域名的后缀。
-    pub fn allows_origin(&self, origin: &str) -> bool {
-        let value = origin.trim().trim_end_matches('/');
-        self.cors_origins
-            .iter()
-            .any(|item| item.eq_ignore_ascii_case(value))
+        self.secure_cookies
     }
 
     /// 加密用的主密钥。需要加密凭据时调用——安装了之后一定拿得到，
@@ -265,28 +225,6 @@ fn env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-/// 解析逗号分隔的来源清单。只留 `http(s)://...` 形状的，`*` 直接丢掉：
-/// 带凭据的跨域请求不允许通配，留着一个通配符只会让人以为配好了。
-fn parse_origins(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(|item| item.trim().trim_end_matches('/').to_string())
-        .filter(|item| {
-            if item.is_empty() {
-                return false;
-            }
-            if item == "*" {
-                tracing::warn!("PIXORA_CORS_ORIGINS 不接受通配符 `*`：带凭据的跨域必须逐个写明来源，已忽略");
-                return false;
-            }
-            if !item.starts_with("http://") && !item.starts_with("https://") {
-                tracing::warn!(origin = %item, "PIXORA_CORS_ORIGINS 里的来源要以 http:// 或 https:// 开头，已忽略");
-                return false;
-            }
-            true
-        })
-        .collect()
 }
 
 /// 主密钥的加载顺序：环境变量 → 密钥文件 → 自动生成到数据目录。
@@ -368,54 +306,10 @@ mod tests {
     }
 
     #[test]
-    fn samesite_parses_three_values() {
+    fn samesite_parses_lax_and_strict() {
         assert_eq!(SameSite::parse("lax"), Some(SameSite::Lax));
-        assert_eq!(SameSite::parse(" None "), Some(SameSite::None));
         assert_eq!(SameSite::parse("STRICT"), Some(SameSite::Strict));
+        assert_eq!(SameSite::parse("none"), None);
         assert_eq!(SameSite::parse("sometimes"), None);
-        assert!(SameSite::None.requires_secure());
-        assert!(!SameSite::Lax.requires_secure());
-    }
-
-    #[test]
-    fn origins_are_exact_and_reject_wildcards() {
-        let parsed = parse_origins("https://pixora.vercel.app/, https://a.example.com,*,http://b.example.com,,ftp://c");
-        assert_eq!(
-            parsed,
-            vec![
-                "https://pixora.vercel.app".to_string(),
-                "https://a.example.com".to_string(),
-                "http://b.example.com".to_string(),
-            ]
-        );
-
-        let config = Config {
-            bind: "0.0.0.0:8080".parse().unwrap(),
-            db_driver: DbDriver::Sqlite,
-            db_dsn: ":memory:".into(),
-            db_max_connections: 1,
-            data_dir: PathBuf::from("./data"),
-            master_key: None,
-            key_source: KeySource::Missing,
-            workers: 1,
-            base_url: None,
-            trust_proxy: 1,
-            web_dir: None,
-            accel_prefix: None,
-            secure_cookies: false,
-            dev_return_codes: false,
-            log_level: "info".into(),
-            cors_origins: parsed,
-            samesite: SameSite::None,
-        };
-
-        assert!(config.allows_origin("https://pixora.vercel.app"));
-        assert!(config.allows_origin("https://PIXORA.vercel.app/"));
-        // 后缀像但不同源的都不放行
-        assert!(!config.allows_origin("https://pixora.vercel.app.evil.net"));
-        assert!(!config.allows_origin("http://pixora.vercel.app"));
-        assert!(!config.allows_origin("https://other.vercel.app"));
-        // SameSite=None 一定带 Secure，否则浏览器根本不收这个 Cookie
-        assert!(config.cookie_secure());
     }
 }

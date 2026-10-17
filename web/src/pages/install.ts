@@ -125,8 +125,7 @@ export async function installPage(ctx: PageContext): Promise<void> {
  * 向导第 4 步预填的站点地址。
  *
  * 优先用后端已经知道的地址（来自 PIXORA_BASE_URL 或此前保存过的设置）：
- * 通过 IP 打开向导时，不会把 IP 写进数据库、盖掉配置里的正式域名；
- * 前后端分开部署时，也不会把前端域名当成后端直链地址。
+ * 通过 IP 或内网地址打开向导时，不会把那个地址写进数据库、盖掉配置里的正式域名。
  * 后端没配时这里会拿到监听地址（0.0.0.0），它不能访问，仍用浏览器地址。
  */
 function initialBaseUrl(): string {
