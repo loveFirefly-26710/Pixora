@@ -128,14 +128,15 @@ export async function render(ctx: PageContext): Promise<void> {
   // 无限滚动的哨兵：它进入视口就取下一页（提前 600px 预取，滑到底不用等）
   const sentinel = h("div", { style: { height: "1px" } });
   pagerHost.after(sentinel);
+  let pagerObserver: IntersectionObserver | null = null;
   if (typeof IntersectionObserver === "function") {
-    const observer = new IntersectionObserver(
+    pagerObserver = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) void loadMore();
       },
       { rootMargin: "600px 0px" },
     );
-    observer.observe(sentinel);
+    pagerObserver.observe(sentinel);
   }
   mount(
     sideHost,
@@ -327,7 +328,10 @@ export async function render(ctx: PageContext): Promise<void> {
         return;
       }
       if (options.append) {
-        state.items = [...state.items, ...result.items];
+        // 删过图之后页边界会前移，新取的一页可能和已加载的重叠；按 id 去重，
+        // 不然同一张图会出现两次，之后再删它只会掉一个副本。
+        const seen = new Set(state.items.map((item) => item.id));
+        state.items = [...state.items, ...result.items.filter((item) => !seen.has(item.id))];
         // 追加也要推进「当前页」：不推进的话下一轮还会再取同一页，
         // 表现是同一批图被反复追加（列表越滑越长，件件重复）
         state.page = page;
@@ -339,13 +343,14 @@ export async function render(ctx: PageContext): Promise<void> {
         state.page = page;
         state.offset = (page - 1) * perPage;
       }
-      renderList();
-      renderPager(result.meta.page);
+      // 翻页/加载更多是往现有列表上接，重建网格不能让用户回顶部
+      renderList({ preserveScroll: Boolean(options.append || options.prepend) });
+      renderPager();
     } catch (err) {
       if (options.append) {
         // 追加失败只影响这一页：列表留着，页脚给「重试」
         loadMoreFailed = true;
-        renderPager(state.page);
+        renderPager();
         toastError(err);
         return;
       }
@@ -370,8 +375,13 @@ export async function render(ctx: PageContext): Promise<void> {
   let loadingMore = false;
   let loadMoreFailed = false;
 
+  /** 已加载到第几张（offset 是当前窗口在整个结果里的起点）。 */
+  function loadedCount(): number {
+    return state.offset + state.items.length;
+  }
+
   /** 底部状态：正在加载 / 加载失败可重试 / 没有更多了 / 手动加载更多的兜底按钮。 */
-  function renderPager(_page: number): void {
+  function renderPager(): void {
     if (loadingMore) {
       pagerHost.replaceChildren(spinner(), h("span", { text: "正在加载…" }));
       return;
@@ -383,8 +393,8 @@ export async function render(ctx: PageContext): Promise<void> {
       );
       return;
     }
-    if (state.page >= state.totalPages) {
-      pagerHost.replaceChildren(h("span", { text: state.page === 0 ? "" : "没有更多了" }));
+    if (loadedCount() >= state.total) {
+      pagerHost.replaceChildren(h("span", { text: state.total === 0 ? "" : "没有更多了" }));
       return;
     }
     pagerHost.replaceChildren(
@@ -394,18 +404,56 @@ export async function render(ctx: PageContext): Promise<void> {
 
   /** 往下滑到底就取下一页：与广场同一套做法（提前 600px 预取）。 */
   async function loadMore(): Promise<void> {
-    if (loadingMore || state.page >= state.totalPages) return;
+    if (loadingMore || loadedCount() >= state.total) return;
     loadingMore = true;
     loadMoreFailed = false;
-    renderPager(state.page);
+    renderPager();
     try {
-      await loadImages(state.page + 1, { append: true });
+      // 本地删过图之后结果整体前移，不能简单用 state.page + 1：
+      // 按「下一张还没加载的图」重新算页码，loadImages 会按 id 去重。
+      await loadImages(Math.floor(loadedCount() / PER_PAGE) + 1, { append: true });
     } finally {
       loadingMore = false;
       // 收尾一定要重画页脚：加载中那一帧是 loadImages 里画的，
       // 只把标志位改回来、不重画的话，页脚会一直停在「正在加载…」
-      renderPager(state.page);
+      renderPager();
+      // 现在追加后会保留滚动位置，哨兵可能一直待在预取范围里，观察器
+      // 不会再次回调，第二页就卡住了。重新观察一次，让它按当前状态再判断。
+      if (!loadMoreFailed && loadedCount() < state.total) {
+        pagerObserver?.unobserve(sentinel);
+        pagerObserver?.observe(sentinel);
+      }
     }
+  }
+
+  /** 把已经删除/移走的图片从当前列表摘掉，返回实际摘掉的张数。 */
+  function dropLoaded(ids: Set<number>): number {
+    const before = state.items.length;
+    state.items = state.items.filter((item) => !ids.has(item.id));
+    const removed = before - state.items.length;
+    if (removed > 0) {
+      state.total = Math.max(0, state.total - removed);
+      state.totalPages = Math.ceil(state.total / PER_PAGE);
+    }
+    return removed;
+  }
+
+  /**
+   * 批量操作完成后的本地收尾。
+   *
+   * 这里不再从第 1 页重拉：那会把无限滚动已经加载的页全部丢掉，骨架屏
+   * 还会把页面撑矮，滚动位置跟着被浏览器夹回顶部。只把服务端已经确认的
+   * 改动落到 state.items，再原地重画列表，位置和已加载的页都留着。
+   */
+  async function afterLocalMutation(options: { refreshAlbums?: boolean } = {}): Promise<void> {
+    if (state.total > 0 && state.items.length === 0) {
+      // 当前窗口被删空、后面还有图：补一页，不然会错误地显示空状态
+      await loadImages(1);
+    } else {
+      renderList({ preserveScroll: true });
+      renderPager();
+    }
+    if (options.refreshAlbums) await loadAlbums();
   }
 
   // ---------- 相册侧栏 ----------
@@ -472,7 +520,7 @@ export async function render(ctx: PageContext): Promise<void> {
     state.view = view;
     saveViewPreference(view);
     applyViewChips();
-    renderList();
+    renderList({ preserveScroll: true });
   }
 
   function applyViewChips(): void {
@@ -481,7 +529,11 @@ export async function render(ctx: PageContext): Promise<void> {
   }
   applyViewChips();
 
-  function renderList(): void {
+  function renderList(options: { preserveScroll?: boolean } = {}): void {
+    // 瀑布流靠脚本给每张图写 grid-row-end，重建网格的那一瞬行高只有 8px，
+    // 页面会先被压矮、浏览器把滚动位置夹回顶部。原地更新/翻页/切视图时
+    // 把原来的位置记下来，画完再放回去；换搜索词、换排序则不需要。
+    const keepY = options.preserveScroll ? window.scrollY : 0;
     if (state.items.length === 0) {
       mount(
         listHost,
@@ -503,6 +555,7 @@ export async function render(ctx: PageContext): Promise<void> {
     if (state.view === "grid") renderGrid();
     else renderTable();
     syncSelectionUI();
+    if (options.preserveScroll && keepY > 0) window.scrollTo(0, keepY);
   }
 
   function thumbFor(item: ImageItem): HTMLElement {
@@ -880,13 +933,6 @@ export async function render(ctx: PageContext): Promise<void> {
     syncSelectionUI();
   }
 
-  async function afterBatch(message: string): Promise<void> {
-    toastOk(message);
-    cancelSelection();
-    // 累加出来的列表不能只刷「最后一页」：从第一页重新拉一遍
-    await Promise.all([loadImages(1), loadAlbums()]);
-  }
-
   async function batchTag(): Promise<void> {
     const count = selectedCount();
     if (count === 0) return;
@@ -902,9 +948,20 @@ export async function render(ctx: PageContext): Promise<void> {
       .map((tag) => tag.trim())
       .filter(Boolean);
     if (tags.length === 0) return;
+    // 先记下这次选中的范围：cancelSelection() 会清空 state.selected
+    const all = state.allMatching;
+    const ids = new Set(state.selected);
     try {
       const affected = await runBatch("tag", { tags });
-      await afterBatch(`已为 ${affected} 张图片追加标签`);
+      toastOk(`已为 ${affected} 张图片追加标签`);
+      cancelSelection();
+      // 服务端是追加语义，本地也把缺的标签补上，列表不用为了看一眼标签重拉
+      for (const item of all ? state.items : state.items.filter((entry) => ids.has(entry.id))) {
+        for (const tag of tags) {
+          if (!item.tags.includes(tag)) item.tags.push(tag);
+        }
+      }
+      await afterLocalMutation();
     } catch (err) {
       toastError(err);
     }
@@ -937,12 +994,21 @@ export async function render(ctx: PageContext): Promise<void> {
           on: {
             click: async () => {
               const visibility = select.value === "public" ? "public" : "private";
+              const all = state.allMatching;
+              const ids = new Set(state.selected);
               handle.close();
               try {
                 const affected = await runBatch("visibility", { visibility });
-                await afterBatch(
+                toastOk(
                   `已将 ${affected} 张图片设为${visibility === "public" ? "公开" : "私有"}`,
                 );
+                cancelSelection();
+                for (const item of all
+                  ? state.items
+                  : state.items.filter((entry) => ids.has(entry.id))) {
+                  item.visibility = visibility;
+                }
+                await afterLocalMutation();
               } catch (err) {
                 toastError(err);
               }
@@ -983,10 +1049,40 @@ export async function render(ctx: PageContext): Promise<void> {
                 toastError(new Error("请选择目标相册"));
                 return;
               }
+              // 先记下范围与目标相册名：cancelSelection() 会清空选择
+              const all = state.allMatching;
+              const ids = new Set(state.selected);
+              const targetName =
+                state.albums?.albums.find((album) => album.id === albumId)?.name ?? null;
               handle.close();
               try {
                 const affected = await runBatch("move", { album_id: albumId });
-                await afterBatch(`已移动 ${affected} 张图片`);
+                toastOk(`已移动 ${affected} 张图片`);
+                cancelSelection();
+                if (state.albumId !== null) {
+                  // 目标就是当前相册的话，列表里的图片一张都不会少
+                  if (albumId !== state.albumId) {
+                    if (all) {
+                      // 整个相册都搬走了，当前视图自然空了
+                      state.items = [];
+                      state.total = 0;
+                      state.totalPages = 0;
+                      state.page = 0;
+                    } else {
+                      // 移去别的相册：从当前列表摘掉，别等下一次整页重拉
+                      dropLoaded(ids);
+                    }
+                  }
+                } else {
+                  // “全部图片”里它们还在，只是换了归属相册
+                  for (const item of all
+                    ? state.items
+                    : state.items.filter((entry) => ids.has(entry.id))) {
+                    item.album_id = albumId;
+                    item.album_name = targetName;
+                  }
+                }
+                await afterLocalMutation({ refreshAlbums: true });
               } catch (err) {
                 toastError(err);
               }
@@ -1024,9 +1120,23 @@ export async function render(ctx: PageContext): Promise<void> {
       `移到回收站${count > 0 ? `（${count} 张）` : ""}`,
     );
     if (!ok) return;
+    // 先记下范围：cancelSelection() 会清空 state.selected
+    const all = state.allMatching;
+    const ids = new Set(state.selected);
     try {
       const affected = await runBatch("delete", {});
-      await afterBatch(`已删除 ${affected} 张图片`);
+      toastOk(`已删除 ${affected} 张图片`);
+      cancelSelection();
+      if (all) {
+        // 整个范围都删了，列表和计数直接归零，不用再拉一次空页
+        state.items = [];
+        state.total = 0;
+        state.totalPages = 0;
+        state.page = 0;
+      } else {
+        dropLoaded(ids);
+      }
+      await afterLocalMutation({ refreshAlbums: true });
     } catch (err) {
       toastError(err);
     }
@@ -1050,7 +1160,8 @@ export async function render(ctx: PageContext): Promise<void> {
       await request(`/images/${item.id}`, { method: "DELETE", query: { uid: viewingUid ?? undefined } });
       toastOk("已删除 1 张图片");
       state.selected.delete(item.id);
-      await Promise.all([loadImages(1), loadAlbums()]);
+      dropLoaded(new Set([item.id]));
+      await afterLocalMutation({ refreshAlbums: true });
     } catch (err) {
       toastError(err);
     }
@@ -1343,10 +1454,10 @@ export async function render(ctx: PageContext): Promise<void> {
       overlay.remove();
       document.body.style.overflow = "";
       state.lightboxOpen = false;
-      // 编辑过标题/标签/可见性就把列表刷回当前页，别让背后的卡片继续显示旧信息
-      if (dirty) {
-        void loadImages(Math.floor((state.offset + current) / PER_PAGE) + 1);
-      }
+      // 编辑过标题/标签/可见性就把列表刷回当前页，别让背后的卡片继续显示旧信息。
+      // 保存时已经把 item 改好了，原地重画就够；按页重拉会丢掉无限滚动攒下的页，
+      // 滚动位置也会弹回顶部。
+      if (dirty) renderList({ preserveScroll: true });
     }
 
     function onKey(event: KeyboardEvent): void {

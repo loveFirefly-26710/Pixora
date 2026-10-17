@@ -42,6 +42,10 @@
   --stage-text: #e8f7f1;
   --code-bg: #020c0c;
   --code-fg: #d9fff2;
+  /* 选中态用固定的高亮底色，不跟正文色走：代码块、看图浮层在亮色主题下
+     仍是深色底，深色文字叠上去会看不见。 */
+  --selection-bg: #4fe0b6;
+  --selection-fg: #03241b;
   --ambient-a: rgba(53, 190, 160, .17);
   --ambient-b: rgba(238, 200, 135, .055);
   --ambient-c: rgba(35, 133, 120, .07);
@@ -111,6 +115,9 @@
   --stage-text: #e8f7f1;
   --code-bg: #08201c;
   --code-fg: #d9fff2;
+  /* 亮色主题的选中底色用浅薄荷、深色字：白底与代码块深底上都够清楚 */
+  --selection-bg: #8fe0c8;
+  --selection-fg: #062e25;
   --ambient-a: rgba(59, 198, 161, .2);
   --ambient-b: rgba(238, 196, 123, .17);
   --ambient-c: rgba(66, 169, 143, .1);
@@ -154,8 +161,8 @@ body {
 }
 
 ::selection {
-  background: var(--primary-soft);
-  color: var(--text);
+  background: var(--selection-bg);
+  color: var(--selection-fg);
 }
 
 * {
