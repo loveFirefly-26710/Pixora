@@ -5,6 +5,8 @@
 # 三处改成同一个值。
 #
 # 需要 Docker Compose 2.23 以上（configs.content 内嵌了 Caddy 配置）。
+# 镜像默认用 :latest；生产建议固定成具体版本号（如 :0.1.1）。
+# 安装向导第 4 步的「基础 URL」会写进数据库，之后以数据库里的值为准。
 
 services:
   pixora:
@@ -38,6 +40,11 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   db:
     image: mysql:8.4
@@ -63,6 +70,11 @@ services:
     deploy:
       resources:
         limits: { memory: 300M }
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2-alpine
@@ -78,11 +90,18 @@ services:
     deploy:
       resources:
         limits: { memory: 48M }
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 configs:
   caddyfile:
     content: |
-      {$PIXORA_DOMAIN} {
+      # Compose 对 content 里的变量符号也会插值，这里写两遍做转义；
+      # Caddy 实际读到的是单个变量引用，再从容器环境取域名。
+      {$$PIXORA_DOMAIN} {
           encode zstd gzip
           request_body {
               max_size 64MB
