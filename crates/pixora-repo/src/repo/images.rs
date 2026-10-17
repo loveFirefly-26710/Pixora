@@ -1352,6 +1352,42 @@ impl Repo {
         Ok(affected)
     }
 
+    /// 批量追加标签：保留原有标签，只把缺少的那些补上。
+    ///
+    /// 与 [`Self::update_images`] 的整组替换不同——相册页的「打标签」按钮
+    /// 和界面文案都是追加语义，服务端不能顺手把旧标签清掉。
+    pub async fn append_images_tags(
+        &self,
+        ids: &[i64],
+        owner_id: i64,
+        tags: &[String],
+    ) -> Result<u64> {
+        let names = normalize_tag_list(tags);
+        if ids.is_empty() || names.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.db.pool().begin().await?;
+        let mut touched = 0u64;
+        for id in ids {
+            for name in &names {
+                let tag_id = ensure_tag_on(&self.db, &mut tx, owner_id, name).await?;
+                let link = self.db.sql_v(
+                    "INSERT INTO image_tags (image_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                    "INSERT IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)",
+                    "INSERT INTO image_tags (image_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                );
+                sqlx::query(&link)
+                    .bind(*id)
+                    .bind(tag_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            touched += 1;
+        }
+        tx.commit().await?;
+        Ok(touched)
+    }
+
     /// 单张图的补丁修改。
     pub async fn update_image(&self, id: i64, patch: &ImagePatch) -> Result<()> {
         let mut sets: Vec<String> = Vec::new();

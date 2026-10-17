@@ -403,13 +403,10 @@ impl AppState {
             }
             BatchAction::Tag => {
                 let tags = tags.ok_or_else(|| AppError::bad_request("缺少标签"))?;
-                let patch = ImagePatch {
-                    tags: Some(tags),
-                    ..Default::default()
-                };
+                // 追加而不是整组替换：旧标签要保留，界面文案也是这么承诺的
                 Ok(self
                     .repo
-                    .update_images(&owned_ids, owner_id, &patch)
+                    .append_images_tags(&owned_ids, owner_id, &tags)
                     .await?)
             }
             BatchAction::Visibility => {
