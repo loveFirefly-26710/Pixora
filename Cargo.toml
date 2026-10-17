@@ -11,19 +11,19 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
 
 [workspace.dependencies]
 # 内部 crate（统一在这里声明路径与版本，成员清单只写 `workspace = true`）
-pixora-crypto = { path = "crates/pixora-crypto", version = "0.1.2" }
-pixora-storage = { path = "crates/pixora-storage", version = "0.1.2" }
-pixora-mail = { path = "crates/pixora-mail", version = "0.1.2" }
-pixora-repo = { path = "crates/pixora-repo", version = "0.1.2" }
-pixora-core = { path = "crates/pixora-core", version = "0.1.2" }
-pixora-queue = { path = "crates/pixora-queue", version = "0.1.2" }
+pixora-crypto = { path = "crates/pixora-crypto", version = "0.1.3" }
+pixora-storage = { path = "crates/pixora-storage", version = "0.1.3" }
+pixora-mail = { path = "crates/pixora-mail", version = "0.1.3" }
+pixora-repo = { path = "crates/pixora-repo", version = "0.1.3" }
+pixora-core = { path = "crates/pixora-core", version = "0.1.3" }
+pixora-queue = { path = "crates/pixora-queue", version = "0.1.3" }
 
 # 异步运行时与 HTTP
 tokio = { version = "1.43", features = [
