@@ -28,7 +28,7 @@ import {
   newShuffleSeed,
   pageHead,
   qtip,
-  skeletonGrid,
+  skeletonTiles,
   sortSelect,
   spinner,
 } from "../ui/widgets";
@@ -44,7 +44,17 @@ interface PlazaQuery {
   seed: number;
 }
 
-const KNOWN_SORTS = ["shuffle", "new", "old", "size", "smallest", "name", "type", "hot"];
+const KNOWN_SORTS = [
+  "shuffle",
+  "new",
+  "old",
+  "name_desc",
+  "name",
+  "size",
+  "smallest",
+  "type",
+  "hot",
+];
 
 function readQuery(ctx: PageContext): PlazaQuery {
   const sortParam = ctx.query.get("sort");
@@ -158,7 +168,7 @@ export async function render(ctx: PageContext): Promise<void> {
   const tagRow = h("div.flexline", { style: { marginBottom: "14px" } });
   root.append(tagRow, grid, footer);
 
-  // 排序下拉。默认「随机」，另给一个「最热」（按浏览量）。
+  // 排序下拉。默认「随机」；「最热」按浏览量，后端有 views 统计，所以保留。
   // 换排序时换一个种子：不然「随机」切回来还是同一份顺序，看着像没生效
   const sortControl = sortSelect(query.sort, (value) => {
     update({ sort: value, seed: value === "shuffle" ? String(newShuffleSeed()) : null });
@@ -219,7 +229,7 @@ export async function render(ctx: PageContext): Promise<void> {
       currentPage = 0;
       totalPages = 1;
       items.length = 0;
-      grid.replaceChildren(skeletonGrid(8));
+      grid.replaceChildren(...skeletonTiles(8));
       footer.replaceChildren();
     } else {
       paintFooter();
@@ -240,8 +250,14 @@ export async function render(ctx: PageContext): Promise<void> {
       totalPages = Math.max(1, page.meta.total_pages);
 
       if (reset) grid.replaceChildren();
-      if (currentPage === 1 && page.items.length === 0) {
-        grid.replaceChildren(emptyGridHint(query, Boolean(user)));
+      if (page.items.length === 0) {
+        // 第一页就是空的：把骨架屏换成空状态。不要依赖 meta.page 一定是 1，
+        // 否则空广场切排序时会留下几块灰色占位。
+        if (items.length === 0) {
+          grid.replaceChildren(emptyGridHint(query, Boolean(user)));
+          currentPage = 1;
+          totalPages = 1;
+        }
       } else {
         for (const item of page.items) {
           grid.append(
