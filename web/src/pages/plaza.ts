@@ -17,7 +17,7 @@ import { h } from "../core/dom";
 import { relativeTime } from "../core/format";
 import { navigate, type PageContext } from "../core/router";
 import { currentUser, getState } from "../core/state";
-import { toast, toastError } from "../core/toast";
+import { toastError } from "../core/toast";
 import type { ImageItem } from "../core/types";
 import { createUploadPanel } from "../upload/panel";
 import { FIREFLY_MARK } from "../ui/brand";
@@ -104,6 +104,22 @@ interface PlazaHeroHandle {
   root: HTMLElement;
   setFeatured(item: ImageItem | null): void;
   setTotal(total: number): void;
+  setAutoState(enabled: boolean): void;
+}
+
+interface PlazaHeroOptions {
+  onUpload: () => void;
+  onOpen: (item: ImageItem) => void;
+  onToggleAuto: () => void;
+  autoSeconds: number;
+  autoEnabled: boolean;
+}
+
+/** 把秒数写成人能读的间隔，3600 秒写成 1 小时而不是一串数字。 */
+function autoIntervalLabel(seconds: number): string {
+  if (seconds >= 3600 && seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60} 分钟`;
+  return `${seconds} 秒`;
 }
 
 /**
@@ -111,12 +127,9 @@ interface PlazaHeroHandle {
  *
  * 图不是另找的素材：第一页回来之后直接拿第一张公开图当 hero，
  * 点它就在当前列表里打开预览。没有图时退回萤火翼标，不留一块空白。
+ * 自动漫游按钮只在管理员设了间隔时出现，点一下暂停/继续。
  */
-function buildPlazaHero(
-  onUpload: () => void,
-  onRandom: () => void,
-  onOpen: (item: ImageItem) => void,
-): PlazaHeroHandle {
+function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
   let featured: ImageItem | null = null;
   const count = h("span", { text: "0 幅公开影像" });
   const chipTitle = h("div.hero-chip-title", { text: "等待第一束光" });
@@ -130,13 +143,27 @@ function buildPlazaHero(
     frameInner,
   );
   frame.addEventListener("click", () => {
-    if (featured) onOpen(featured);
+    if (featured) options.onOpen(featured);
   });
 
   const upload = h("button.btn.pri", { type: "button", text: "投递影像" });
-  upload.addEventListener("click", onUpload);
-  const random = h("button.btn.gho", { type: "button", text: "随机漫游" });
-  random.addEventListener("click", onRandom);
+  upload.addEventListener("click", options.onUpload);
+
+  let autoButton: HTMLButtonElement | null = null;
+  let autoLabel: HTMLElement | null = null;
+  if (options.autoSeconds > 0) {
+    autoLabel = h("span.auto-label");
+    autoButton = h(
+      "button.btn.gho.auto-roam",
+      {
+        type: "button",
+        "aria-pressed": String(options.autoEnabled),
+      },
+      h("span.auto-dot", { "aria-hidden": "true" }),
+      autoLabel,
+    );
+    autoButton.addEventListener("click", options.onToggleAuto);
+  }
 
   const hero = h(
     "section.plaza-hero",
@@ -149,7 +176,7 @@ function buildPlazaHero(
       h("p.plaza-hero-desc", {
         text: "在夜里，留下一点光。浏览公开影像，或把自己的那一帧投进这片夜空。",
       }),
-      h("div.plaza-hero-actions", null, upload, random),
+      h("div.plaza-hero-actions", null, upload, autoButton),
       h(
         "div.plaza-hero-meta",
         null,
@@ -213,7 +240,19 @@ function buildPlazaHero(
     chipSub.textContent = `${item.tags.slice(0, 2).join(" / ") || "公开影像"} · ${item.views} 次浏览`;
   }
 
-  return { root: hero, setFeatured, setTotal };
+  function setAutoState(enabled: boolean): void {
+    if (!autoButton || !autoLabel) return;
+    const interval = autoIntervalLabel(options.autoSeconds);
+    autoButton.classList.toggle("on", enabled);
+    autoButton.setAttribute("aria-pressed", String(enabled));
+    autoLabel.textContent = enabled ? `自动漫游 · ${interval}` : "自动漫游已暂停";
+    const action = enabled ? "暂停自动漫游" : "继续自动漫游";
+    autoButton.setAttribute("aria-label", action);
+    autoButton.title = `${action}（每 ${interval}刷新）`;
+  }
+
+  setAutoState(options.autoEnabled);
+  return { root: hero, setFeatured, setTotal, setAutoState };
 }
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -242,20 +281,22 @@ export async function render(ctx: PageContext): Promise<void> {
 
   // 搜索/标签结果页不摆 hero：结果应该直接出现在第一屏。
   // 普通广场用 hero 带出品牌气质，并把第一张公开图当作「随机一帧」。
+  const isPlazaHome = !query.q && !query.tag;
+  const configuredAuto = Math.max(0, site?.plaza_auto_refresh_seconds ?? 0);
+  // 后端已经钳过一次；前端再兜一层，避免旧数据或手工请求把间隔压到 1 秒
+  const autoSeconds =
+    isPlazaHome && configuredAuto > 0 ? Math.min(3600, Math.max(5, configuredAuto)) : 0;
+  let autoEnabled = autoSeconds > 0;
+  let autoTimer: number | null = null;
   let heroState: PlazaHeroHandle | null = null;
-  if (!query.q && !query.tag) {
-    heroState = buildPlazaHero(
-      () => jumpToUpload(),
-      () => {
-        if (items.length === 0) {
-          toast("广场还没有公开图片");
-          return;
-        }
-        const pick = items[Math.floor(Math.random() * items.length)]!;
-        openLightbox(items, pick);
-      },
-      (item) => openLightbox(items, item),
-    );
+  if (isPlazaHome) {
+    heroState = buildPlazaHero({
+      autoSeconds,
+      autoEnabled,
+      onUpload: () => jumpToUpload(),
+      onToggleAuto: () => toggleAuto(),
+      onOpen: (item) => openLightbox(items, item),
+    });
     root.append(heroState.root);
   } else {
     root.append(
@@ -451,6 +492,91 @@ export async function render(ctx: PageContext): Promise<void> {
     }
   }
 
+  function stopAutoTimer(): void {
+    if (autoTimer !== null) {
+      window.clearInterval(autoTimer);
+      autoTimer = null;
+    }
+  }
+
+  function startAutoTimer(): void {
+    stopAutoTimer();
+    if (!autoEnabled || autoSeconds <= 0) return;
+    autoTimer = window.setInterval(() => {
+      // 离开广场后页面节点会被路由替换掉；等到下一次 tick 自己收掉，不用额外卸载钩子
+      if (!root.isConnected) {
+        stopAutoTimer();
+        return;
+      }
+      if (!autoEnabled || loading) return;
+      // 后台标签页、看图浮层、弹窗期间不抢画面
+      if (document.visibilityState !== "visible") return;
+      if (document.querySelector(".lb, .modal")) return;
+      void quietRefresh();
+    }, autoSeconds * 1000);
+  }
+
+  function toggleAuto(): void {
+    if (autoSeconds <= 0) return;
+    autoEnabled = !autoEnabled;
+    heroState?.setAutoState(autoEnabled);
+    if (autoEnabled) startAutoTimer();
+    else stopAutoTimer();
+  }
+
+  /**
+   * 自动漫游的刷新：不先清空网格，等第一页回来再整体替换。
+   * 这样不会每 30 秒闪一次骨架屏；请求失败时也保留当前画面。
+   */
+  async function quietRefresh(): Promise<void> {
+    if (loading) return;
+    loading = true;
+    try {
+      // 随机排序换一个种子，非随机排序保持当前口径
+      if (query.sort === "shuffle") query.seed = newShuffleSeed();
+      const page = await requestPage<ImageItem>("/plaza", {
+        query: {
+          q: query.q ?? undefined,
+          tag: query.tag ?? undefined,
+          sort: query.sort,
+          seed: query.seed,
+          page: 1,
+          per_page: PER_PAGE,
+        },
+      });
+      currentPage = page.meta.page;
+      totalPages = Math.max(1, page.meta.total_pages);
+      items.length = 0;
+      items.push(...page.items);
+      heroState?.setTotal(page.meta.total);
+      heroState?.setFeatured(page.items[0] ?? null);
+
+      grid.replaceChildren();
+      if (page.items.length === 0) {
+        grid.replaceChildren(emptyGridHint(query, Boolean(user)));
+        currentPage = 1;
+        totalPages = 1;
+      } else {
+        for (const item of page.items) {
+          grid.append(
+            imageTile(item, {
+              title: item.title,
+              subtitle: relativeTime(item.upload_time),
+              onOpen: (clicked) => openLightbox(items, clicked),
+            }),
+          );
+        }
+        applyMasonry(grid);
+      }
+      failed = false;
+    } catch {
+      // 自动刷新失败不覆盖当前画面，也不弹错；等下一轮再试
+    } finally {
+      loading = false;
+      paintFooter();
+    }
+  }
+
   loadFirstPage = () => loadMore(true);
 
   // 哨兵：进入视口就取下一页
@@ -488,4 +614,5 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   await loadMore(true);
+  startAutoTimer();
 }

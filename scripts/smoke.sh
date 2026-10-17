@@ -336,6 +336,7 @@ ok "随机图挑不到图片时返回 404"
 
 SITE_INFO="$(curl -s "${BASE}/api/v1/site")"
 expect_json "${SITE_INFO}" "d['data']['plaza_grid_columns']" "3" "站点信息带广场列数（默认 3）"
+expect_json "${SITE_INFO}" "d['data']['plaza_auto_refresh_seconds']" "30" "站点信息带自动漫游间隔（默认 30 秒）"
 
 TREE="$(api GET "/api/v1/fs/tree")"
 expect_json "${TREE}" "d['data']['files']" "2" "目录树统计到 2 个文件"
@@ -468,6 +469,20 @@ api PUT /api/v1/admin/settings -H 'Content-Type: application/json' \
     -d '{"site":{"plaza_grid_columns":99}}' >/dev/null
 SETTINGS3="$(api GET /api/v1/admin/settings)"
 expect_json "${SETTINGS3}" "d['data']['site']['plaza_grid_columns']" "6" "越界的列数被钳到上限 6"
+
+# 自动漫游：0 关闭，正数钳到 5..=3600
+api PUT /api/v1/admin/settings -H 'Content-Type: application/json' \
+    -d '{"site":{"plaza_auto_refresh_seconds":0}}' >/dev/null
+expect_json "$(api GET /api/v1/admin/settings)" "d['data']['site']['plaza_auto_refresh_seconds']" "0" "自动漫游可以关闭"
+api PUT /api/v1/admin/settings -H 'Content-Type: application/json' \
+    -d '{"site":{"plaza_auto_refresh_seconds":2}}' >/dev/null
+expect_json "$(api GET /api/v1/admin/settings)" "d['data']['site']['plaza_auto_refresh_seconds']" "5" "过短的间隔被钳到 5 秒"
+api PUT /api/v1/admin/settings -H 'Content-Type: application/json' \
+    -d '{"site":{"plaza_auto_refresh_seconds":9999}}' >/dev/null
+expect_json "$(api GET /api/v1/admin/settings)" "d['data']['site']['plaza_auto_refresh_seconds']" "3600" "过长的间隔被钳到 3600 秒"
+api PUT /api/v1/admin/settings -H 'Content-Type: application/json' \
+    -d '{"site":{"plaza_auto_refresh_seconds":30}}' >/dev/null
+expect_json "$(curl -s "${BASE}/api/v1/site")" "d['data']['plaza_auto_refresh_seconds']" "30" "前台 /site 同步自动漫游间隔"
 
 # 直链前缀改名后旧链依然有效（映射在数据库里，不在 URL 结构里）
 api PUT /api/v1/admin/storage/prefix -H 'Content-Type: application/json' -d '{"upload_prefix":"i"}' >/dev/null

@@ -99,6 +99,7 @@ pub async fn site(
         "base_url": state.base_url().await,
         "upload_prefix": site.upload_prefix,
         "plaza_grid_columns": site.plaza_grid_columns,
+        "plaza_auto_refresh_seconds": site.plaza_auto_refresh_seconds,
         "recycle_retention_days": state
             .settings
             .retention_days()

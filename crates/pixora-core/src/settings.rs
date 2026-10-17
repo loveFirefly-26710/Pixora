@@ -41,6 +41,8 @@ pub mod keys {
     pub const PLAZA_PUBLIC: &str = "plaza.public";
     /// 广场网格列数（界面上的图大小就由它决定）
     pub const PLAZA_GRID_COLUMNS: &str = "plaza.grid_columns";
+    /// 广场自动漫游间隔（秒）。0 = 关闭
+    pub const PLAZA_AUTO_REFRESH_SECONDS: &str = "plaza.auto_refresh_seconds";
     pub const UPLOAD_MAX_FILE: &str = "upload.max_file_bytes";
     pub const UPLOAD_MAX_BATCH: &str = "upload.max_batch";
     pub const UPLOAD_MAX_PIXELS: &str = "upload.max_pixels";
@@ -200,6 +202,11 @@ pub mod defaults {
     /// 网格列数的可配置范围。少于 2 列不成网格，多于 6 列缩略图就糊了
     pub const GRID_COLUMNS_MIN: i64 = 2;
     pub const GRID_COLUMNS_MAX: i64 = 6;
+    /// 广场自动漫游默认 30 秒：够看一眼，又不会一直重排
+    pub const PLAZA_AUTO_REFRESH_SECONDS: i64 = 30;
+    /// 自动刷新间隔的可配置范围。0 = 关闭；太短会打断浏览，太长就不叫漫游了
+    pub const PLAZA_AUTO_REFRESH_MIN: i64 = 5;
+    pub const PLAZA_AUTO_REFRESH_MAX: i64 = 3600;
     pub const SITE_NAME: &str = "Pixora";
     pub const FROM_NAME: &str = "Pixora 管理团队";
     pub const SMTP_HOST: &str = "smtp.qiye.aliyun.com";
@@ -218,6 +225,8 @@ pub struct SiteSettings {
     pub register_enabled: bool,
     /// 广场每行放几张图。已经钳到 `GRID_COLUMNS_MIN..=GRID_COLUMNS_MAX`
     pub plaza_grid_columns: i64,
+    /// 广场自动漫游间隔（秒）。0 = 关闭，其余钳在 `PLAZA_AUTO_REFRESH_MIN..=MAX`
+    pub plaza_auto_refresh_seconds: i64,
     /// 允许注册的邮箱域名（白名单，空 = 不限）
     pub email_domains: RegisterDomains,
 }
@@ -543,6 +552,13 @@ impl Settings {
                 .integer(keys::PLAZA_GRID_COLUMNS, defaults::GRID_COLUMNS)
                 .await?
                 .clamp(defaults::GRID_COLUMNS_MIN, defaults::GRID_COLUMNS_MAX),
+            plaza_auto_refresh_seconds: normalize_auto_refresh_seconds(
+                self.integer(
+                    keys::PLAZA_AUTO_REFRESH_SECONDS,
+                    defaults::PLAZA_AUTO_REFRESH_SECONDS,
+                )
+                .await?,
+            ),
             email_domains: RegisterDomains::parse(
                 self.raw(keys::REGISTER_EMAIL_DOMAINS).await?.as_deref(),
             ),
@@ -856,6 +872,21 @@ pub fn normalize_prefix(input: &str) -> String {
     }
 }
 
+/// 广场自动漫游间隔的归一化。
+///
+/// 0 表示关闭；正数钳在 5 秒到 1 小时之间。库里的值可能被手工改坏，
+/// 也可能来自旧版本的 API，因此出库和写入都走同一套规则。
+pub fn normalize_auto_refresh_seconds(value: i64) -> i64 {
+    if value <= 0 {
+        0
+    } else {
+        value.clamp(
+            defaults::PLAZA_AUTO_REFRESH_MIN,
+            defaults::PLAZA_AUTO_REFRESH_MAX,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,5 +935,16 @@ mod tests {
         assert_eq!(defaults::SMTP_PORT, 465);
         assert_eq!(defaults::SMTP_HOST, "smtp.qiye.aliyun.com");
         assert_eq!(defaults::GRID_COLUMNS, 3);
+        assert_eq!(defaults::PLAZA_AUTO_REFRESH_SECONDS, 30);
+    }
+
+    #[test]
+    fn auto_refresh_interval_is_normalized() {
+        assert_eq!(normalize_auto_refresh_seconds(-1), 0);
+        assert_eq!(normalize_auto_refresh_seconds(0), 0);
+        assert_eq!(normalize_auto_refresh_seconds(1), 5);
+        assert_eq!(normalize_auto_refresh_seconds(30), 30);
+        assert_eq!(normalize_auto_refresh_seconds(3600), 3600);
+        assert_eq!(normalize_auto_refresh_seconds(9999), 3600);
     }
 }

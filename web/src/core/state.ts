@@ -135,6 +135,8 @@ export async function loadSite(): Promise<void> {
       login_methods: { github: false, google: false, qq: false, wechat: false, phone: false },
       installed: true,
       plaza_grid_columns: 3,
+      // 站点信息拿不到时不自动刷新：宁可少一个效果，也不替管理员做主
+      plaza_auto_refresh_seconds: 0,
       recycle_retention_days: 30,
       terms: { required: false, version: null, articles: 0 },
     };

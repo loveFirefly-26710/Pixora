@@ -55,6 +55,8 @@ export interface SiteInfo {
   terms: { required: boolean; version: string | null; articles: number };
   /** 广场网格列数，管理员可配 */
   plaza_grid_columns: number;
+  /** 广场自动漫游间隔（秒）。0 = 关闭 */
+  plaza_auto_refresh_seconds: number;
   /** 回收站保留天数：0 = 关闭回收站（删除即彻底删除） */
   recycle_retention_days: number;
   /** 会话有效期：闲置多少分钟掉线、最长多少天 */
@@ -538,6 +540,8 @@ export interface AdminSettings {
     /** 允许注册的邮箱域名白名单，逗号分隔；空 = 不限域名 */
     email_domains: string;
     plaza_grid_columns: number;
+    /** 广场自动漫游间隔（秒）。0 = 关闭 */
+    plaza_auto_refresh_seconds: number;
     recycle_retention_days: number;
   };
   upload: {
