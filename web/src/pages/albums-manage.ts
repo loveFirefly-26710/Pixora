@@ -14,7 +14,7 @@ import { h, mount } from "../core/dom";
 import { formatBytes, formatDateTime, formatNumber } from "../core/format";
 import { confirmDanger, confirmDialog, promptDialog } from "../core/modal";
 import { navigate, type PageContext } from "../core/router";
-import { getState } from "../core/state";
+import { getState, isAdmin, setViewingUid } from "../core/state";
 import { toastError, toastOk } from "../core/toast";
 import type { AdminUserRow, Album, AlbumList } from "../core/types";
 import { userViewBanner } from "../ui/shell";
@@ -24,6 +24,9 @@ export async function render(ctx: PageContext): Promise<void> {
   const root = h("div.pad");
   ctx.outlet.append(root);
 
+  // 从相册页的「管理相册」带 uid 进来时，保持用户视图
+  const requestedUid = (ctx.query.get("uid") ?? "").trim();
+  if (requestedUid && isAdmin()) setViewingUid(requestedUid);
   const viewingUid = getState().viewingUid;
   const readOnly = Boolean(viewingUid);
 
@@ -72,8 +75,17 @@ export async function render(ctx: PageContext): Promise<void> {
 
 /** 用户视图横幅：先显示 uid，拿到邮箱后再补全文案（不阻塞页面渲染）。 */
 function buildViewBanner(uid: string): HTMLElement {
-  const banner = userViewBanner(uid, `u_${uid}`, () => navigate("/admin/users"), () =>
-    navigate("/albums"),
+  const banner = userViewBanner(
+    uid,
+    `u_${uid}`,
+    () => {
+      setViewingUid(null);
+      navigate("/admin/users");
+    },
+    () => {
+      setViewingUid(null);
+      navigate("/albums");
+    },
   );
   const label = banner.querySelector("b");
   if (!label) return banner;

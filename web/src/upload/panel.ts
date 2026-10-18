@@ -19,6 +19,7 @@ import {
   concurrencyCap,
   concurrencyOptions,
   getUploadQueue,
+  setUploadOwnerUid,
   type IncomingFile,
   type QueueItem,
   type QueueStats,
@@ -56,6 +57,8 @@ export interface UploadPanelOptions {
    * 选择文件后预览与队列仍会出现，不影响上传本身。
    */
   compact?: boolean;
+  /** 管理员用户视图：上传归到目标用户名下；普通页面不传 */
+  ownerUid?: string | null;
 }
 
 export interface UploadPanelHandle {
@@ -193,6 +196,8 @@ export async function collectFiles(dataTransfer: DataTransfer): Promise<Incoming
 
 export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanelHandle {
   const queue = getUploadQueue();
+  // 面板是页面级入口：每次挂载都重设归属，避免上一个用户视图的 uid 留在队列上
+  setUploadOwnerUid(options.ownerUid ?? null);
 
   let notices: Array<{ tone: "info" | "ok" | "warn" | "err"; text: string }> = [];
   let lastToast = { message: "", at: 0 };

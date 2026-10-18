@@ -92,6 +92,10 @@ pub async fn site(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    let music = match state.settings.music().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
 
     let response = finish::<serde_json::Value>(Ok(serde_json::json!({
         "name": site.name,
@@ -99,6 +103,11 @@ pub async fn site(
         "upload_prefix": site.upload_prefix,
         "plaza_grid_columns": site.plaza_grid_columns,
         "plaza_auto_refresh_seconds": site.plaza_auto_refresh_seconds,
+        // 前端据此决定要不要显示顶部播放按钮；歌单内容走 /music/playlist
+        "music": {
+            "enabled": music.enabled,
+            "source": music.source,
+        },
         "recycle_retention_days": state
             .settings
             .retention_days()
@@ -225,6 +234,7 @@ pub async fn plaza(
                 parse_i64(&query, "seed").unwrap_or(0).max(0) as u64,
                 parse_i64(&query, "page"),
                 parse_i64(&query, "per_page"),
+                &site.plaza_album_ids,
             )
             .await,
     )

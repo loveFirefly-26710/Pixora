@@ -24,6 +24,16 @@ import {
 } from "../core/store";
 import type { HashCheck, UploadResult } from "../core/types";
 
+/**
+ * 上传归属：管理员在用户视图里代目标用户上传时由页面设置。
+ * 普通页面为 null，服务端按登录账号或访客账号处理。
+ */
+let ownerUid: string | null = null;
+
+export function setUploadOwnerUid(uid: string | null): void {
+  ownerUid = uid;
+}
+
 /** 并发数只允许 1 / 2 / 4：再大对单账号上传限额和服务器都没有好处。 */
 export type Concurrency = 1 | 2 | 4;
 /**
@@ -936,6 +946,7 @@ class UploadQueue {
       for (const batch of chunk(hashes, chunkSize)) {
         const result = await request<HashCheck>("/blobs/exists", {
           json: { hashes: batch },
+          query: ownerUid ? { uid: ownerUid } : undefined,
         });
         for (const hash of result.exist ?? []) exist.add(hash);
       }
@@ -1080,6 +1091,7 @@ class UploadQueue {
 
       const result = await request<UploadResult>("/upload", {
         form,
+        query: ownerUid ? { uid: ownerUid } : undefined,
         signal: controller.signal,
         onProgress: (loaded, total) => {
           // 留 1% 给服务端处理阶段，避免进度条早早停在 100% 干等

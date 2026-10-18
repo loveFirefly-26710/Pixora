@@ -169,6 +169,7 @@ impl AppState {
         let filter = ImageFilter {
             owner_id,
             album_id: q.album_id,
+            album_ids: None,
             public_only: viewer.is_anonymous(),
             query: q.query.clone(),
             tag: q.tag.clone(),
@@ -195,10 +196,18 @@ impl AppState {
         seed: u64,
         page: Option<i64>,
         per_page: Option<i64>,
+        album_ids: &[i64],
     ) -> Result<Page<ImageItemPayload>> {
         let request = PageRequest::new(page, per_page, 24, 100);
         let filter = ImageFilter {
             public_only: true,
+            // 管理员选了「首页展示的公开相册」就只取这些相册；空清单表示
+            // 沿用旧行为（全部公开图片）
+            album_ids: if album_ids.is_empty() {
+                None
+            } else {
+                Some(album_ids.to_vec())
+            },
             query: query.map(str::to_string),
             tag: tag.map(str::to_string),
             // 广场默认是随机顺序：每次进来看到的都该是新的组合

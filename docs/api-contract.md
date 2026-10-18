@@ -59,6 +59,7 @@
 | `FILE_TOO_LARGE` | 413 | 超出单文件上限 |
 | `UNSUPPORTED_FORMAT` | 415 | 格式不在白名单内 |
 | `INVALID_IMAGE` | 422 | 魔数校验失败或不是图片 |
+| `TOTP_REQUIRED` | 400 | 账号开启二次验证，登录请求需要附带动态码或恢复码 |
 | `RATE_LIMITED` | 429 | 触发频率限制，带 `Retry-After` 头 |
 | `QUEUE_FULL` | 429 | 队列深度超阈值，带 `Retry-After` |
 | `TERMS_REQUIRED` | 451 | 未同意当前生效条款 |
@@ -124,14 +125,19 @@ API 客户端：
   "upload_prefix": "images", "login_methods": { "github": false, "google": false, "qq": false, "wechat": false, "phone": false },
   "registration_open": true, "registration_closed_reason": null,
   "register_email_domains": ["example.com"],
-  // 站点允许未登录上传时才有这一段：客户端队列按访客账号那套额度限流
+  // 未登录也能上传时是这段；关着时字段存在，值为 null
   "guest_upload": { "enabled": true, "max_file_bytes": 20971520, "max_batch_size": 1000,
                     "max_concurrent_uploads": 5, "queue_depth": 500, "formats": ["jpg","png"] },
   "plaza_public": true, "plaza_grid_columns": 3, "plaza_auto_refresh_seconds": 5, "recycle_retention_days": 30,
   "formats": ["jpg","png","gif","webp","avif","heic","tiff","bmp","svg"],
   "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
+  "max_width": 0, "max_height": 0,
   "thumb_client": true, "thumb_server_fallback": false,
   "appeal_email": "admin@example.com", "background": null,
+  // 背景音乐是否启用；歌单内容走 /api/v1/music/playlist
+  "music": { "enabled": true, "source": "api" },
+  // 会话有效期（分钟 / 天）
+  "session": { "idle_minutes": 120, "absolute_days": 30 },
   // 站点默认头像：账号自己没设头像时用它（新注册的账号也走这条），没配过是 null
   "default_avatar": null,
   "installed": true, "terms": { "required": false, "version": "v2.1", "articles": 6 }
@@ -141,6 +147,12 @@ API 客户端：
 `terms.required` 表示「当前登录用户是否必须先同意条款」；未登录时为 `false`。
 
 `plaza_auto_refresh_seconds` 控制广场的自动漫游：`0` 关闭，正数表示每隔多少秒换一批公开图片；服务端把正数钳在 5–3600 秒，默认 5。
+
+管理员还可以在「系统设置 → 首页展示相册」里只选部分公开相册；选中后广场与自动漫游只取这些相册里的公开图片，空选择表示沿用全部公开图片。
+
+### `GET /api/v1/site/background` / `GET /api/v1/site/avatar` — 公开
+
+站点背景图与默认头像本体。没有上传过时返回 404；地址里带 `?v=<更新时间>`，可以长缓存。SVG 资产额外带 `sandbox` CSP，直接打开也不会执行脚本。
 
 ### 收件域名校验（反临时邮箱的第三层）
 
@@ -182,22 +194,25 @@ API 客户端：
 
 请求 `{ "email": "a@b.com" }` → `{ "data": { "ok": true, "message": "验证码已发送（若该邮箱可用）…" } }`。
 账号不存在、或没开二次验证时答话一样（不给「这个邮箱注册过没有」的探针）；发信没配好时
-`CONFIG` 错误说明缺哪一项。拿到码之后回到 `POST /auth/login`，把 6 位数字放在 `totp` 里、
+`CONFIG` 错误说明缺哪一项。拿到码之后回到 `POST /api/v1/auth/login`，把 6 位数字放在 `totp` 里、
 `code_method: "email"`。
 
 ### `POST /api/v1/auth/logout`
 
 清除服务端会话与 Cookie。响应 `{ "data": { "ok": true } }`。
 
-### `POST /api/v1/auth/password/code`
+### `POST /api/v1/auth/password/code` — 公开
+
+找回密码发码：`{ "email": "a@b.com" }`。响应同注册发码。
 
 发出的邮件里同时带一条重置链接（`{base_url}/#/reset-password?token=pxr_…`）与那串验证码。
 链接里放的是**一次性随机令牌**，不是邮箱与验证码——那两个是明文参数，转发一次链接就等于
 把「谁的账号 + 当前有效的验证码」一起递了出去。令牌 1 小时内有效，用一次即废；站点地址
 没配时只给验证码，不硬塞一个点不开的链接。
 
-发信能力（SMTP 是否配置）在查账号之前先判，所以「发不出去」这句话对所有人一样，
-不构成「这个邮箱注册过没有」的探针。
+同一封邮件里的链接与验证码共享一次机会：用任意一条重置成功后，另一条也立即作废。重新发信会
+先作废旧链接与旧验证码，只认最新一封。发信能力（SMTP 是否配置）在查账号之前先判，所以
+「发不出去」这句话对所有人一样，不构成「这个邮箱注册过没有」的探针。
 
 ### `GET /api/v1/auth/password/link?token=pxr_…`
 
@@ -207,11 +222,7 @@ API 客户端：
 ### `POST /api/v1/auth/password/link/reset` ← `{ "token": "pxr_…", "password": "…" }`
 
 点邮件里的链接设新密码。令牌在验证通过后立即作废；成功会吊销该用户全部会话并清掉
-`must_change_password`（密码是用户自己选的）。
-
- — 公开
-
-找回密码发码：`{ "email": "a@b.com" }`。响应同注册发码。
+`must_change_password`（密码是用户自己选的）。并发提交同一个令牌只有一个能成功。
 
 ### `POST /api/v1/auth/password/reset` — 公开
 
@@ -280,7 +291,7 @@ API 客户端：
 `{ "current": "…", "password": "新密码" }`。成功后会吊销其他设备会话（保留当前会话），
 并清掉 `must_change_password`——管理员直接设过密码的账号改完这一下就恢复正常使用。
 
-「必须改密码」状态下这个端点是放行的（另一个是 `GET /me`），其余接口一律 403。
+「必须改密码」状态下这个端点是放行的（另一个是 `GET /api/v1/me`），其余接口一律 403。
 
 ### `POST /api/v1/me/email/code` — write
 
@@ -323,7 +334,7 @@ API 客户端：
   验证器丢了的时候，它们是唯一的自助进门凭据。`disable` 时 `codes` 为 `null`（关掉二次验证会清空恢复码）
 - `{ "action": "disable", "code": "123456" }` → `{ "data": { "enabled": false } }`
 
-### `GET /api/v1/me/tokens` / `POST /api/v1/me/tokens` / `DELETE /api/v1/me/tokens/{id}`
+### `GET /api/v1/me/tokens` / `POST /api/v1/me/tokens` / `PATCH /api/v1/me/tokens/{id}` / `DELETE /api/v1/me/tokens/{id}`
 
 创建请求：`{ "name": "PicGo 桌面端", "scopes": ["upload","read"], "expires_in_days": 90 }`（`expires_in_days` 省略或 `null` 表示永不过期；填了就必须是 1–3650 的整数，越界返回 `BAD_REQUEST`）
 创建响应（明文只此一次）：
@@ -333,6 +344,8 @@ API 客户端：
             "display": "px_live_9f2a7c41", "scopes": ["upload","read"],
             "created_at": "…", "expires_at": null } }
 ```
+
+`PATCH` 只改名字：`{ "name": "新名字" }`，名字最长 64 字。令牌本身不变，已经配好的客户端不用改。
 
 列表项不含 `token` 字段，含 `last_used_at`、`revoked` 布尔。
 
@@ -359,7 +372,7 @@ API 客户端：
 
 ### `GET /api/v1/albums` — read
 
-查询参数：`uid`（管理员可指定他人；普通用户传他人 UID 返回 403）、`q`、`public_only`。
+查询参数：`uid`（管理员可指定他人；普通用户传他人 UID 返回 403）。当前不支持按关键词过滤或只取公开相册。
 响应（不带分页，侧边栏要全量）：
 
 ```json
@@ -403,7 +416,8 @@ API 客户端：
 | `album_id` | 相册筛选；不传即全部 |
 | `q` | 关键词，匹配标题与标签 |
 | `tag` | 精确标签 |
-| `sort` | `new`（默认） / `old` / `size` / `name` / `hot` |
+| `sort` | `shuffle`（默认） / `new` / `old` / `size` / `smallest` / `name` / `name_desc` / `hot` |
+| `seed` | 随机排序的种子；翻页时带上同一个值顺序才稳定 |
 | `page`、`per_page` | 分页，`per_page` 默认 24、上限 100 |
 | `ids` | 逗号分隔的一批 id（批量操作前回读用） |
 
@@ -438,7 +452,7 @@ API 客户端：
   密码哈希写成一个永远验不过去的值）名下。配额、回收站、内容审核、按用户的频率限制
   都跟着它走——管理员可以在「用户管理」里给这个账号单独调配额，或者干脆暂停它来
   按住游客上传。
-- 这个账号不接受登录：`POST /auth/login` 对它回 403，管理员的改密码、改角色与「切换登录」
+- 这个账号不接受登录：`POST /api/v1/auth/login` 对它回 403，管理员的改密码、改角色与「切换登录」
   同样被拒（调配额、暂停封禁不受影响）。管理端用户对象带 `"guest": true` 的就是它。
 - 它的邮箱是个**记号**（认「这只相册是谁的」用的）：管理员可以改（见 `PATCH /admin/users/{id}`），
   但那不验证、不发变更通知、也不查域名收不收得到信——它既不登录，也收发不了信。
@@ -483,8 +497,8 @@ API 客户端：
 图片与相册删除都是先软删；保留天数见 `/site` 的 `recycle_retention_days`（0 = 关闭回收站，
 删除即彻底删除）。回收站里的图片**只有本人（与管理员）取得到直链**（见第 10 节）。
 
-- `GET /api/v1/recycle/images` — 与普通图片列表同形状（分页、`ImageItem`），另带
-  `meta.retention_days`
+- `GET /api/v1/recycle/images` — 与普通图片列表同形状（分页、`ImageItem`）；保留天数从 `/site` 的
+  `recycle_retention_days` 读，不在分页 `meta` 里重复。
 - `POST /api/v1/recycle/images/restore` ← `{ "ids": [1,2,3] }` → `{ "data": { "restored": 3 } }`
 - `POST /api/v1/recycle/images/purge` ← `{ "ids": [1,2,3] }` → `{ "data": { "purged": 3 } }`（彻底删除，
   引用计数归零的物理文件由 GC 回收）
@@ -523,7 +537,8 @@ API 客户端：
 
 ### `POST /api/v1/blobs/exists` — upload
 
-请求：`{ "hashes": ["a3f9…", "7b21…"] }`（最多 1000 个）
+请求：`{ "hashes": ["a3f9…", "7b21…"] }`（最多 1000 个）。管理员可以带 `?uid=8549` 代目标用户预检。
+
 响应：`{ "data": { "exist": ["a3f9…"], "missing": ["7b21…"] } }`
 
 `exist` 的口径是「**调用者自己的图库里已经有一张活着的同内容图片**」，不是「服务器还有这份文件」：
@@ -532,16 +547,25 @@ API 客户端：
 
 ### `POST /api/v1/upload` — upload（multipart/form-data）
 
+查询参数：`uid`（可选，仅管理员）。带上时这次上传归目标用户名下，配额、限流与相册归属都按目标账号算；管理员自己的账号不会被扣额度。
+
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `file` | 是 | 图片本体（字段名固定 `file`） |
+| `file` | 是 | 图片本体；也接受字段名 `image`，字段名大小写不敏感 |
 | `sha256` | 否 | 客户端算好的哈希，用于和服务端实测值对账；服务端仍会边收边算，不能靠它跳过校验 |
 | `thumb` | 否 | 客户端生成的 WebP/PNG/JPEG 缩略图（最长边建议 1024px）；服务端只存不缩放，会校验体积、像素与尺寸 |
-| `album_id` | 否 | 目标相册 |
+| `album_id` | 否 | 目标相册 id |
+| `album` / `album_slug` | 否 | 目标相册 slug；与 `album_id` 同时给时以 id 为准 |
 | `tags` | 否 | 逗号分隔，单标签最多 32 字，最多保留 20 个 |
 | `visibility` | 否 | 默认 `private`；**访客上传恒为公开**，服务端按账号定，不听这个值 |
 | `original_name` | 否 | 原始文件名，仅内部记录；服务端会去掉路径与控制字符，截到 255 字符 |
 | `reuse_existing` | 否 | `1` / `true` 表示「这份内容我图库里已有就复用它」，不新增一条引用（头像那套用它） |
+
+目标相册的规则：
+
+- 不传 `album_id` / `album`：落在调用者的默认相册（访客就是访客账号的默认相册）。
+- 传了目标：相册必须属于调用者。私有相册与公开相册都能传，只要 Token / 会话属于相册主人；匿名请求不能指定别人的公开相册，想传就登录或带 Token。
+- 管理员带 `?uid=目标UID` 时，目标相册按目标用户校验，管理员不需要切换登录。
 
 SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`、`foreignObject` 与带命名空间前缀的脚本标签都会被去掉，正常图形保留。净化后哈希会重算，因此不要拿上传前的客户端哈希去直链里找这张图。
 
@@ -558,6 +582,23 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
 `reused = true` 表示这次没有新建图片，复用了图库里已有的那张（`id` 就是它；标签只加不减）。
 `fallback_message` 非空表示远端后端失败已回退本地，前端要提示用户。
 
+### `POST /api/v1/upload/batch` — upload（multipart/form-data）
+
+批量上传。字段与 `/upload` 相同，`file` 可以出现多次；`album_id` / `album` / `tags` / `visibility` 对整批生效。`thumb` 只作用于第一张，`sha256` 在批量时忽略（每张由服务端自行计算）。管理员同样可以带 `?uid=目标UID`。
+
+单批张数受调用者生效策略里的 `max_batch_size` 限制；每张独立计配额、计限流。单张失败不会回滚已经成功的那些。
+
+响应：
+
+```json
+{ "data": {
+  "items": [ { "id": 1, "url": "…", "sha256": "…", "size": 1234, "tags": [] } ],
+  "failed": [ { "index": 1, "code": "UNSUPPORTED_FORMAT", "message": "格式不在白名单内" } ],
+  "csrf_token": "…"
+} }
+```
+
+`items` 里的对象与 `/upload` 的 `data` 同形；`failed.index` 是文件在表单里的顺序（从 0 开始）。
 ### `GET /api/v1/queue/{job_id}` — read
 
 `{ "data": { "id": 991, "status": "done", "dedup": false, "image_id": 88214, "error": null } }`
@@ -579,8 +620,10 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
 |---|---|
 | `tag` | 只在某个标签里挑 |
 | `q` | 关键词过滤，规则同广场搜索 |
-| `uid` | 只看某个用户（`u_` 开头的公开 UID）的图片 |
+| `uid` | 只看某个用户（纯数字 UID，例如 `1001`；不是 `u_1001`）的图片 |
 | `format` | 填 `json` 返回 JSON，省略则 302 跳转到图片直链 |
+
+当前这个端点只从**全部公开图片**里挑，没有按相册过滤的参数；`tag` / `q` / `uid` 之外的范围控制还没开放。
 
 默认行为是 **302 跳转**（不是 301：随机结果不该被浏览器永久缓存；响应带 `Cache-Control: no-store`）。
 `?format=json` 时返回：
@@ -588,10 +631,42 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
 ```json
 { "data": { "url": "https://…/images/a3f9….webp", "thumb_url": "https://…/images/a3f9….webp?thumb=2",
             "id": 88214, "width": 1600, "height": 900, "size": 2411724,
-            "ext": "webp", "tags": ["风景"], "owner_uid": "u_1042" } }
+            "ext": "webp", "tags": ["风景"], "owner_uid": "1001" } }
 ```
 
 挑不到符合条件的图片时返回 `NOT_FOUND`。`plaza_public=false` 时端点对未登录调用关闭，与广场一致。
+
+### 背景音乐（公开）
+
+管理员在「系统设置 → 背景音乐」里选择 Meting API 或服务器本地目录；关闭音乐后这些端点返回空歌单或 404。播放器只认站内地址，第三方 API 的请求与歌词读取都由服务端代理。
+
+#### `GET /api/v1/music/playlist`
+
+```json
+{ "data": {
+  "enabled": true,
+  "source": "api",
+  "tracks": [
+    { "id": "101", "title": "夜航", "artist": "Meting Artist", "album": "Mock Album",
+      "duration_seconds": 0,
+      "cover_url": "https://…/cover.jpg",
+      "audio_url": "https://…/audio.mp3",
+      "lyric_url": "/api/v1/music/lyrics?url=https%3A%2F%2F…",
+      "lyrics": null }
+  ],
+  "message": null
+} }
+```
+
+`source` 是 `api` 或 `local`。本地曲目的 `audio_url` / `cover_url` / `lyric_url` 都指向站内的 `/music/*`；API 曲目的 `audio_url` 是第三方直链，`lyric_url` 是站内歌词代理。配置不完整或第三方接口失败时 `tracks` 为空、`message` 给出原因。
+
+#### `GET /api/v1/music/lyrics?url=…` 或 `?path=…`
+
+返回 `text/plain; charset=utf-8` 的 LRC 文本。`url` 只接受与管理员配置的音乐 API 同源（协议 + 主机 + 端口）的地址；`path` 只接受本地音乐目录内的 `.lrc`。不存在时返回 404。
+
+#### `GET /api/v1/music/file?path=…`
+
+本地音乐文件（音频或封面），支持 Range，播放器可以拖动进度。路径必须落在配置的本地音乐目录内，且扩展名在音频/图片白名单里。
 
 ## 7. 服务条款
 
@@ -817,7 +892,7 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
   "download_anon_per_minute": 60, "download_anon_per_day": 1000}`。计的是带 `?download=1` 的直链
   请求（页面上显示的图片不计）；管理员不受限。
 - 上传策略里的 `max_file_size` 支持**按用户单独设**：`PUT /admin/ratelimit/users/{uid}` 给
-  `max_file_size`（字节，`0` = 跟随全局），生效值出现在 `GET /me` 的 `limits.max_file_size`；
+  `max_file_size`（字节，`0` = 跟随全局），生效值出现在 `GET /api/v1/me` 的 `limits.max_file_size`；
   上传时既拦在收流那一步，也通过 `/me` 让客户端队列提前拒绝。
 
 当前版本的实际执行口径：
@@ -919,11 +994,20 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
 ```json
 { "data": {
   "site": { "name": "Pixora", "base_url": "https://img.example.com",
-            "plaza_public": true, "require_login_to_upload": true, "register_enabled": true,
+            "plaza_public": true, "plaza_album_ids": [7, 9],
+            "require_login_to_upload": true, "register_enabled": true,
             "email_domains": "example.com",
             "plaza_grid_columns": 3, "plaza_auto_refresh_seconds": 5, "recycle_retention_days": 30 },
   "upload": { "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
-              "queue_depth": 500, "formats": ["jpg","png"] },
+              "max_width": 0, "max_height": 0, "queue_depth": 500,
+              "formats": ["jpg","png"], "format_options": [ { "ext": "jpg", "label": "JPG" } ] },
+  "session": { "idle_minutes": 120, "absolute_days": 30, "remember_days": 30 },
+  "security": { "hotlink_enabled": false, "hotlink_allow_empty": true, "hotlink_domains": "" },
+  "moderation": { "enabled": false, "provider": "aliyun", "threshold": 70,
+                  "score_field": "nsfw", "endpoint": "", "region": "", "app_id": "",
+                  "access_key_set": false, "secret_key_set": false, "token_set": false,
+                  "user_enabled": true, "admin_enabled": false,
+                  "ban_after": 3, "ban_minutes": 1440, "notify_admin": true, "fail_open": true },
   "thumb": { "client": true, "server_fallback": false },
   "mail": { "smtp_host": "smtp.qiye.aliyun.com", "smtp_port": 465,
             "smtp_security": "ssl", "smtp_user": "noreply@example.com",
@@ -931,9 +1015,18 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
             "appeal_email": "admin@example.com",
             "disposable_check": true, "mx_check": true, "third_party_check": false,
             "third_party_set": false },
-  "appearance": { "background": null, "default_avatar": null }
+  "appearance": { "background": null, "default_avatar": null },
+  "plaza_albums": [ { "id": 7, "name": "旅行", "slug": "travel",
+                      "owner_uid": "1001", "owner_email": "user@example.com", "image_count": 236 } ],
+  "music": { "enabled": true, "source": "api",
+             "api_url": "https://api.i-meto.com/meting/api",
+             "platform": "netease", "playlist_id": "2884035", "local_dir": "" }
 } }
 ```
+
+- `plaza_albums` 是全站正常账号的公开相册，供「首页展示相册」勾选；`site.plaza_album_ids` 里的 id 若已不是公开相册，广场查询会自动忽略。
+- `music.source=api` 时用 `api_url + platform + playlist_id` 拉歌单；`source=local` 时扫描 `local_dir`。`local_dir` 只在管理端下发，不会出现在 `/site` 里。
+- `PUT` 的 `music` 子对象接受 `enabled` / `source` / `api_url` / `platform` / `playlist_id` / `local_dir`。启用 API 时必须填 `api_url` 与 `playlist_id`；启用本地时必须填 `local_dir`。平台只接受 `netease` / `tencent` / `kugou` / `kuwo` / `migu` / `baidu` / `xiami` / `joox`。
 
 - `PUT /api/v1/admin/settings` ← 上述任意子对象（只写传入的键）
 
@@ -941,7 +1034,7 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
   公开地址（`/api/v1/site/background`、`/api/v1/site/avatar`）、或 `null`（清掉，同时删掉
   库里那份字节）。
 - `POST /api/v1/admin/settings/avatar` → 上传站点默认头像（multipart，字段名 `file`），
-  响应 `{ "data": { "ok": true, "url": "…", "bytes": 12345 } }`。字节存进库（不落文件系统），
+  响应 `{ "data": { "ok": true, "url": "…", "bytes": 12345, "csrf_token": "…" } }`。字节存进库（不落文件系统），
   上传完立刻生效：没设过头像的账号（含新注册的）都显示它。
 - `POST /api/v1/admin/settings/mail/test` → `{ "to": "admin@example.com" }` → `{ "data": { "ok": true, "message": "…" } }`
 - `POST /api/v1/admin/settings/formats` → `{ "formats": ["jpg","png","avif"] }`
@@ -1014,15 +1107,15 @@ GET /{upload_prefix}/{sha256}.{ext}?download=1 # 强制下载（Content-Disposit
 邮箱 + 密码始终可用，邮箱是账号本身（必需、不可解绑）。其余方式都是可选的加法：
 
 ```
-GET  /auth/oauth/{provider}/start?mode=login|bind&next=/…   # 302 去对方站点授权
-GET  /auth/oauth/{provider}/callback?code=…&state=…         # 对方回来（302 回前端路由）
-POST /auth/oauth/complete        # 对方没给邮箱时：{ ticket, email, code } 补一个再建号
-POST /auth/phone/code            # { phone } 发短信验证码
-POST /auth/phone/login           # { phone, code, remember? } 手机号登录
-GET  /me/identities              # 我挂了哪些方式（含 email 与 password_set）
-POST /me/identities              # 绑手机号：{ provider: "phone", phone, code }
-POST /me/identities/phone/code   # 绑手机号前要验证码：{ phone }
-DELETE /me/identities/{provider} # 解绑（email 拒绝；最后一根稻草也拒绝）
+GET  /api/v1/auth/oauth/{provider}/start?mode=login|bind&next=/…   # 302 去对方站点授权
+GET  /api/v1/auth/oauth/{provider}/callback?code=…&state=…         # 对方回来（302 回前端路由）
+POST /api/v1/auth/oauth/complete        # 对方没给邮箱时：{ ticket, email, code } 补一个再建号
+POST /api/v1/auth/phone/code            # { phone } 发短信验证码
+POST /api/v1/auth/phone/login           # { phone, code, remember? } 手机号登录
+GET  /api/v1/me/identities              # 我挂了哪些方式（含 email 与 password_set）
+POST /api/v1/me/identities              # 绑手机号：{ provider: "phone", phone, code }
+POST /api/v1/me/identities/phone/code   # 绑手机号前要验证码：{ phone }
+DELETE /api/v1/me/identities/{provider} # 解绑（email 拒绝；最后一根稻草也拒绝）
 ```
 
 - `provider` ∈ `github` / `google` / `qq` / `wechat` / `phone`。支持哪些由管理员在
@@ -1040,12 +1133,12 @@ DELETE /me/identities/{provider} # 解绑（email 拒绝；最后一根稻草也
 - `redirect_uri` 用站点设置里的基础 URL（后台/安装向导写的那个），不是只看环境变量；换域名后两边要一致。
 - 登录：`(provider, subject)` 已绑定就直接发会话；没绑过但对方给了**已验证的邮箱**就建号并绑定；
   没邮箱（QQ、微信从来不给）则回一张签名令牌，前端跳到 `#/complete-signup` 让用户填邮箱、
-  走一次注册验证码，再调 `POST /auth/oauth/complete`——邮箱是账号本身，不能凭一句话当成他的。
+  走一次注册验证码，再调 `POST /api/v1/auth/oauth/complete`——邮箱是账号本身，不能凭一句话当成他的。
 - 绑定：`mode=bind` 必须在已登录状态发起，回调里再核一次身份；一个第三方身份只能挂一个账号，
   重复挂在别人身上返回 `CONFLICT`。
 - 解绑：邮箱不可解绑；解绑任何方式前都会检查「还剩别的方式能进得来」（有可用口令，或还有别的
   身份），否则 `BAD_REQUEST` 并说明原因。第三方建号的账号一开始没有口令，页面会引导先设密码。
-- 手机号登录只对**已绑定**的号码有效（没绑过时提示先用邮箱注册再绑定）；`POST /me/identities`
+- 手机号登录只对**已绑定**的号码有效（没绑过时提示先用邮箱注册再绑定）；`POST /api/v1/me/identities`
   只处理手机号——第三方方式的绑定必须走授权页，那一步的意义就是「本人到对方站点确认一次」。
 - 管理员侧：`GET/PUT /api/v1/admin/login-methods` 读写配置（响应里带回调地址，界面直接给出来
   让人复制）；`DELETE /api/v1/admin/users/{id}/identities/{provider}` 可以替用户摘掉某个方式

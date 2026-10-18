@@ -66,17 +66,17 @@
 
 云服务器 1 核 1G 就能跑，推荐 Ubuntu 22.04/24.04 或 Debian 12。Windows 也支持原生部署（§6），不需要 WSL。NAS、小主机同样可以。
 
-域名要做 A（IPv4）或 AAAA（IPv6）记录，指向服务器公网 IP。用编排里自带的 Caddy 时，域名直接解析到服务器，放行 80 和 443；用 1Panel、Nginx 或 CDN 时，公开域名解析到那一层，另配回源域名指向服务器，放行回源端口（当前配置是 999）。云厂商的安全组和系统防火墙都要放行对应端口。国内云主机用域名对外提供 80/443 服务，通常要先完成备案。
+域名要做 A（IPv4）或 AAAA（IPv6）记录，指向服务器公网 IP。用编排里自带的 Caddy 时，域名直接解析到服务器，放行 80 和 443；用 1Panel 或 Nginx 时，公开域名解析到那一层，应用只监听本机端口（默认 `127.0.0.1:2345`）。云厂商的安全组和系统防火墙都要放行对应端口。国内云主机用域名对外提供 80/443 服务，通常要先完成备案。
 
 登录服务器先确认三件事：
 
 ```bash
 uname -m                       # x86_64 或 aarch64
-dig +short img.example.com     # 应返回你的服务器 IP 或 CDN 地址
+dig +short img.example.com     # 应返回你的服务器 IP
 sudo ufw status                # 或 firewall-cmd --list-all
 ```
 
-没有 `dig` 就用 `getent hosts img.example.com`。域名还没解析好之前，Caddy 申请证书或 CDN 回源都会失败，先把这一步做完。
+没有 `dig` 就用 `getent hosts img.example.com`。域名还没解析好之前，Caddy 申请证书或反向代理回源都会失败，先把这一步做完。
 
 ### 2.2 主密钥
 
@@ -711,9 +711,9 @@ mysql://user:pass@host:3306/pixora?ssl-mode=REQUIRED
 
 启动后先看日志最后几行，确认迁移执行完、`Pixora 已启动`，再跑一次 `/healthz`。连不上时按 §4.8 的“连不上单独部署的库”逐项对。
 
-### 4.6 不用 Caddy：已有反向代理或 CDN
+### 4.6 不用 Caddy：已有反向代理
 
-两种情况会走到这里：只有 IP、没有域名；或者前面已经有一层 Nginx / 1Panel / CDN。做法是删掉 `caddy` 服务与文件末尾的 `configs:` 整段，给 `pixora` 加端口映射。
+两种情况会走到这里：只有 IP、没有域名；或者前面已经有一层 Nginx / 1Panel。做法是删掉 `caddy` 服务与文件末尾的 `configs:` 整段，给 `pixora` 加端口映射。
 
 ```yaml
     # 直接对外：
@@ -722,28 +722,20 @@ mysql://user:pass@host:3306/pixora?ssl-mode=REQUIRED
     # ports: ["127.0.0.1:2345:2345"]
 ```
 
-`PIXORA_BASE_URL` 写用户浏览器里实际打开的地址。只有 IP 就写 `http://203.0.113.10:8080`；有域名就写 `https://你的域名`。**不要把回源端口写进基础 URL**，比如 `https://img.example.com:999` 是错的，浏览器不会去连那个内部端口。
+`PIXORA_BASE_URL` 写用户浏览器里实际打开的地址。只有 IP 就写 `http://203.0.113.10:8080`；有域名就写 `https://你的域名`。**不要把内部端口写进基础 URL**，比如 `https://img.example.com:999` 是错的，浏览器不会去连那个内部端口。
 
-前面有 Nginx、平台负载均衡或 CDN 时，`PIXORA_TRUST_PROXY` 保持 `1`；直接暴露到公网、前面没有代理时设 `0`，否则客户端可以伪造转发头。
+前面有 Nginx 或平台负载均衡时，`PIXORA_TRUST_PROXY` 保持 `1`；直接暴露到公网、前面没有代理时设 `0`，否则客户端可以伪造转发头。
 
-#### 1Panel OpenResty + 前置 CDN（当前是 EdgeOne）的接法
+#### 1Panel / Nginx 反向代理
 
-这是当前项目实际使用的一套结构，可以照着核对。这里 EdgeOne 只作为前置 CDN/反向代理，不是单独的前端托管方式：
-
-```text
-浏览器 → https://pixora.tracert.com (443，EdgeOne)
-       → EdgeOne 回源 origin.tracert.com:999
-       → 1Panel OpenResty (listen 999) → 127.0.0.1:2345 → pixora 容器
-```
-
-pixora 的 compose 只保留端口映射，不要内置 Caddy：
+前面已经有一层 Nginx 或 1Panel 时，pixora 的 compose 只保留本机端口映射，不要内置 Caddy：
 
 ```yaml
     ports:
       - "127.0.0.1:2345:2345"
 ```
 
-1Panel 的站点反向代理把所有路径转到 `http://127.0.0.1:2345`，不是只代理 `/api`：
+反向代理要把所有路径转到应用，不能只代理 `/api`：直链 `/images/...`、前端路由与上传接口都在这一个进程里。
 
 ```nginx
 location / {
@@ -754,37 +746,19 @@ location / {
 }
 ```
 
-`server_name` 要包含 EdgeOne 回源时实际发送的 Host，证书也要覆盖回源使用的域名/SNI；不确定时可以把站点设为 999 端口上的默认站点：
-
-```nginx
-server_name pixora.tracert.com origin.tracert.com;
-# 或者只有这一个站点时：server_name _;
-```
-
-EdgeOne 侧需要同时满足：
-
-1. 公开域名 `pixora.tracert.com` 在 **DNS 服务商** 里有一条 CNAME，指向 EdgeOne 控制台给出的加速域名。只在 EdgeOne 里加域名、不把 DNS 记录加到当前 NS 所在的服务商，解析不会生效。
-2. 回源域名 `origin.tracert.com` 有一条 A 记录指向服务器公网 IP（或 EdgeOne 直接填服务器 IP）。回源地址不要填一个又解析回 EdgeOne 的域名，否则会回源死循环。
-3. 回源端口 999、协议 HTTPS；SNI / 回源 Host 与 Nginx 证书对齐。
-4. 站点基础 URL 写成 `https://pixora.tracert.com`，**不带 999**。后台「系统设置 → 站点 → 基础 URL」里的值优先于环境变量。
+公开域名直接解析到这台反向代理；`PIXORA_BASE_URL` 写浏览器里实际打开的地址（如 `https://img.example.com`），不要带内部端口。只有这一层代理时 `PIXORA_TRUST_PROXY` 保持 `1`；直接暴露到公网、前面没有代理时设 `0`，否则客户端可以伪造转发头。
 
 上线前按顺序验证：
 
 ```bash
-# 1) 公开域名真的能解析
-nslookup pixora.tracert.com 223.5.5.5
+# 1) 绕过反向代理，直接问应用
+curl -I -H 'Host: img.example.com' 'http://127.0.0.1:2345/healthz'
 
-# 2) 回源域名能解析到服务器
-nslookup origin.tracert.com 223.5.5.5
-
-# 3) 绕过 CDN，直接问 Nginx
-curl -k -I -H 'Host: pixora.tracert.com' 'https://127.0.0.1:999/healthz'
-
-# 4) 走公开入口
-curl -I 'https://pixora.tracert.com/healthz'
+# 2) 走公开入口
+curl -I 'https://img.example.com/healthz'
 ```
 
-如果第 3 步通、第 4 步不通，问题在 EdgeOne 的 DNS/回源/路径规则；如果第 3 步就不通，先看 1Panel 的代理配置和证书。图片预览失败时，先确认直链 URL 里没有 `:999`，再单独测 `/images/<哈希>.<扩展名>?thumb=2`。
+第 1 步通、第 2 步不通，先看反向代理的站点匹配、证书与上游地址；两步都不通，先看 Pixora 容器日志。图片预览失败时，确认直链里没有内部端口，再单独测 `/images/<哈希>.<扩展名>?thumb=2`。
 
 ### 4.7 升级、备份、恢复
 
@@ -1328,8 +1302,8 @@ MySQL 那条记得带 `--default-character-set=utf8mb4`：客户端默认按系�
 | 现象 | 多半是 |
 |---|---|
 | 直链地址是 `http://172.x.x.x/...` 或容器内网地址 | 没设 `PIXORA_BASE_URL`，或后台基础 URL 写错了 |
-| 直链里带了回源端口（如 `:999`） | 基础 URL 写成了回源地址；公开地址不能带内部端口 |
-| 页面能开，图片和直链连接被关闭 | 公开域名没有 DNS 记录、EdgeOne 回源失败，或基础 URL 指向了不存在的域名 |
+| 直链里带了内部端口（如 `:999`） | 基础 URL 写成了回源地址；公开地址不能带内部端口 |
+| 页面能开，图片和直链连接被关闭 | 公开域名没有 DNS 记录、反向代理回源失败，或基础 URL 指向了不存在的域名 |
 | 登录成功，一刷新又变未登录 | 站点是 https 但 Cookie 没带 Secure，或基础 URL 与实际访问地址不一致 |
 | 前端页面写着“服务暂时不可用” | 后端没起来，或反向代理没有把请求转到应用 |
 | 图片直链 404 | 直链前缀不对、文件已经被删，或 Nginx 只代理了 `/api` 没代理 `/images` |

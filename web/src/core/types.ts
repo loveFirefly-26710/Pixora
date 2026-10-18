@@ -57,6 +57,8 @@ export interface SiteInfo {
   plaza_grid_columns: number;
   /** 广场自动漫游间隔（秒）。0 = 关闭 */
   plaza_auto_refresh_seconds: number;
+  /** 背景音乐：只有管理员启用后前端才显示播放按钮 */
+  music?: { enabled: boolean; source: "api" | "local" } | null;
   /** 回收站保留天数：0 = 关闭回收站（删除即彻底删除） */
   recycle_retention_days: number;
   /** 会话有效期：闲置多少分钟掉线、最长多少天 */
@@ -542,6 +544,8 @@ export interface AdminSettings {
     plaza_grid_columns: number;
     /** 广场自动漫游间隔（秒）。0 = 关闭 */
     plaza_auto_refresh_seconds: number;
+    /** 只在广场展示这些公开相册；空数组 = 全部公开图片 */
+    plaza_album_ids?: number[];
     recycle_retention_days: number;
   };
   upload: {
@@ -599,6 +603,43 @@ export interface AdminSettings {
     third_party_set: boolean;
   };
   appearance: { background: string | null; default_avatar: string | null };
+  /** 管理后台挑「首页展示相册」用的公开相册清单 */
+  plaza_albums?: Array<{
+    id: number;
+    name: string;
+    slug: string;
+    owner_uid: string;
+    owner_email: string;
+    image_count: number;
+  }>;
+  music?: {
+    enabled: boolean;
+    source: string;
+    api_url: string;
+    platform: string;
+    playlist_id: string;
+    local_dir: string;
+  };
+}
+
+/** 背景音乐的一条曲目。 */
+export interface MusicTrack {
+  id: string;
+  title: string;
+  artist: string;
+  album: string;
+  duration_seconds: number;
+  cover_url: string | null;
+  audio_url: string;
+  lyric_url: string | null;
+  lyrics: string | null;
+}
+
+export interface MusicPlaylist {
+  enabled: boolean;
+  source: string;
+  tracks: MusicTrack[];
+  message: string | null;
 }
 
 export interface AdminStats {

@@ -121,6 +121,8 @@ impl ImageSort {
 pub struct ImageFilter {
     pub owner_id: Option<i64>,
     pub album_id: Option<i64>,
+    /// 只要这些相册里的图片（广场的「只展示选中的公开相册」用它）
+    pub album_ids: Option<Vec<i64>>,
     /// 只要公开图片（广场、未登录浏览）
     pub public_only: bool,
     /// 标题或标签包含该关键词
@@ -1536,6 +1538,29 @@ impl Repo {
         }
         if let Some(album_id) = filter.album_id {
             builder = builder.and("i.album_id = ?", move |args| args.int(album_id));
+        }
+        if let Some(album_ids) = &filter.album_ids {
+            if album_ids.is_empty() {
+                builder = builder.and("1 = 0", |args| args);
+            } else {
+                let placeholders = vec!["?"; album_ids.len()].join(", ");
+                let owned: Vec<i64> = album_ids.clone();
+                builder = builder.and(
+                    // 选中的相册必须仍是公开的：设置存的是 id，相册后来改成私有
+                    // 不能靠旧设置继续把图放上广场
+                    &format!(
+                        "i.album_id IN ({placeholders}) AND EXISTS (\
+                         SELECT 1 FROM albums pa WHERE pa.id = i.album_id \
+                         AND pa.visibility = 'public' AND pa.deleted_at IS NULL)"
+                    ),
+                    move |mut args| {
+                        for id in &owned {
+                            args = args.int(*id);
+                        }
+                        args
+                    },
+                );
+            }
         }
         if filter.public_only {
             builder = builder.and("i.visibility = 'public'", |args| args);

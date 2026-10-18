@@ -54,6 +54,17 @@ pub mod keys {
     pub const PLAZA_GRID_COLUMNS: &str = "plaza.grid_columns";
     /// 广场自动漫游间隔（秒）。0 = 关闭
     pub const PLAZA_AUTO_REFRESH_SECONDS: &str = "plaza.auto_refresh_seconds";
+    /// 只展示这些公开相册（逗号分隔的 id）。空 = 全部公开图片
+    pub const PLAZA_ALBUM_IDS: &str = "plaza.album_ids";
+    /// 背景音乐总开关
+    pub const MUSIC_ENABLED: &str = "music.enabled";
+    /// 音乐来源：`api`（Meting 等）或 `local`（服务器本地目录）
+    pub const MUSIC_SOURCE: &str = "music.source";
+    pub const MUSIC_API_URL: &str = "music.api_url";
+    /// Meting 的平台名：netease / tencent / kugou / kuwo ...
+    pub const MUSIC_PLATFORM: &str = "music.platform";
+    pub const MUSIC_PLAYLIST_ID: &str = "music.playlist_id";
+    pub const MUSIC_LOCAL_DIR: &str = "music.local_dir";
     pub const UPLOAD_MAX_FILE: &str = "upload.max_file_bytes";
     pub const UPLOAD_MAX_BATCH: &str = "upload.max_batch";
     pub const UPLOAD_MAX_PIXELS: &str = "upload.max_pixels";
@@ -218,6 +229,11 @@ pub mod defaults {
     /// 自动刷新间隔的可配置范围。0 = 关闭；太短会打断浏览，太长就不叫漫游了
     pub const PLAZA_AUTO_REFRESH_MIN: i64 = 5;
     pub const PLAZA_AUTO_REFRESH_MAX: i64 = 3600;
+    /// 音乐默认关闭；打开后默认走 Meting 风格的 API
+    pub const MUSIC_SOURCE: &str = "api";
+    pub const MUSIC_PLATFORM: &str = "netease";
+    /// 一个常用的公共 Meting 地址，管理员可以换成自己的实例
+    pub const MUSIC_API_URL: &str = "https://api.i-meto.com/meting/api";
     pub const SITE_NAME: &str = "Pixora";
     pub const FROM_NAME: &str = "Pixora 管理团队";
     pub const SMTP_HOST: &str = "smtp.qiye.aliyun.com";
@@ -238,8 +254,22 @@ pub struct SiteSettings {
     pub plaza_grid_columns: i64,
     /// 广场自动漫游间隔（秒）。0 = 关闭，其余钳在 `PLAZA_AUTO_REFRESH_MIN..=MAX`
     pub plaza_auto_refresh_seconds: i64,
+    /// 只在广场展示这些公开相册里的图片。空 = 不限制（沿用全部公开图片）
+    pub plaza_album_ids: Vec<i64>,
     /// 允许注册的邮箱域名（白名单，空 = 不限）
     pub email_domains: RegisterDomains,
+}
+
+/// 音乐播放配置。
+#[derive(Debug, Clone)]
+pub struct MusicSettings {
+    pub enabled: bool,
+    /// `api` 或 `local`
+    pub source: String,
+    pub api_url: String,
+    pub platform: String,
+    pub playlist_id: String,
+    pub local_dir: String,
 }
 
 /// 允许注册的邮箱域名白名单。
@@ -590,9 +620,50 @@ impl Settings {
                 )
                 .await?,
             ),
+            plaza_album_ids: parse_id_list(self.raw(keys::PLAZA_ALBUM_IDS).await?.as_deref()),
             email_domains: RegisterDomains::parse(
                 self.raw(keys::REGISTER_EMAIL_DOMAINS).await?.as_deref(),
             ),
+        })
+    }
+
+    /// 音乐播放配置。坏值按「API + Meting 默认值」归一，避免界面拿到空平台名。
+    pub async fn music(&self) -> Result<MusicSettings> {
+        let source = self
+            .string(keys::MUSIC_SOURCE, defaults::MUSIC_SOURCE)
+            .await?
+            .trim()
+            .to_ascii_lowercase();
+        let source = if source == "local" { "local" } else { "api" }.to_string();
+        let platform = self
+            .string(keys::MUSIC_PLATFORM, defaults::MUSIC_PLATFORM)
+            .await?
+            .trim()
+            .to_ascii_lowercase();
+        let platform = if crate::music::PLATFORMS.contains(&platform.as_str()) {
+            platform
+        } else {
+            defaults::MUSIC_PLATFORM.to_string()
+        };
+        Ok(MusicSettings {
+            enabled: self.bool(keys::MUSIC_ENABLED, false).await?,
+            source,
+            api_url: self
+                .string(keys::MUSIC_API_URL, defaults::MUSIC_API_URL)
+                .await?
+                .trim()
+                .to_string(),
+            platform,
+            playlist_id: self
+                .string(keys::MUSIC_PLAYLIST_ID, "")
+                .await?
+                .trim()
+                .to_string(),
+            local_dir: self
+                .string(keys::MUSIC_LOCAL_DIR, "")
+                .await?
+                .trim()
+                .to_string(),
         })
     }
 
@@ -944,6 +1015,23 @@ pub fn normalize_auto_refresh_seconds(value: i64) -> i64 {
             defaults::PLAZA_AUTO_REFRESH_MAX,
         )
     }
+}
+
+/// 解析逗号分隔的 id 清单：去重、丢掉非正数与坏值，最多保留 200 项。
+pub fn parse_id_list(raw: Option<&str>) -> Vec<i64> {
+    let mut out = Vec::new();
+    for piece in raw.unwrap_or("").split([',', ';', ' ', '\n']) {
+        let Ok(id) = piece.trim().parse::<i64>() else {
+            continue;
+        };
+        if id > 0 && !out.contains(&id) {
+            out.push(id);
+            if out.len() >= 200 {
+                break;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

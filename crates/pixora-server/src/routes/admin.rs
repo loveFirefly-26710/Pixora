@@ -1786,12 +1786,21 @@ pub async fn settings_get(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    let music = match state.settings.music().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
+    let plaza_albums = match state.repo.list_public_albums().await {
+        Ok(rows) => rows,
+        Err(err) => return crate::http::error_response(err.into()),
+    };
 
     finish::<serde_json::Value>(Ok(serde_json::json!({
         "site": {
             "name": site.name,
             "base_url": site.base_url,
             "plaza_public": site.plaza_public,
+            "plaza_album_ids": site.plaza_album_ids,
             "require_login_to_upload": site.require_login_to_upload,
             "register_enabled": site.register_enabled,
             // 注册开关可能被「容量触顶自动关闭」替管理员翻成关闭：把状态与口径
@@ -1885,6 +1894,22 @@ pub async fn settings_get(
             "third_party_set": mail.third_party_set,
         },
         "appearance": { "background": background, "default_avatar": default_avatar },
+        "plaza_albums": plaza_albums.iter().map(|row| serde_json::json!({
+            "id": row.id,
+            "name": row.name,
+            "slug": row.slug,
+            "owner_uid": row.owner_uid,
+            "owner_email": row.owner_email,
+            "image_count": row.image_count,
+        })).collect::<Vec<_>>(),
+        "music": {
+            "enabled": music.enabled,
+            "source": music.source,
+            "api_url": music.api_url,
+            "platform": music.platform,
+            "playlist_id": music.playlist_id,
+            "local_dir": music.local_dir,
+        },
     })))
 }
 
@@ -1919,13 +1944,26 @@ pub async fn settings_put(
         let site = serde_json::Value::Object(site.clone());
         // 这个值要在下面单独处理：注册开关一动，就得联动自动关闭的覆盖标记
         let register_enabled_value = field_opt_bool(&site, "register_enabled");
-        let writes: [(&str, Option<String>); 9] = [
+        let plaza_album_ids = site
+            .get("plaza_album_ids")
+            .and_then(|value| value.as_array())
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|item| item.as_i64())
+                    .filter(|id| *id > 0)
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
+        let writes: [(&str, Option<String>); 10] = [
             (keys::SITE_NAME, field_opt_str(&site, "name")),
             (keys::SITE_BASE_URL, field_opt_str(&site, "base_url")),
             (
                 keys::PLAZA_PUBLIC,
                 field_opt_bool(&site, "plaza_public").map(|value| value.to_string()),
             ),
+            (keys::PLAZA_ALBUM_IDS, plaza_album_ids),
             (
                 keys::UPLOAD_REQUIRE_LOGIN,
                 field_opt_bool(&site, "require_login_to_upload").map(|value| value.to_string()),
@@ -1992,6 +2030,65 @@ pub async fn settings_put(
                 }
                 touched.push(key.to_string());
             }
+        }
+    }
+
+    if let Some(music) = body.get("music").and_then(|value| value.as_object()) {
+        let music = serde_json::Value::Object(music.clone());
+        let enabled = field_opt_bool(&music, "enabled").unwrap_or(false);
+        let source = field_opt_str(&music, "source")
+            .unwrap_or_else(|| "api".into())
+            .to_ascii_lowercase();
+        let source = if source == "local" { "local" } else { "api" };
+        let platform = field_opt_str(&music, "platform")
+            .unwrap_or_else(|| "netease".into())
+            .to_ascii_lowercase();
+        if !pixora_core::music::PLATFORMS.contains(&platform.as_str()) {
+            return bad_request("不支持的音乐平台");
+        }
+        let api_url = field_opt_str(&music, "api_url")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !api_url.is_empty() {
+            match reqwest::Url::parse(&api_url) {
+                Ok(url) if matches!(url.scheme(), "http" | "https") => {}
+                _ => return bad_request("音乐 API 地址必须是以 http(s) 开头的完整地址"),
+            }
+        }
+        let playlist_id = field_opt_str(&music, "playlist_id")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let local_dir = field_opt_str(&music, "local_dir")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if enabled && source == "api" && (api_url.is_empty() || playlist_id.is_empty()) {
+            return bad_request("启用 API 音乐时，API 地址与歌单 ID 都要填");
+        }
+        if enabled && source == "local" && local_dir.is_empty() {
+            return bad_request("启用本地音乐时，要填音乐目录");
+        }
+        if playlist_id.chars().count() > 200 {
+            return bad_request("歌单 ID 太长了");
+        }
+        if local_dir.chars().count() > 1000 {
+            return bad_request("音乐目录路径太长了");
+        }
+        let writes: [(&str, Option<String>); 6] = [
+            (
+                keys::MUSIC_ENABLED,
+                field_opt_bool(&music, "enabled").map(|value| value.to_string()),
+            ),
+            (keys::MUSIC_SOURCE, Some(source.to_string())),
+            (keys::MUSIC_API_URL, Some(api_url)),
+            (keys::MUSIC_PLATFORM, Some(platform)),
+            (keys::MUSIC_PLAYLIST_ID, Some(playlist_id)),
+            (keys::MUSIC_LOCAL_DIR, Some(local_dir)),
+        ];
+        if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
+            return resp;
         }
     }
 

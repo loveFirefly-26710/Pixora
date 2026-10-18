@@ -15,10 +15,16 @@
 import { requestPage } from "../core/api";
 import { h } from "../core/dom";
 import { relativeTime } from "../core/format";
+import {
+  currentTrack,
+  musicState,
+  subscribeMusic,
+  toggleMusic,
+} from "../core/music";
 import { navigate, type PageContext } from "../core/router";
 import { currentUser, getState } from "../core/state";
 import { toastError } from "../core/toast";
-import type { ImageItem } from "../core/types";
+import type { ImageItem, MusicTrack } from "../core/types";
 import { createUploadPanel } from "../upload/panel";
 import { FIREFLY_MARK } from "../ui/brand";
 import { openLightbox } from "../ui/lightbox";
@@ -106,14 +112,17 @@ interface PlazaHeroHandle {
   setTotal(total: number): void;
   setAutoState(enabled: boolean): void;
   setAutoCountdown(remaining: number): void;
+  setMusic(playing: boolean, track: MusicTrack | null): void;
 }
 
 interface PlazaHeroOptions {
   onUpload: () => void;
   onOpen: (item: ImageItem) => void;
   onToggleAuto: () => void;
+  onToggleMusic: () => void;
   autoSeconds: number;
   autoEnabled: boolean;
+  musicEnabled: boolean;
 }
 
 /** 倒计时显示：一分钟以内写秒，超过一分钟写成 m:ss。 */
@@ -129,15 +138,19 @@ function autoCountdownText(seconds: number): string {
 /**
  * 广场首屏：一段品牌文案 + 一个圆形「随机一帧」。
  *
- * 图不是另找的素材：第一页回来之后直接拿第一张公开图当 hero，
- * 点它就在当前列表里打开预览。没有图时退回萤火翼标，不留一块空白。
+ * 图不是另找的素材：第一页回来之后直接拿第一张公开图当 hero。
+ * 管理员启用背景音乐后，点这张圆片就是播放/暂停，圆片会像唱片一样转起来；
+ * 没启用音乐时保持原行为——点开当前图片的预览。
  * 自动漫游按钮只在管理员设了间隔时出现，点一下暂停/继续。
  */
 function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
   let featured: ImageItem | null = null;
+  let playing = false;
   const count = h("span", { text: "0 幅公开影像" });
   const chipTitle = h("div.hero-chip-title", { text: "等待第一束光" });
   const chipSub = h("div.hero-chip-sub", { text: "上传后出现在这里" });
+  const trackTitle = h("div.hero-chip-title", { text: "今夜有光" });
+  const trackSub = h("div.hero-chip-sub", { text: "PUBLIC / ORBIT · 03:24" });
 
   const core = h("span.hero-core", null, h("span.logo-mark", { html: FIREFLY_MARK }));
   const frameInner = h("div.hero-frame-inner", null, core);
@@ -146,7 +159,19 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
     { type: "button", "aria-label": "广场还没有公开图片" },
     frameInner,
   );
+  const pulse = (): void => {
+    frame.classList.remove("is-tapping");
+    // 读取一次布局，确保连续点击也能重新播放动画
+    void frame.offsetWidth;
+    frame.classList.add("is-tapping");
+  };
+  frame.addEventListener("animationend", () => frame.classList.remove("is-tapping"));
   frame.addEventListener("click", () => {
+    if (options.musicEnabled) {
+      pulse();
+      options.onToggleMusic();
+      return;
+    }
     if (featured) options.onOpen(featured);
   });
 
@@ -209,8 +234,8 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
         "div.hero-chip.two",
         null,
         h("div.hero-chip-label", { text: "Firefly signal 01" }),
-        h("div.hero-chip-title", { text: "今夜有光" }),
-        h("div.hero-chip-sub", { text: "PUBLIC / ORBIT · 03:24" }),
+        trackTitle,
+        trackSub,
       ),
     ),
   );
@@ -223,7 +248,10 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
     featured = item;
     if (!item) {
       frameInner.replaceChildren(core);
-      frame.setAttribute("aria-label", "广场还没有公开图片");
+      frame.setAttribute(
+        "aria-label",
+        options.musicEnabled ? "播放或暂停背景音乐" : "广场还没有公开图片",
+      );
       chipTitle.textContent = "等待第一束光";
       chipSub.textContent = "上传后出现在这里";
       return;
@@ -239,9 +267,32 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
     img.decoding = "async";
     img.alt = item.title ?? "广场图片";
     frameInner.replaceChildren(img);
-    frame.setAttribute("aria-label", `打开 ${item.title ?? "这张图片"}`);
+    frame.setAttribute(
+      "aria-label",
+      options.musicEnabled
+        ? `${playing ? "暂停" : "播放"}背景音乐（当前画面：${item.title ?? "广场图片"}）`
+        : `打开 ${item.title ?? "这张图片"}`,
+    );
     chipTitle.textContent = item.title?.trim() || item.tags[0] || "来自广场";
     chipSub.textContent = `${item.tags.slice(0, 2).join(" / ") || "公开影像"} · ${item.views} 次浏览`;
+  }
+
+  function setMusic(nextPlaying: boolean, nextTrack: MusicTrack | null): void {
+    playing = nextPlaying;
+    frame.classList.toggle("is-playing", options.musicEnabled && playing);
+    if (!options.musicEnabled) return;
+    frame.setAttribute(
+      "aria-label",
+      `${playing ? "暂停" : "播放"}背景音乐${featured?.title ? `（当前画面：${featured.title}）` : ""}`,
+    );
+    if (nextTrack) {
+      trackTitle.textContent = nextTrack.title;
+      trackSub.textContent = `${nextTrack.artist || "未知艺术家"} · ${playing ? "NOW PLAYING" : "PAUSED"}`;
+      pulse();
+    } else {
+      trackTitle.textContent = "今夜有光";
+      trackSub.textContent = "PUBLIC / ORBIT · 03:24";
+    }
   }
 
   function setAutoState(enabled: boolean): void {
@@ -261,7 +312,7 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
 
   setAutoState(options.autoEnabled);
   if (options.autoEnabled) setAutoCountdown(options.autoSeconds);
-  return { root: hero, setFeatured, setTotal, setAutoState, setAutoCountdown };
+  return { root: hero, setFeatured, setTotal, setAutoState, setAutoCountdown, setMusic };
 }
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -299,15 +350,38 @@ export async function render(ctx: PageContext): Promise<void> {
   let autoRemaining = autoSeconds;
   let autoTimer: number | null = null;
   let heroState: PlazaHeroHandle | null = null;
+  const musicEnabled = Boolean(site?.music?.enabled);
   if (isPlazaHome) {
     heroState = buildPlazaHero({
       autoSeconds,
       autoEnabled,
+      musicEnabled,
       onUpload: () => jumpToUpload(),
       onToggleAuto: () => toggleAuto(),
+      onToggleMusic: () => void toggleMusic(),
       onOpen: (item) => openLightbox(items, item),
     });
     root.append(heroState.root);
+
+    // 唱片只关心「是否在播放」和「哪一首」，不必跟着 timeupdate 每 250ms 重画
+    let lastPlaying: boolean | null = null;
+    let lastTrackId: string | null = null;
+    const syncHeroMusic = (): void => {
+      const music = musicState();
+      const track = currentTrack();
+      if (music.playing === lastPlaying && (track?.id ?? null) === lastTrackId) return;
+      lastPlaying = music.playing;
+      lastTrackId = track?.id ?? null;
+      heroState?.setMusic(music.playing, track);
+    };
+    const unsubscribeMusic = subscribeMusic(() => {
+      if (!root.isConnected) {
+        unsubscribeMusic();
+        return;
+      }
+      syncHeroMusic();
+    });
+    syncHeroMusic();
   } else {
     root.append(
       viewHead(

@@ -55,6 +55,7 @@ tower-http = { version = "0.6", default-features = false, features = [
     "set-header",
     "request-id",
     "timeout",
+    "fs",
 ] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 tokio-util = { version = "0.7", features = ["io"] }

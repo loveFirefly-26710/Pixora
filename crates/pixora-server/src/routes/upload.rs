@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use axum::extract::multipart::Field;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
 use axum::Json;
@@ -175,7 +175,9 @@ async fn resolve_uploader(
     headers: &HeaderMap,
     ip: Option<&str>,
     method: &Method,
+    target_uid: Option<&str>,
 ) -> Result<pixora_repo::model::User, Response> {
+    let target_uid = target_uid.map(str::trim).filter(|value| !value.is_empty());
     match crate::http::authenticate_optional(state, headers, ip).await {
         Ok(Some(auth)) => {
             if let Err(resp) = super::ensure_scope(&auth, "upload") {
@@ -184,20 +186,56 @@ async fn resolve_uploader(
             if let Err(err) = crate::http::verify_csrf(Some(&auth), headers, method) {
                 return Err(crate::http::error_response(err));
             }
-            Ok(auth.user)
-        }
-        Ok(None) => match state.guest_uploader().await {
-            // 站点开着游客上传：这时才轮到双提交校验（访客的令牌由 /site 下发）。
-            // 顺序反过来的话，关着游客上传的站点会先答 403，而正确答案是 401
-            Ok(Some(user)) => {
-                if let Err(err) = crate::http::verify_csrf(None, headers, method) {
-                    return Err(crate::http::error_response(err));
+            let actor = auth.user;
+            // 管理员在「用户视图」里代目标用户上传：配额、限流、相册归属都算对方的。
+            // 这不是登录切换，审计里会留一条跨用户操作记录。
+            if let Some(uid) = target_uid {
+                if !actor.is_admin() {
+                    return Err(crate::http::error_response(AppError::forbidden(
+                        "只有管理员可以代其他用户上传",
+                    )));
                 }
-                Ok(user)
+                if uid != actor.uid {
+                    let target = match state.repo.find_user_by_uid(uid).await {
+                        Ok(Some(user)) => user,
+                        Ok(None) => {
+                            return Err(crate::http::error_response(AppError::not_found("用户")))
+                        }
+                        Err(err) => return Err(crate::http::error_response(err.into())),
+                    };
+                    if !target.is_active() {
+                        return Err(crate::http::error_response(AppError::forbidden(
+                            "目标账号当前不可上传",
+                        )));
+                    }
+                    if pixora_core::guest::is_guest(&target) {
+                        return Err(crate::http::error_response(AppError::forbidden(
+                            "访客账号不能作为代上传目标",
+                        )));
+                    }
+                    state.audit_cross_user(actor.id, uid, "upload", ip).await;
+                    return Ok(target);
+                }
             }
-            Ok(None) => Err(crate::http::error_response(AppError::Unauthorized)),
-            Err(err) => Err(crate::http::error_response(err)),
-        },
+            Ok(actor)
+        }
+        Ok(None) => {
+            if target_uid.is_some() {
+                return Err(crate::http::error_response(AppError::Unauthorized));
+            }
+            match state.guest_uploader().await {
+                // 站点开着游客上传：这时才轮到双提交校验（访客的令牌由 /site 下发）。
+                // 顺序反过来的话，关着游客上传的站点会先答 403，而正确答案是 401
+                Ok(Some(user)) => {
+                    if let Err(err) = crate::http::verify_csrf(None, headers, method) {
+                        return Err(crate::http::error_response(err));
+                    }
+                    Ok(user)
+                }
+                Ok(None) => Err(crate::http::error_response(AppError::Unauthorized)),
+                Err(err) => Err(crate::http::error_response(err)),
+            }
+        }
         Err(err) => Err(crate::http::error_response(err)),
     }
 }
@@ -213,6 +251,7 @@ pub async fn blobs_exists(
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
@@ -223,7 +262,15 @@ pub async fn blobs_exists(
     {
         return error_response(err);
     }
-    let uploader = match resolve_uploader(&state, &headers, rectx.ip.as_deref(), &method).await {
+    let uploader = match resolve_uploader(
+        &state,
+        &headers,
+        rectx.ip.as_deref(),
+        &method,
+        query.get("uid").map(String::as_str),
+    )
+    .await
+    {
         Ok(user) => user,
         Err(resp) => return resp,
     };
@@ -255,10 +302,19 @@ pub async fn upload(
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     mut multipart: Multipart,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
-    let uploader = match resolve_uploader(&state, &headers, rectx.ip.as_deref(), &method).await {
+    let uploader = match resolve_uploader(
+        &state,
+        &headers,
+        rectx.ip.as_deref(),
+        &method,
+        query.get("uid").map(String::as_str),
+    )
+    .await
+    {
         Ok(user) => user,
         Err(resp) => return resp,
     };
@@ -274,10 +330,12 @@ pub async fn upload(
     }
 }
 
-/// 上传请求体的字段状态机。`collect_upload` 边读边填，
-/// 返回后由路由判断「文件字段在不在」。
+/// 上传请求体的字段状态机。`collect_form` 边读边填，
+/// 返回后由路由判断「文件字段在不在」以及用单图还是批量响应。
 struct UploadParts {
     album_id: Option<i64>,
+    /// 相册 slug（`album` / `album_slug` 字段）。与 album_id 同时给时以 id 为准。
+    album_slug: Option<String>,
     tags: Vec<String>,
     visibility: String,
     sha256: Option<String>,
@@ -291,6 +349,7 @@ impl UploadParts {
     fn new() -> Self {
         Self {
             album_id: None,
+            album_slug: None,
             tags: Vec::new(),
             visibility: visibility::PRIVATE.to_string(),
             sha256: None,
@@ -301,22 +360,30 @@ impl UploadParts {
     }
 }
 
+/// 已收进临时文件的单个文件。
+struct ReceivedUpload {
+    file: ReceiveFile,
+    file_name: String,
+    content_type: Option<String>,
+}
+
+/// 一张表单：公共元数据 + 一个或多个文件。
+struct CollectedForm {
+    parts: UploadParts,
+    files: Vec<ReceivedUpload>,
+}
+
 /// 逐字段读 multipart：普通字段进 `UploadParts`，文件字段先落到临时文件，
 /// 等整个表单读完、元数据齐了再交给领域层。
 ///
-/// 返回 `Ok(None)` 表示「整个表单里没有文件字段」，
-/// 由调用方决定报错文案。
-async fn collect_upload(
+/// 多文件是给 `/upload/batch` 用的；`/upload` 仍然只接受一个文件。
+async fn collect_form(
     state: &Arc<AppState>,
     user: &pixora_repo::model::User,
     multipart: &mut Multipart,
-    ctx: &crate::http::RequestContext,
-) -> Result<Option<UploadOutcome>, AppError> {
+) -> Result<CollectedForm, AppError> {
     let mut parts = UploadParts::new();
-    // 文件字段的附加信息只能在它自己身上读到，先存下来
-    let mut file_name = String::new();
-    let mut content_type: Option<String> = None;
-    let mut received: Option<ReceiveFile> = None;
+    let mut files = Vec::new();
 
     while let Some(field) = multipart
         .next_field()
@@ -356,6 +423,16 @@ async fn collect_upload(
                     );
                 }
             }
+            "album" | "album_slug" => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|err| AppError::bad_request(format!("读取 album 失败：{err}")))?;
+                let text = text.trim();
+                if !text.is_empty() {
+                    parts.album_slug = Some(text.to_string());
+                }
+            }
             "sha256" => {
                 let text = field
                     .text()
@@ -376,7 +453,7 @@ async fn collect_upload(
                 }
             }
             "thumb" => {
-                // 缩略图很小（客户端生成，最长边 400px），进内存比落盘划算
+                // 缩略图很小（客户端生成，最长边 1024px），进内存比落盘划算
                 let buffer = read_small_field(field, MAX_THUMB_BYTES, "缩略图").await?;
                 if !buffer.is_empty() {
                     parts.thumb = Some(buffer);
@@ -394,8 +471,8 @@ async fn collect_upload(
             "file" | "image" => {
                 // multipart 的 filename / content-type 只有在这个字段上拿得到，
                 // 后面回不来，所以先记下来
-                file_name = field.file_name().unwrap_or_default().to_string();
-                content_type = field.content_type().map(str::to_string);
+                let file_name = field.file_name().unwrap_or_default().to_string();
+                let content_type = field.content_type().map(str::to_string);
 
                 // 单文件上限按「生效的上传策略」取（单用户覆盖 → 全局默认 → 系统设置）：
                 // 这是收流时的截断阈值，比全局值更紧的用户覆盖必须在这一步就拦住，
@@ -405,51 +482,203 @@ async fn collect_upload(
                     .await
                     .map(|limits| limits.max_file_bytes)
                     .unwrap_or_default();
-                received = Some(ReceiveFile::write(state, field, limit, "图片文件").await?);
+                let file = ReceiveFile::write(state, field, limit, "图片文件").await?;
+                files.push(ReceivedUpload {
+                    file,
+                    file_name,
+                    content_type,
+                });
             }
             // 未知字段忽略：老客户端的表单里可能有 `source`、`key` 之类的附加项
             _ => {}
         }
     }
 
-    let Some(received) = received else {
+    Ok(CollectedForm { parts, files })
+}
+
+/// 把 `album_id` / `album` 换成真实的相册 id。归属检查留给领域层。
+async fn resolve_album_id(
+    state: &Arc<AppState>,
+    user: &pixora_repo::model::User,
+    parts: &UploadParts,
+) -> Result<Option<i64>, AppError> {
+    if let Some(id) = parts.album_id {
+        return Ok(Some(id));
+    }
+    let Some(slug) = parts.album_slug.as_deref() else {
         return Ok(None);
     };
+    let album = state
+        .repo
+        .find_album_by_slug(user.id, slug)
+        .await?
+        .ok_or_else(|| AppError::not_found("相册"))?;
+    Ok(Some(album.id))
+}
 
-    let input = UploadInput {
-        album_id: parts.album_id,
+fn build_input(
+    parts: &UploadParts,
+    album_id: Option<i64>,
+    file: &ReceivedUpload,
+    single: bool,
+    ctx: &crate::http::RequestContext,
+) -> UploadInput {
+    let original_name = parts
+        .original_name
+        .clone()
+        .filter(|value| single && !value.trim().is_empty())
+        .or_else(|| Some(file.file_name.clone()).filter(|value| !value.trim().is_empty()))
+        .unwrap_or_else(|| "upload".to_string());
+    UploadInput {
+        album_id,
         tags: parts.tags.clone(),
         visibility: parts.visibility.clone(),
-        // 表单没给原始文件名就退回 multipart 的 filename，最后兜底一个占位名：
-        // 它只是内部记录，空字符串会让列表页显示成空白行
-        original_name: parts
-            .original_name
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| Some(file_name).filter(|value| !value.trim().is_empty()))
-            .unwrap_or_else(|| "upload".to_string()),
-        client_sha256: parts.sha256.clone(),
-        content_type,
+        original_name,
+        // 一个 sha256 只能对应一个文件；批量上传时逐文件由服务端实测
+        client_sha256: if single { parts.sha256.clone() } else { None },
+        content_type: file.content_type.clone(),
         upload_ip: None,
         upload_agent: None,
         reuse_existing: parts.reuse_existing,
     }
-    // 来源记在图片行上：访客上传时这是唯一的「谁传的」线索
-    .with_origin(ctx.ip.as_deref(), ctx.user_agent.as_deref());
-    let thumb = parts.thumb.take().map(|bytes| {
-        let len = bytes.len() as i64;
-        (
-            Box::new(std::io::Cursor::new(bytes)) as Box<dyn tokio::io::AsyncRead + Send + Unpin>,
-            len,
-        )
-    });
+    .with_origin(ctx.ip.as_deref(), ctx.user_agent.as_deref())
+}
 
-    // 到这里元数据齐了：把临时文件当读流交给领域层（它自己再流式落到内容寻址目录）
-    let reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> = Box::new(received.reader().await?);
+fn thumb_reader(bytes: Vec<u8>) -> Box<dyn tokio::io::AsyncRead + Send + Unpin> {
+    Box::new(std::io::Cursor::new(bytes))
+}
+
+/// 单文件上传：`/upload`。
+async fn collect_upload(
+    state: &Arc<AppState>,
+    user: &pixora_repo::model::User,
+    multipart: &mut Multipart,
+    ctx: &crate::http::RequestContext,
+) -> Result<Option<UploadOutcome>, AppError> {
+    let mut form = collect_form(state, user, multipart).await?;
+    if form.files.is_empty() {
+        return Ok(None);
+    }
+    if form.files.len() > 1 {
+        return Err(AppError::bad_request(
+            "单图上传只能带一个文件；多图请用 /upload/batch",
+        ));
+    }
+    let album_id = resolve_album_id(state, user, &form.parts).await?;
+    let file = form.files.remove(0);
+    let input = build_input(&form.parts, album_id, &file, true, ctx);
+    let thumb = form.parts.thumb.take().map(|bytes| {
+        let len = bytes.len() as i64;
+        (thumb_reader(bytes), len)
+    });
+    let reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> = Box::new(file.file.reader().await?);
     let outcome = state
         .upload_file(user, input, reader, thumb, ctx.ip.as_deref())
         .await?;
     Ok(Some(outcome))
+}
+
+/// `POST /api/v1/upload/batch` — 批量上传（multipart/form-data）。
+///
+/// 共用一套元数据（album_id / album / tags / visibility），文件字段可以出现多次。
+/// 每张独立计数与计费；单张失败不会回滚前面已经成功的，结果按 `items` 与
+/// `failed` 分开返回。
+pub async fn upload_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    mut multipart: Multipart,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let uploader = match resolve_uploader(
+        &state,
+        &headers,
+        rectx.ip.as_deref(),
+        &method,
+        query.get("uid").map(String::as_str),
+    )
+    .await
+    {
+        Ok(user) => user,
+        Err(resp) => return resp,
+    };
+    let limits = match state.effective_upload_limits(&uploader).await {
+        Ok(limits) => limits,
+        Err(err) => return error_response(err),
+    };
+    let form = match collect_form(&state, &uploader, &mut multipart).await {
+        Ok(form) => form,
+        Err(err) => return error_response(err),
+    };
+    if form.files.is_empty() {
+        return error_response(AppError::bad_request(
+            "请求里没有图片文件（字段名应为 file）",
+        ));
+    }
+    if limits.max_batch > 0 && form.files.len() as i64 > limits.max_batch {
+        return error_response(AppError::bad_request(format!(
+            "单批最多 {} 张图片",
+            limits.max_batch
+        )));
+    }
+    let album_id = match resolve_album_id(&state, &uploader, &form.parts).await {
+        Ok(value) => value,
+        Err(err) => return error_response(err),
+    };
+    let CollectedForm { parts, files } = form;
+    let total = files.len();
+    let mut thumb = parts.thumb.clone();
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut failed: Vec<serde_json::Value> = Vec::new();
+
+    for (index, file) in files.into_iter().enumerate() {
+        let input = build_input(&parts, album_id, &file, total == 1, &rectx);
+        let thumb_part = if index == 0 {
+            thumb.take().map(|bytes| {
+                let len = bytes.len() as i64;
+                (thumb_reader(bytes), len)
+            })
+        } else {
+            None
+        };
+        let reader = match file.file.reader().await {
+            Ok(reader) => reader,
+            Err(err) => {
+                failed.push(serde_json::json!({
+                    "index": index,
+                    "code": err.code(),
+                    "message": err.message(),
+                }));
+                continue;
+            }
+        };
+        match state
+            .upload_file(
+                &uploader,
+                input,
+                Box::new(reader),
+                thumb_part,
+                rectx.ip.as_deref(),
+            )
+            .await
+        {
+            Ok(outcome) => items.push(upload_payload(&outcome, None)),
+            Err(err) => failed.push(serde_json::json!({
+                "index": index,
+                "code": err.code(),
+                "message": err.message(),
+            })),
+        }
+    }
+
+    finish::<serde_json::Value>(Ok(serde_json::json!({
+        "items": items,
+        "failed": failed,
+        "csrf_token": csrf_of(&headers),
+    })))
 }
 
 /// 标准上传响应体。

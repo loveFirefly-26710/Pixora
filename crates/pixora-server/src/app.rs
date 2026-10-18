@@ -3,10 +3,12 @@
 //! 四块拼在一起：
 //!
 //!   1. `/api/v1/*` —— 契约里的全部接口。
-//!   2. `/upload` —— 兼容旧图床的调用方式（字段名 `image`，响应结构固定）。
-//!   3. `/healthz` —— 容器编排与反向代理用。
-//!   4. 兜底 —— 先看是不是直链（`/{prefix}/{hash}.{ext}`），不是就当静态资源处理。
+//!   2. `/healthz` —— 容器编排与反向代理用。
+//!   3. 兜底 —— 先看是不是直链（`/{prefix}/{hash}.{ext}`），不是就当静态资源处理。
 //!      SPA 路由回落也在这条兜底里（见 `assets::serve_asset`）。
+//!
+//! 上传只注册在 `/api/v1/upload`（multipart 字段同时接受 `file` 与 `image`），
+//! 不再提供根级 `/upload` 兼容入口。
 //!
 //! 中间件顺序有意安排：先限并发与体积（挡在最外层，恶意请求不进入业务逻辑），
 //! 再超时，再追踪，最后压缩。
@@ -92,6 +94,9 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/site/avatar", get(r::public::site_avatar))
         .route("/plaza", get(r::public::plaza))
         .route("/random", get(r::public::random_image))
+        .route("/music/playlist", get(r::music::playlist))
+        .route("/music/lyrics", get(r::music::lyrics))
+        .route("/music/file", get(r::music::file))
         .route("/terms", get(r::public::terms))
         .route("/terms/consent", post(r::public::terms_consent))
         // ---------- 认证 ----------
@@ -188,6 +193,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         // ---------- 上传 ----------
         .route("/blobs/exists", post(r::upload::blobs_exists))
         .route("/upload", post(r::upload::upload))
+        .route("/upload/batch", post(r::upload::upload_batch))
         .route("/queue/{job_id}", get(r::upload::queue_status))
         // ---------- 管理后台 ----------
         .route("/admin/stats", get(r::admin::stats))

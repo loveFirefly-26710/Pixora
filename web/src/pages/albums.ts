@@ -22,7 +22,7 @@ import {
 } from "../core/format";
 import { confirmDanger, openModal, promptDialog } from "../core/modal";
 import { navigate, type PageContext } from "../core/router";
-import { getState, setViewingUid } from "../core/state";
+import { getState, isAdmin, setViewingUid } from "../core/state";
 import { loadViewPreference, saveViewPreference } from "../core/store";
 import { toastError, toastOk, toastWithCode } from "../core/toast";
 import type { AdminUserRow, AlbumList, ImageItem } from "../core/types";
@@ -64,6 +64,10 @@ function isNarrow(): boolean {
 }
 
 export async function render(ctx: PageContext): Promise<void> {
+  // 管理员从「用户管理 → 查看相册」进来时带着 uid。用户视图是一个持续状态：
+  // 相册页、上传页、管理页都按这个 uid 取数据，直到横幅里点「退出用户视图」。
+  const requestedUid = (ctx.query.get("uid") ?? "").trim();
+  if (requestedUid && isAdmin()) setViewingUid(requestedUid);
   const parsedAlbumId = Number(ctx.params.albumId ?? "");
   const viewingUid = getState().viewingUid;
 
@@ -459,11 +463,13 @@ export async function render(ctx: PageContext): Promise<void> {
   // ---------- 相册侧栏 ----------
 
   function renderSidebar(data: AlbumList): void {
+    // 用户视图要把 uid 带在链接上：刷新或新标签页打开时还停在目标用户空间
+    const suffix = viewingUid ? `?uid=${encodeURIComponent(viewingUid)}` : "";
     const link = (id: number | null, name: string, count: number): HTMLElement =>
       h(
         "a",
         {
-          href: id === null ? "#/albums" : `#/albums/${id}`,
+          href: id === null ? `#/albums${suffix}` : `#/albums/${id}${suffix}`,
           class: state.albumId === id ? "on" : "",
         },
         h("span", { text: "▤" }),
@@ -477,12 +483,16 @@ export async function render(ctx: PageContext): Promise<void> {
       h("div.par", { text: "我的相册" }),
       link(null, data.all.name || "全部图片", data.all.image_count),
       ...data.albums.map((album) => link(album.id, album.name, album.image_count)),
-      h("button.new", {
-        type: "button",
-        text: "＋ 新建相册",
-        on: { click: () => void createAlbum() },
-      }),
-      h("a.new", { href: "#/albums/manage", text: "管理相册" }),
+      // 用户视图下不提供「新建相册」：POST /albums 没有 uid 参数，
+      // 点了会建到管理员自己账号下。图片的批量管理仍然照常可用。
+      viewingUid
+        ? null
+        : h("button.new", {
+            type: "button",
+            text: "＋ 新建相册",
+            on: { click: () => void createAlbum() },
+          }),
+      h("a.new", { href: `#/albums/manage${suffix}`, text: "管理相册" }),
       h("div.par.album-usage", { text: "用量" }),
       h(
         "div.album-usage",
@@ -1614,9 +1624,18 @@ export async function render(ctx: PageContext): Promise<void> {
 
 /** 用户视图横幅：先显示 uid，拿到邮箱后再补全文案（不阻塞页面渲染）。 */
 function buildViewBanner(uid: string, onExit: () => void): HTMLElement {
-  const banner = userViewBanner(uid, `u_${uid}`, () => {
-    navigate("/admin/users");
-  }, onExit);
+  const banner = userViewBanner(
+    uid,
+    `u_${uid}`,
+    () => {
+      setViewingUid(null);
+      navigate("/admin/users");
+    },
+    () => {
+      setViewingUid(null);
+      onExit();
+    },
+  );
   const label = banner.querySelector("b");
   if (!label) return banner;
   void requestPage<AdminUserRow>("/admin/users", { query: { query: uid, per_page: 1 } })
