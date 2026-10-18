@@ -9,7 +9,7 @@
 import { requestPage } from "../core/api";
 import { h, mount } from "../core/dom";
 import { navigate, type PageContext } from "../core/router";
-import { getState, setViewingUid } from "../core/state";
+import { getState, isAdmin, setViewingUid } from "../core/state";
 import type { AdminUserRow } from "../core/types";
 import { userViewBanner } from "../ui/shell";
 import { emptyState, qtip, skeletonGrid, viewHead } from "../ui/widgets";
@@ -44,15 +44,21 @@ export async function render(ctx: PageContext): Promise<void> {
     ),
   );
 
-  const viewingUid = getState().viewingUid;
+  const viewingUid = (() => {
+    const requestedUid = (ctx.query.get("uid") ?? "").trim();
+    if (requestedUid && isAdmin()) setViewingUid(requestedUid);
+    return getState().viewingUid;
+  })();
   if (viewingUid) {
-    // 用户视图下能看目标用户的相册，但上传只进管理员自己的账号——契约里 /upload 没有 uid 参数
+    // 用户视图下上传也归到目标用户：后端按 ?uid= 校验管理员身份，
+    // 配额、限流与目标相册归属都算对方的。
     headHost.append(
       buildViewBanner(viewingUid, async () => {
         setViewingUid(null);
         navigate("/albums");
       }, () => {
-        navigate("/albums");
+        setViewingUid(null);
+        navigate("/admin/users");
       }),
     );
   }
@@ -90,6 +96,7 @@ export async function render(ctx: PageContext): Promise<void> {
     panel = createUploadPanel({
       albums,
       albumId: initialAlbumId,
+      ownerUid: viewingUid,
       onFinished: () => {
         // 队列跑完后相册张数/用量都变了，回相册页时是重新拉的，这里不用做别的
       },

@@ -40,7 +40,7 @@
 		}
 	}
 
-	# 直链与静态资源：给长缓存，交给浏览器与 CDN。应用已经设了
+	# 直链与静态资源：给长缓存，交给浏览器。应用已经设了
 	# immutable 的 Cache-Control，这里不重复覆盖。
 	@assets path /main.js /main.css /favicon.svg /manifest.webmanifest /workers/*
 	handle @assets {
@@ -54,7 +54,7 @@
 	}
 
 	# 安全响应头。CSP 写得比较紧：前端不加载任何外部资源，
-	# 所以既没有 CDN 也没有内联脚本的例外。
+	# 所以既没有外链也没有内联脚本的例外。
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Frame-Options "SAMEORIGIN"

@@ -21,6 +21,7 @@ pub mod mail;
 pub mod mail_templates;
 pub mod media;
 pub mod moderation;
+pub mod music;
 pub mod quota;
 pub mod ratelimit;
 pub mod settings;

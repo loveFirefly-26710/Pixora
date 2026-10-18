@@ -424,7 +424,9 @@ https://img.example.com/images/a3f9c1b8...e7.webp
 - **未登录**：只能看到广场。顶部右上角一个登录按钮。可以按标签、关键词、上传时间搜索和筛选。
 - **已登录**：广场页面上方是上传区，下方是广场内容。上传区和广场同屏，上传完直接能看到自己的图进了广场（如果设为公开）。
 
-广场只展示 `visibility = public` 的图片，用户可以在上传或编辑时选择是否公开。搜索当前走 `title`、`original_name` 与标签名的 `LIKE` 匹配（大小写与转义由仓储层处理），没有依赖 PostgreSQL 专属的全文索引；数据量很大时再考虑加 GIN/`tsvector` 或外部搜索。
+广场只展示 `visibility = public` 的图片，用户可以在上传或编辑时选择是否公开。管理员可以在「系统设置 → 首页展示相册」里只挑部分公开相册，选中后广场与自动漫游只取这些相册里的公开图片；不选表示沿用全部公开图片。搜索当前走 `title`、`original_name` 与标签名的 `LIKE` 匹配（大小写与转义由仓储层处理），没有依赖 PostgreSQL 专属的全文索引；数据量很大时再考虑加 GIN/`tsvector` 或外部搜索。
+
+**背景音乐**：管理员可选 Meting 风格 API（平台 + 歌单 ID）或服务器本地目录。服务端把歌单归一化成统一结构并代理歌词；本地音频由 `/music/file` 带 Range 提供。前端在广场把圆形主图当唱片旋转，顶部按钮控制播放/暂停，右侧抽屉在歌单与歌词间切换。
 
 ### 7.6 API 与第三方客户端
 
@@ -435,8 +437,10 @@ https://img.example.com/images/a3f9c1b8...e7.webp
 
 | 方法 | 路径 | 作用 | 权限 |
 |---|---|---|---|
-| POST | `/api/v1/upload` | 上传单张图片 | upload |
+| POST | `/api/v1/upload` | 上传单张图片，可指定相册 id 或 slug | upload |
+| POST | `/api/v1/upload/batch` | 批量上传，多文件共用一套元数据 | upload |
 | POST | `/api/v1/blobs/exists` | 批量预检哈希，判断哪些已存在 | upload |
+| POST | `/api/v1/images/batch` | 批量删除 / 移动 / 打标签 / 改可见性 | write |
 | GET | `/api/v1/images` | 图片列表，支持分页与标签筛选 | read |
 | GET | `/api/v1/images/{id}` | 单张图片详情 | read |
 | PATCH | `/api/v1/images/{id}` | 改标签、可见性、所属相册 | write |
@@ -447,11 +451,14 @@ https://img.example.com/images/a3f9c1b8...e7.webp
 | DELETE | `/api/v1/albums/{id}` | 删除相册 | write |
 | GET | `/api/v1/plaza` | 广场搜索，公开端点 | 公开 |
 | GET | `/api/v1/random` | 随机一张公开图片：302 跳直链，`?format=json` 返回 JSON | 公开 |
+| GET | `/api/v1/music/playlist` | 背景音乐歌单（Meting API 或本地目录） | 公开 |
+| GET | `/api/v1/music/lyrics` | 歌词文本；第三方歌词由服务端代理 | 公开 |
+| GET | `/api/v1/music/file` | 本地音乐文件，支持 Range | 公开 |
 | GET | `/api/v1/fs/tree` | 数据目录递归查询 | read |
 | GET | `/api/v1/queue/{job_id}` | 查询队列任务状态 | read |
 | GET | `/api/v1/me` | 当前用户信息与配额用量 | read |
 
-`POST /api/v1/upload` 的字段：`file`（必填）、`sha256`（可选，客户端算好的哈希，带上服务端就不用再算一遍）、`thumb`（可选，客户端生成的缩略图）、`album_id`、`tags`、`visibility`、`original_name`、`reuse_existing`（可选，内容已在图库里就复用那一张）。
+`POST /api/v1/upload` 的字段：`file`（必填，也接受 `image` 别名）、`sha256`（可选，客户端算好的哈希；服务端仍会边收边算并与之对账）、`thumb`（可选，客户端生成的缩略图）、`album_id` 或 `album` / `album_slug`、`tags`、`visibility`、`original_name`、`reuse_existing`（可选，内容已在图库里就复用那一张）。管理员可带 `?uid=` 代目标用户上传，配额与相册归属都按对方算。
 
 鉴权用 `Authorization: Bearer <token>` 或 `X-API-Key`。Token 在「API Token」页生成，库里只存哈希，可设权限范围（`upload` / `read` / `write` / `admin`）和过期时间；省略范围或传空数组时按 `upload + read` 处理。限流按用户的生效策略计数，同一用户的多个 Token 共享额度；Token 的 scopes 只决定能调哪些接口。每分钟额度在鉴权后强制，小时额度与 burst 目前只有配置字段，没有接入准入。
 

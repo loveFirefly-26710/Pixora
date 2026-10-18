@@ -22,16 +22,21 @@ interface Endpoint {
 }
 
 const ENDPOINTS: Endpoint[] = [
-  { method: "POST", path: "/api/v1/upload", purpose: "上传单张图片", scope: "upload" },
+  { method: "POST", path: "/api/v1/upload", purpose: "上传单张图片，可指定相册 id 或 slug", scope: "upload" },
+  { method: "POST", path: "/api/v1/upload/batch", purpose: "批量上传，多个 file 字段共用一套元数据", scope: "upload" },
   { method: "POST", path: "/api/v1/blobs/exists", purpose: "批量预检哈希，判断哪些文件已存在", scope: "upload" },
   { method: "GET", path: "/api/v1/images", purpose: "图片列表，支持分页与标签筛选", scope: "read" },
   { method: "GET", path: "/api/v1/images/{id}", purpose: "单张图片详情", scope: "read" },
   { method: "PATCH", path: "/api/v1/images/{id}", purpose: "改标签、可见性、所属相册", scope: "write" },
   { method: "DELETE", path: "/api/v1/images/{id}", purpose: "删除图片（引用计数归零才删物理文件）", scope: "write" },
+  { method: "POST", path: "/api/v1/images/batch", purpose: "批量删除 / 移动 / 打标签 / 改可见性", scope: "write" },
   { method: "GET", path: "/api/v1/albums", purpose: "相册列表", scope: "read" },
   { method: "POST", path: "/api/v1/albums", purpose: "新建相册", scope: "write" },
   { method: "GET", path: "/api/v1/plaza", purpose: "广场搜索，公开端点不需要鉴权", scope: "公开" },
   { method: "GET", path: "/api/v1/random", purpose: "随机一张公开图片，302 跳直链", scope: "公开" },
+  { method: "GET", path: "/api/v1/music/playlist", purpose: "背景音乐歌单", scope: "公开" },
+  { method: "GET", path: "/api/v1/music/lyrics", purpose: "歌词文本（API 代理或本地 .lrc）", scope: "公开" },
+  { method: "GET", path: "/api/v1/music/file", purpose: "本地音乐文件，支持 Range", scope: "公开" },
   { method: "GET", path: "/api/v1/fs/tree", purpose: "数据目录递归查询", scope: "read" },
   { method: "GET", path: "/api/v1/queue/{job_id}", purpose: "查询队列任务状态", scope: "read" },
   { method: "GET", path: "/api/v1/me", purpose: "当前用户信息与配额用量", scope: "read" },
@@ -43,7 +48,10 @@ export async function render(ctx: PageContext): Promise<void> {
   const uploadUrl = `${base}/api/v1/upload`;
 
   ctx.outlet.append(
-    pageHead("API 文档", "列出全部可用端点、参数含义和调用示例，照着复制就能接上 PicGo、PicList 或自己的脚本。"),
+    pageHead(
+      "API 文档",
+      "常用端点的参数与示例；完整契约（含管理接口、错误码与细节）见仓库 docs/api-contract.md。",
+    ),
   );
 
   ctx.outlet.append(
@@ -122,10 +130,11 @@ export async function render(ctx: PageContext): Promise<void> {
         table(
           ["参数", "类型", "必填", "说明"],
           [
-            [h("span.mono", { text: "file" }), h("span", { text: "file" }), badge("必填", "err"), h("span", { text: "图片本体，字段名固定为 file" })],
+            [h("span.mono", { text: "file" }), h("span", { text: "file" }), badge("必填", "err"), h("span", { text: "图片本体；也接受 image 字段别名" })],
             [h("span.mono", { text: "sha256" }), h("span", { text: "string" }), badge("可选", "mute"), h("span", { text: "客户端算好的哈希，服务端会用它做去重" })],
             [h("span.mono", { text: "thumb" }), h("span", { text: "file" }), badge("可选", "mute"), h("span", { text: "客户端生成的缩略图，服务端只存不缩放" })],
-            [h("span.mono", { text: "album_id" }), h("span", { text: "int" }), badge("可选", "mute"), h("span", { text: "目标相册，省略则进默认相册" })],
+            [h("span.mono", { text: "album_id" }), h("span", { text: "int" }), badge("可选", "mute"), h("span", { text: "目标相册 id，省略则进调用者的默认相册" })],
+            [h("span.mono", { text: "album" }), h("span", { text: "string" }), badge("可选", "mute"), h("span", { text: "目标相册 slug；与 album_id 同时给时以 id 为准" })],
             [h("span.mono", { text: "tags" }), h("span", { text: "string" }), badge("可选", "mute"), h("span", { text: "逗号分隔，如 风景,旅行" })],
             [h("span.mono", { text: "visibility" }), h("span", { text: "string" }), badge("可选", "mute"), h("span", { text: "public 或 private，默认 private" })],
             [h("span.mono", { text: "original_name" }), h("span", { text: "string" }), badge("可选", "mute"), h("span", { text: "保留原始文件名，仅内部记录，不出现在直链里" })],
@@ -156,6 +165,50 @@ curl -X POST "${uploadUrl}" \\
   "error": null
 }`,
           ),
+        ),
+        h("div.tip", {
+          text: "私有相册与公开相册都只需要 Token；匿名上传只会落到访客账号的默认相册，不能指定别人的公开相册。管理员可以带 ?uid=目标UID 代用户上传。",
+        }),
+      ),
+    ),
+  );
+
+  // 批量上传：多文件 + 一套公共元数据
+  ctx.outlet.append(
+    h(
+      "div.endpoint",
+      null,
+      h(
+        "div.ep-h",
+        null,
+        h("span.m.post", { text: "POST" }),
+        h("span.p", { text: "/api/v1/upload/batch" }),
+        h("span.spacer"),
+        h("span.badge.info", { text: "批量上传" }),
+      ),
+      h(
+        "div.ep-b",
+        null,
+        h("div.tip", {
+          text: "file 可以出现多次；album_id / album / tags / visibility 对整批生效。每张独立计数，单张失败不会回滚已成功的那些。",
+        }),
+        codeBlock(
+          "请求示例",
+          `curl -X POST "${base}/api/v1/upload/batch" \\
+  -H "Authorization: Bearer px_live_xxx" \\
+  -F "file=@./a.jpg" \\
+  -F "file=@./b.jpg" \\
+  -F "album=travel"`,
+        ),
+        codeBlock(
+          "响应示例",
+          `{
+  "data": {
+    "items": [ { "id": 1, "url": "…", "sha256": "…", "tags": [] } ],
+    "failed": [ { "index": 1, "code": "UNSUPPORTED_FORMAT", "message": "格式不在白名单内" } ]
+  },
+  "error": null
+}`,
         ),
       ),
     ),
@@ -239,14 +292,18 @@ curl -X POST "${uploadUrl}" \\
         "div.card",
         null,
         h("h4", { text: "PicGo / PicList 配置" }),
-        h("div", { style: { fontSize: "12.5px", color: "var(--muted)", marginBottom: "10px" }, text: "装「自定义 Web 图床」插件后按下表填：" }),
+        h("div", {
+          style: { fontSize: "12.5px", color: "var(--muted)", marginBottom: "10px" },
+          text: "PicGo 3 需另装 picgo-plugin-web-uploader（内置没有 custom 上传器），按下表填；PicList 的自定义图床字段名不同，按其界面提示对应即可。",
+        }),
         table(
           ["", ""],
           [
             ["API 地址", h("span.mono", { text: uploadUrl })],
-            ["文件字段名", h("span.mono", { text: "file" })],
-            ["额外请求头", h("span.mono", { text: "Authorization: Bearer <token>" })],
-            ["返回 URL 路径", h("span.mono", { text: "data.url" })],
+            ["文件字段名（paramName）", h("span.mono", { text: "file" })],
+            ["额外请求头（customHeader）", h("span.mono", { text: '{"Authorization":"Bearer <token>"}' })],
+            ["额外表单（customBody）", h("span.mono", { text: '{"album":"travel","visibility":"public"}' }),],
+            ["返回 URL 路径（jsonPath）", h("span.mono", { text: "data.url" })],
           ],
         ),
         h("button.btn.pri.sm", {
@@ -256,7 +313,13 @@ curl -X POST "${uploadUrl}" \\
           on: {
             click: async () => {
               const json = JSON.stringify(
-                { url: uploadUrl, field: "file", headers: { Authorization: "Bearer <token>" }, urlPath: "data.url" },
+                {
+                  url: uploadUrl,
+                  paramName: "file",
+                  jsonPath: "data.url",
+                  customHeader: '{"Authorization":"Bearer <token>"}',
+                  customBody: '{"album":"travel","visibility":"public"}',
+                },
                 null,
                 2,
               );
@@ -264,6 +327,9 @@ curl -X POST "${uploadUrl}" \\
               if (ok) toast("✓ 已复制配置 JSON");
             },
           },
+        }),
+        h("div.tip", {
+          text: "customHeader / customBody 在插件里是 JSON 字符串，不是对象；album 可换成 album_id，私有相册同样只需要 Token。",
         }),
       ),
       h(

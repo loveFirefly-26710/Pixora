@@ -39,6 +39,17 @@ pub struct AlbumPatch {
     pub cover_blob_id: Option<Option<i64>>,
 }
 
+/// 管理后台挑「首页展示相册」用的公开相册行。
+#[derive(Debug, Clone)]
+pub struct PublicAlbumChoice {
+    pub id: i64,
+    pub name: String,
+    pub slug: String,
+    pub owner_uid: String,
+    pub owner_email: String,
+    pub image_count: i64,
+}
+
 /// 相册列表的过滤条件。
 #[derive(Debug, Clone, Default)]
 pub struct AlbumFilter {
@@ -141,6 +152,36 @@ impl Repo {
             .fetch_all(&sql, Args::new().int(owner_id))
             .await?;
         rows.iter().map(Album::from_row).collect()
+    }
+
+    /// 全站公开相册，管理后台挑「首页展示相册」用。
+    ///
+    /// 只列正常账号的公开相册；被封禁/暂停用户的相册不该出现在可选项里。
+    pub async fn list_public_albums(&self) -> Result<Vec<PublicAlbumChoice>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT a.id, a.name, a.slug, a.image_count, u.uid AS owner_uid, \
+                        u.email AS owner_email \
+                   FROM albums a JOIN users u ON u.id = a.owner_id \
+                  WHERE a.visibility = 'public' AND a.deleted_at IS NULL \
+                    AND u.status = 'active' \
+                  ORDER BY a.updated_at DESC, a.id DESC LIMIT 500",
+                Args::new(),
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(PublicAlbumChoice {
+                    id: get_i64(row, "id")?,
+                    name: get_str(row, "name")?,
+                    slug: get_str(row, "slug")?,
+                    image_count: get_i64(row, "image_count")?,
+                    owner_uid: get_str(row, "owner_uid")?,
+                    owner_email: get_str(row, "owner_email")?,
+                })
+            })
+            .collect()
     }
 
     // ---------- 写入 ----------

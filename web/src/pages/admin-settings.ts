@@ -22,9 +22,10 @@ import { loginMethodsCard } from "./login-methods-card";
 import type { PageContext } from "../core/router";
 import { toastError, toastOk } from "../core/toast";
 import { currentUser, loadMe, loadSite } from "../core/state";
+import { reloadMusic } from "../core/music";
 import { BUILTIN_AVATAR } from "../ui/brand";
 import { refreshNav } from "../ui/shell";
-import type { AdminSettings, RateLimitAdmin } from "../core/types";
+import type { AdminSettings, MusicPlaylist, RateLimitAdmin } from "../core/types";
 import {
   apiRateCard,
   downloadRateCard,
@@ -89,6 +90,18 @@ const SECURITY_OPTIONS = [
   { value: "plain", label: "不加密（仅内网自建）" },
 ];
 
+/** Meting 支持的平台名。与 core::music::PLATFORMS 保持一致。 */
+const MUSIC_PLATFORMS = [
+  { value: "netease", label: "网易云音乐" },
+  { value: "tencent", label: "QQ 音乐" },
+  { value: "kugou", label: "酷狗音乐" },
+  { value: "kuwo", label: "酷我音乐" },
+  { value: "migu", label: "咪咕音乐" },
+  { value: "baidu", label: "百度音乐" },
+  { value: "xiami", label: "虾米音乐" },
+  { value: "joox", label: "JOOX" },
+];
+
 /** 页面上可编辑的值集中在这一份里。 */
 interface SettingsDraft {
   siteName: HTMLInputElement;
@@ -96,7 +109,15 @@ interface SettingsDraft {
   plazaPublic: boolean;
   plazaColumns: HTMLSelectElement;
   plazaAutoRefresh: HTMLInputElement;
+  /** 首页只展示这些公开相册；空 = 全部公开图片 */
+  plazaAlbumIds: Set<number>;
   recycleRetention: HTMLInputElement;
+  musicEnabled: boolean;
+  musicSource: HTMLSelectElement;
+  musicApiUrl: HTMLInputElement;
+  musicPlatform: HTMLSelectElement;
+  musicPlaylistId: HTMLInputElement;
+  musicLocalDir: HTMLInputElement;
   requireLogin: boolean;
   registerEnabled: boolean;
   /** 允许注册的邮箱域名白名单，逗号分隔；空 = 不限 */
@@ -229,12 +250,37 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       min: "0",
       max: "3600",
     }),
+    plazaAlbumIds: new Set(data.site.plaza_album_ids ?? []),
     recycleRetention: textInput({
       value: String(data.site.recycle_retention_days ?? 30),
       type: "number",
       mono: true,
       min: "0",
       max: "365",
+    }),
+    musicEnabled: data.music?.enabled ?? false,
+    musicSource: select(
+      [
+        { value: "api", label: "Meting API（推荐）" },
+        { value: "local", label: "服务器本地目录" },
+      ],
+      data.music?.source === "local" ? "local" : "api",
+    ),
+    musicApiUrl: textInput({
+      value: data.music?.api_url ?? "https://api.i-meto.com/meting/api",
+      mono: true,
+      placeholder: "https://your-meting.example.com/api",
+    }),
+    musicPlatform: select(MUSIC_PLATFORMS, data.music?.platform ?? "netease"),
+    musicPlaylistId: textInput({
+      value: data.music?.playlist_id ?? "",
+      mono: true,
+      placeholder: "歌单 ID，例如 2884035",
+    }),
+    musicLocalDir: textInput({
+      value: data.music?.local_dir ?? "",
+      mono: true,
+      placeholder: "例如 /srv/pixora/music 或 D:\\Music",
     }),
     requireLogin: data.site.require_login_to_upload,
     registerEnabled: data.site.register_enabled,
@@ -359,6 +405,8 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       "div.cardflow",
       null,
       siteCard(draft, data),
+      plazaAlbumsCard(draft, data),
+      musicCard(draft),
       sessionCard(draft),
       uploadCard(draft, data, rate, rateDraft),
       apiRateCard(rateDraft),
@@ -394,6 +442,159 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
         "这里只管「允不允许、多大、什么格式、多久一次」。",
     ),
   ];
+}
+
+/** 首页展示范围：从全站公开相册里勾选；一个都不选就沿用「全部公开图片」。 */
+function plazaAlbumsCard(draft: SettingsDraft, data: AdminSettings): HTMLElement {
+  const albums = data.plaza_albums ?? [];
+  const list = h("div", {
+    style: {
+      display: "grid",
+      gap: "6px",
+      maxHeight: "280px",
+      overflowY: "auto",
+      padding: "2px",
+    },
+  });
+  if (albums.length === 0) {
+    list.append(
+      h("div.tip", {
+        text: "目前没有公开相册。不选时广场仍会展示全部公开图片。",
+      }),
+    );
+  } else {
+    for (const album of albums) {
+      const box = h("input", { type: "checkbox", checked: draft.plazaAlbumIds.has(album.id) });
+      box.addEventListener("change", () => {
+        if (box.checked) draft.plazaAlbumIds.add(album.id);
+        else draft.plazaAlbumIds.delete(album.id);
+        paint();
+      });
+      list.append(
+        h(
+          "label.flexline",
+          {
+            style: {
+              alignItems: "center",
+              gap: "9px",
+              padding: "7px 9px",
+              border: "1px solid var(--border)",
+              borderRadius: "9px",
+              cursor: "pointer",
+            },
+          },
+          box,
+          h(
+            "span",
+            { style: { flex: "1", minWidth: "0", display: "flex", flexDirection: "column", gap: "1px" } },
+            h("b", { text: album.name }),
+            h("span", {
+              style: { color: "var(--muted)", fontSize: "11.5px" },
+              text: `${album.owner_email} · u_${album.owner_uid}`,
+            }),
+          ),
+          h("span.tag", { text: `${album.image_count} 张` }),
+        ),
+      );
+    }
+  }
+
+  const summary = h("div.tip");
+  const paint = (): void => {
+    summary.textContent =
+      draft.plazaAlbumIds.size === 0
+        ? "当前不限制：全部公开图片都会进入广场。"
+        : `当前只展示选中的 ${draft.plazaAlbumIds.size} 个公开相册。`;
+  };
+  paint();
+  const clear = h("button.btn.sm", {
+    type: "button",
+    text: "清空选择（展示全部）",
+    on: {
+      click: () => {
+        draft.plazaAlbumIds.clear();
+        for (const box of list.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
+          box.checked = false;
+        }
+        paint();
+      },
+    },
+  });
+
+  return cardNode(
+    cardHead("首页展示相册"),
+    h("div.tip", {
+      text: "只从「公开相册」里挑。选中的相册里，图片自身也必须是公开的才会出现在广场；相册后来改回私有会自动失效。",
+    }),
+    list,
+    h("div.flexline", { style: { marginTop: "8px", alignItems: "center" } }, summary, h("span.spacer"), clear),
+  );
+}
+
+/** 背景音乐：优先 Meting API，也可以扫描服务器本地目录。 */
+function musicCard(draft: SettingsDraft): HTMLElement {
+  const apiBox = h(
+    "div",
+    null,
+    field("API 地址", draft.musicApiUrl, "Meting 风格接口，例如 https://api.i-meto.com/meting/api"),
+    field("音乐平台", draft.musicPlatform),
+    field("歌单 ID", draft.musicPlaylistId, "填歌单页地址里的 ID；不同平台的 ID 不通用。"),
+  );
+  const localBox = h(
+    "div",
+    null,
+    field(
+      "本地音乐目录",
+      draft.musicLocalDir,
+      "服务器上的绝对路径。支持 mp3 / m4a / aac / flac / ogg / opus / wav / webm；同名 .lrc 与 cover 图会一起读取。",
+    ),
+  );
+  const paint = (): void => {
+    const local = draft.musicSource.value === "local";
+    apiBox.style.display = local ? "none" : "";
+    localBox.style.display = local ? "" : "none";
+  };
+  draft.musicSource.addEventListener("change", paint);
+  paint();
+
+  const result = h("div", { style: { marginTop: "8px" } });
+  const test = h("button.btn.sm", {
+    type: "button",
+    text: "测试已保存的歌单",
+  });
+  test.addEventListener("click", async () => {
+    test.disabled = true;
+    test.textContent = "读取中…";
+    try {
+      const data = await request<MusicPlaylist>("/music/playlist");
+      result.replaceChildren(
+        data.tracks.length > 0
+          ? qtip("ok", `歌单可用：${data.tracks.length} 首`, data.tracks.slice(0, 3).map((track) => track.title).join(" · "))
+          : qtip("warn", "歌单为空", data.message ?? "还没有可以播放的曲目。"),
+      );
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : String(err);
+      result.replaceChildren(qtip("err", "读取失败", message));
+    } finally {
+      test.disabled = false;
+      test.textContent = "测试已保存的歌单";
+    }
+  });
+
+  return cardNode(
+    cardHead("背景音乐"),
+    h("div.tip", {
+      text: "启用后，广场顶栏会出现播放按钮，圆形主图会随着音乐转动；点主图也能播放/暂停。默认优先使用 API 方式。",
+    }),
+    switchRow("启用背景音乐", "关闭后顶栏按钮与歌单侧栏一起隐藏", draft.musicEnabled, (next) => {
+      draft.musicEnabled = next;
+    }),
+    field("音乐来源", draft.musicSource),
+    apiBox,
+    localBox,
+    h("div.flexline", { style: { marginTop: "6px" } }, test),
+    result,
+  );
 }
 
 /** 站点：基础 URL、名称与三个开关。 */
@@ -1271,6 +1472,27 @@ async function save(
     toastError("像素上限填不对：单位是万，填 8000 表示 8000 万像素");
     return;
   }
+  if (draft.musicEnabled) {
+    if (draft.musicSource.value === "local" && !draft.musicLocalDir.value.trim()) {
+      toastError("启用本地音乐时，要填写服务器上的音乐目录");
+      return;
+    }
+    if (
+      draft.musicSource.value === "api" &&
+      (!draft.musicApiUrl.value.trim() || !draft.musicPlaylistId.value.trim())
+    ) {
+      toastError("启用 API 音乐时，API 地址与歌单 ID 都要填");
+      return;
+    }
+  }
+  if (
+    draft.musicSource.value === "api" &&
+    draft.musicApiUrl.value.trim() &&
+    !/^https?:\/\//i.test(draft.musicApiUrl.value.trim())
+  ) {
+    toastError("音乐 API 地址要以 http:// 或 https:// 开头");
+    return;
+  }
   const rateIssue = validateRateLimit(rateDraft);
   if (rateIssue) {
     toastError(rateIssue);
@@ -1294,6 +1516,7 @@ async function save(
     moderation: Record<string, unknown>;
     thumb: Record<string, unknown>;
     appearance: Record<string, unknown>;
+    music: Record<string, unknown>;
     mail?: Record<string, unknown>;
   } = {
     site: {
@@ -1302,6 +1525,7 @@ async function save(
       plaza_public: draft.plazaPublic,
       plaza_grid_columns: Number(draft.plazaColumns.value) || 3,
       plaza_auto_refresh_seconds: autoRefreshSeconds(draft.plazaAutoRefresh),
+      plaza_album_ids: [...draft.plazaAlbumIds],
       recycle_retention_days: Math.min(365, Math.max(0, intOf(draft.recycleRetention))),
       require_login_to_upload: draft.requireLogin,
       register_enabled: draft.registerEnabled,
@@ -1344,6 +1568,14 @@ async function save(
     appearance: {
       background: draft.background.value.trim() || null,
       default_avatar: draft.defaultAvatar.value.trim() || null,
+    },
+    music: {
+      enabled: draft.musicEnabled,
+      source: draft.musicSource.value,
+      api_url: draft.musicApiUrl.value.trim(),
+      platform: draft.musicPlatform.value,
+      playlist_id: draft.musicPlaylistId.value.trim(),
+      local_dir: draft.musicLocalDir.value.trim(),
     },
   };
 
@@ -1389,6 +1621,8 @@ async function save(
     // 站名、背景图在 /site 里，单文件上限与格式在 /me 的生效策略里：
     // 两边都重拉一次，页面上的标题、背景与上传提示当场跟着变
     await refreshIdentity();
+    // 音乐配置可能刚改过：停掉旧曲并重新拉歌单，顶栏按钮与广场随后自动更新
+    void reloadMusic();
     reload();
   } catch (err) {
     toastError(err);

@@ -16,7 +16,9 @@ import { request } from "../core/api";
 import { absUrl } from "../core/config";
 import { toast, toastError } from "../core/toast";
 import { currentTheme, toggleTheme } from "../core/theme";
+import { preloadMusic } from "../core/music";
 import { BUILTIN_AVATAR, brandLockup, MOON_ICON, SUN_ICON } from "./brand";
+import { mountMusicPanel, musicControl } from "./music-player";
 
 export interface NavItem {
   path: string;
@@ -182,7 +184,9 @@ export function renderNavbar(): HTMLElement {
   });
   themeButton.innerHTML = `${SUN_ICON}${MOON_ICON}`;
 
-  const navActions = h("div.nav-actions", null, themeButton);
+  const navActions = h("div.nav-actions", null);
+  if (getState().site?.music?.enabled) navActions.append(musicControl());
+  navActions.append(themeButton);
   if (user) {
     // 管理后台的入口只在头像下拉里：顶栏再多一个按钮，和「账号」挤在一起
     // 反而让人分不清点哪个
@@ -455,6 +459,8 @@ export function mountShell(root: HTMLElement): HTMLElement {
   refs = { shell, navbar, sidebar, tabbar, outlet, banner };
   refreshBanner();
   syncNavHeight(navbar);
+  mountMusicPanel();
+  void preloadMusic();
   window.addEventListener("resize", () => {
     if (refs) syncNavHeight(refs.navbar);
   });
