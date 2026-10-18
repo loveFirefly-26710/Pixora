@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.6",
   "description": "Pixora 前端：无框架、零运行时依赖，构建产物用 rust-embed 打进二进制",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "node build.mjs --production",
