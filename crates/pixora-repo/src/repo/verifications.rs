@@ -110,16 +110,38 @@ impl Repo {
         row.as_ref().map(EmailVerification::from_row).transpose()
     }
 
-    /// 标记已使用。只写第一次消费时间：并发的两次校验请求里，
-    /// 后到的那个改不动行，据此也能知道自己来晚了。
-    pub async fn consume_verification(&self, id: i64, at: DateTime<Utc>) -> Result<()> {
-        self.db
+    /// 标记已使用。只写第一次消费时间，并返回这次是否真的抢到了。
+    ///
+    /// 并发的两次校验请求里，后到的那个改不动行；调用方必须看返回值，
+    /// 不能「查到了就继续」——否则两个请求会拿同一个令牌各改一次密码。
+    pub async fn consume_verification(&self, id: i64, at: DateTime<Utc>) -> Result<bool> {
+        let changed = self
+            .db
             .execute(
                 "UPDATE email_verifications SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
                 Args::new().text(ts(at)).int(id),
             )
             .await?;
-        Ok(())
+        Ok(changed > 0)
+    }
+
+    /// 作废某个邮箱在指定用途下所有还没用掉的验证记录。
+    ///
+    /// 重置邮件里同时带链接和验证码，它们是两条独立的钥匙；发新邮件、
+    /// 或任何一次重置成功后都要把旧的收掉，否则一封邮件能反复开门。
+    pub async fn revoke_pending_verifications(
+        &self,
+        email: &str,
+        purpose: &str,
+        at: DateTime<Utc>,
+    ) -> Result<u64> {
+        self.db
+            .execute(
+                "UPDATE email_verifications SET consumed_at = ? \
+                 WHERE email = ? AND purpose = ? AND consumed_at IS NULL",
+                Args::new().text(ts(at)).text(email).text(purpose),
+            )
+            .await
     }
 
     /// 一次校验失败：累加尝试次数并返回累加后的值，服务层据此决定是否作废。

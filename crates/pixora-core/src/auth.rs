@@ -341,9 +341,18 @@ impl AppState {
         self.ensure_verification_quota(&email, device.ip.as_deref(), purpose::RESET)
             .await?;
 
+        // 新邮件发出后，旧邮件里的链接和验证码一律作废：同一时间只认最新一封。
+        let at = Utc::now();
+        self.repo
+            .revoke_pending_verifications(&email, purpose::RESET, at)
+            .await?;
+        self.repo
+            .revoke_pending_verifications(&email, purpose::RESET_LINK, at)
+            .await?;
+
         let code = crypto_token::new_numeric_code(6)?;
         let code_hash = crypto_token::token_hash(&code);
-        let expires_at = now() + chrono::Duration::minutes(CODE_TTL_MINUTES);
+        let expires_at = at + chrono::Duration::minutes(CODE_TTL_MINUTES);
         self.repo
             .create_email_verification(
                 &email,
@@ -1392,9 +1401,14 @@ impl AppState {
             }));
         }
 
-        self.repo
+        if !self
+            .repo
             .consume_verification(record.id, Utc::now())
-            .await?;
+            .await?
+        {
+            // 并发的另一次请求已经先消费了：这条码不能再用来改密码
+            return Err(AppError::bad_request("验证码已经用过，请重新获取"));
+        }
         Ok(())
     }
 
@@ -1565,13 +1579,18 @@ impl AppState {
         let Some(base) = self.public_base_url().await? else {
             return Ok(String::new());
         };
+        // 旧链接先收掉，只有最新一封邮件里的链接能用
+        let at = Utc::now();
+        self.repo
+            .revoke_pending_verifications(email, purpose::RESET_LINK, at)
+            .await?;
         let token = crypto_token::new_reset_token()?;
         self.repo
             .create_email_verification(
                 email,
                 &crypto_token::token_hash(&token),
                 purpose::RESET_LINK,
-                Utc::now() + Duration::minutes(RESET_LINK_TTL_MINUTES),
+                at + Duration::minutes(RESET_LINK_TTL_MINUTES),
                 None,
             )
             .await?;
@@ -1737,9 +1756,16 @@ impl AppState {
                 "这个账号已经不存在，请重新发一封重置邮件",
             ));
         };
-        self.repo
+        if !self
+            .repo
             .consume_verification(record.id, Utc::now())
-            .await?;
+            .await?
+        {
+            // 两个标签页同时提交时，只有先到的那个能改密码
+            return Err(AppError::bad_request(
+                "这个链接已经用过或已失效，请重新发一封重置邮件",
+            ));
+        }
         self.apply_new_password(&user, password_plain, device, "link")
             .await?;
         Ok(record.email)
@@ -1763,6 +1789,24 @@ impl AppState {
         self.repo.update_user_password(user.id, &hash).await?;
         // 密码是用户自己设的：管理员之前打的「必须改密码」到此为止
         self.repo.set_must_change_password(user.id, false).await?;
+        // 一次成功重置就把这个邮箱剩下的找回凭据全部收掉：邮件里的链接和
+        // 验证码是两条独立的钥匙，不能一条用一次。回收失败不回滚密码，
+        // 记日志让人能从后台看到即可。
+        let at = Utc::now();
+        for purpose_value in [purpose::RESET, purpose::RESET_LINK] {
+            if let Err(err) = self
+                .repo
+                .revoke_pending_verifications(&user.email, purpose_value, at)
+                .await
+            {
+                tracing::warn!(
+                    email = %user.email,
+                    purpose = purpose_value,
+                    error = %err,
+                    "重置成功后回收剩余找回凭据失败"
+                );
+            }
+        }
         let revoked = self.repo.revoke_all_sessions(user.id, Utc::now()).await?;
         self.audit_detail(
             actions::PASSWORD_RESET,
@@ -2202,6 +2246,104 @@ mod tests {
             pixora_crypto::password::verify_password("LinkReset-2026x", &fresh.password_hash)
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn new_reset_link_revokes_the_previous_one() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let state = crate::tests_support::test_state(&dir).await;
+        let user = crate::tests_support::make_user(&state, "relink@example.com", "3002").await;
+        state
+            .settings
+            .set(
+                crate::settings::keys::SITE_BASE_URL,
+                "https://img.example.com",
+            )
+            .await
+            .unwrap();
+
+        let first = state.issue_reset_link(&user.email).await.unwrap();
+        let first_token = first.split("token=").last().unwrap().trim().to_string();
+        let second = state.issue_reset_link(&user.email).await.unwrap();
+        let second_token = second.split("token=").last().unwrap().trim().to_string();
+
+        assert!(
+            state.reset_link_info(&first_token).await.is_err(),
+            "重新发信后旧链接必须作废"
+        );
+        assert!(state.reset_link_info(&second_token).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resetting_by_link_revokes_the_companion_code() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let state = crate::tests_support::test_state(&dir).await;
+        let user = crate::tests_support::make_user(&state, "companion@example.com", "3003").await;
+        state
+            .settings
+            .set(
+                crate::settings::keys::SITE_BASE_URL,
+                "https://img.example.com",
+            )
+            .await
+            .unwrap();
+
+        let link = state.issue_reset_link(&user.email).await.unwrap();
+        let token = link.split("token=").last().unwrap().trim().to_string();
+        let code = "246810";
+        state
+            .repo
+            .create_email_verification(
+                &user.email,
+                &crypto_token::token_hash(code),
+                purpose::RESET,
+                Utc::now() + Duration::minutes(10),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let device = DeviceInfo::default();
+        state
+            .reset_password_by_token(&token, "LinkOnce-2026x", &device)
+            .await
+            .unwrap();
+        let err = state
+            .reset_password(&user.email, code, "CodeTwice-2026x", &device)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::BadRequest(_)),
+            "同一封邮件里的验证码应随链接一起作废：{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_link_can_only_be_consumed_once_concurrently() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let state = crate::tests_support::test_state(&dir).await;
+        let user = crate::tests_support::make_user(&state, "race@example.com", "3004").await;
+        state
+            .settings
+            .set(
+                crate::settings::keys::SITE_BASE_URL,
+                "https://img.example.com",
+            )
+            .await
+            .unwrap();
+
+        let link = state.issue_reset_link(&user.email).await.unwrap();
+        let token = link.split("token=").last().unwrap().trim().to_string();
+        let device = DeviceInfo::default();
+        let (first, second) = tokio::join!(
+            state.reset_password_by_token(&token, "RaceOne-2026x", &device),
+            state.reset_password_by_token(&token, "RaceTwo-2026x", &device),
+        );
+        let successes = [&first, &second]
+            .iter()
+            .filter(|result| result.is_ok())
+            .count();
+        assert_eq!(successes, 1, "并发提交同一个链接只能有一次成功");
     }
 
     #[test]

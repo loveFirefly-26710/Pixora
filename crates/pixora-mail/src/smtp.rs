@@ -261,18 +261,107 @@ impl Mailer {
     }
 }
 
-/// 把纯文本正文转成最简 HTML：换行保留，其余内容原样。
+/// 把纯文本正文转成最简 HTML：换行保留，http(s) 链接变成可点击的 `<a>`。
 ///
 /// 不做 Markdown 渲染是刻意的——正文里可能出现用户填写的解封要求，
-/// 任何富文本处理都是给自己引入 XSS 的机会。
+/// 任何富文本处理都是给自己引入 XSS 的机会。这里只认 http/https，
+/// 其余内容一律先转义再原样输出。
 fn plain_text_to_html(body: &str) -> String {
-    let escaped = body
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
     format!(
-        "<pre style=\"font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.7;white-space:pre-wrap\">{escaped}</pre>"
+        "<pre style=\"font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.7;white-space:pre-wrap\">{}</pre>",
+        linkify_html(body)
     )
+}
+
+/// 找出下一个 http(s) URL 的起点与协议长度。
+fn find_url_start(text: &str) -> Option<(usize, usize)> {
+    let http = text.find("http://").map(|at| (at, 7));
+    let https = text.find("https://").map(|at| (at, 8));
+    match (http, https) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+/// URL 到哪里结束：空白、HTML 敏感字符、中文标点都算边界；
+/// 句末的英文标点再往回剥一层，免得把句号带进链接。
+fn url_end(text: &str) -> usize {
+    let mut end = text.len();
+    for (at, ch) in text.char_indices() {
+        if ch.is_whitespace()
+            || matches!(
+                ch,
+                '<' | '>'
+                    | '"'
+                    | '\''
+                    | '，'
+                    | '。'
+                    | '；'
+                    | '：'
+                    | '！'
+                    | '？'
+                    | '、'
+                    | '）'
+                    | '】'
+                    | '》'
+                    | '」'
+            )
+        {
+            end = at;
+            break;
+        }
+    }
+    while let Some(ch) = text[..end].chars().next_back() {
+        if matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}') {
+            end -= ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn linkify_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let Some((start, scheme_len)) = find_url_start(rest) else {
+            out.push_str(&escape_html(rest));
+            break;
+        };
+        out.push_str(&escape_html(&rest[..start]));
+        let tail = &rest[start..];
+        let end = url_end(tail);
+        if end <= scheme_len {
+            // 只有 "http://" 没有正文：按普通文本输出，避免原地打转
+            out.push_str(&escape_html(&tail[..scheme_len]));
+            rest = &tail[scheme_len..];
+            continue;
+        }
+        let escaped = escape_html(&tail[..end]);
+        out.push_str(&format!(
+            "<a href=\"{escaped}\" style=\"color:#0e8f71;text-decoration:underline\">{escaped}</a>"
+        ));
+        rest = &tail[end..];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -328,6 +417,30 @@ mod tests {
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;"));
         assert!(html.contains("第二行"));
+    }
+
+    #[test]
+    fn html_part_makes_http_links_clickable() {
+        let html = plain_text_to_html(
+            "点开这个链接直接设置新密码：\nhttps://img.example.com/#/reset-password?token=pxr_abc&x=1 ，完成。",
+        );
+        assert!(
+            html.contains(
+                "<a href=\"https://img.example.com/#/reset-password?token=pxr_abc&amp;x=1\""
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(">https://img.example.com/#/reset-password?token=pxr_abc&amp;x=1</a>")
+        );
+        assert!(html.contains("，完成。"), "链接外的标点要留在正文里");
+    }
+
+    #[test]
+    fn html_part_only_links_http_schemes() {
+        let html = plain_text_to_html("javascript:alert(1) 和 ftp://example.com 都不是网页链接");
+        assert!(!html.contains("<a "), "{html}");
+        assert!(html.contains("javascript:alert(1)"));
     }
 
     #[test]
