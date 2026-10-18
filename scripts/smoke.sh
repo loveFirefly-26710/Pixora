@@ -133,26 +133,31 @@ CACHE_CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: ${JS_ETA
 ok "静态资源带 ETag，重复请求拿 304"
 
 step "安装向导"
-STATUS="$(curl -s "${BASE}/api/v1/install/status")"
+NO_TOKEN_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/api/v1/install/status")"
+[[ "${NO_TOKEN_CODE}" == "403" ]] || fail "安装状态未要求安装口令（${NO_TOKEN_CODE}）"
+ok "安装接口要求安装口令"
+INSTALL_TOKEN="$(cat "${DATA_DIR}/install.token")"
+INSTALL_AUTH=(-H "X-Install-Token: ${INSTALL_TOKEN}")
+STATUS="$(curl -s "${INSTALL_AUTH[@]}" "${BASE}/api/v1/install/status")"
 expect_json "${STATUS}" "d['data']['installed']" "False" "未安装状态"
 
-CHECK="$(curl -s -X POST "${BASE}/api/v1/install/database" -H 'Content-Type: application/json' \
+CHECK="$(curl -s "${INSTALL_AUTH[@]}" -X POST "${BASE}/api/v1/install/database" -H 'Content-Type: application/json' \
     -d "{\"driver\":\"sqlite\",\"database\":\"${DB}\"}")"
 expect_json "${CHECK}" "d['data']['ok']" "True" "数据库连接与建表"
 
-ADMIN="$(curl -s -X POST "${BASE}/api/v1/install/admin" -H 'Content-Type: application/json' \
+ADMIN="$(curl -s "${INSTALL_AUTH[@]}" -X POST "${BASE}/api/v1/install/admin" -H 'Content-Type: application/json' \
     -d '{"email":"admin@example.com","password":"Pixora2026Abc","site_name":"Pixora"}')"
 expect_json "${ADMIN}" "d['data']['email']" "admin@example.com" "创建管理员"
 ADMIN_UID="$(printf '%s' "${ADMIN}" | python -c "import json,sys;print(json.load(sys.stdin)['data']['uid'])")"
 
-SITE="$(curl -s -X POST "${BASE}/api/v1/install/site" -H 'Content-Type: application/json' \
+SITE="$(curl -s "${INSTALL_AUTH[@]}" -X POST "${BASE}/api/v1/install/site" -H 'Content-Type: application/json' \
     -d "{\"base_url\":\"${BASE}\",\"upload_prefix\":\"images\",\"smtp\":null}")"
 expect_json "${SITE}" "d['data']['ok']" "True" "站点设置"
 
-FIN="$(curl -s -X POST "${BASE}/api/v1/install/finish")"
+FIN="$(curl -s "${INSTALL_AUTH[@]}" -X POST "${BASE}/api/v1/install/finish")"
 expect_json "${FIN}" "d['data']['ok']" "True" "完成安装"
 
-LOCKED="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/api/v1/install/admin" \
+LOCKED="$(curl -s -o /dev/null -w '%{http_code}' "${INSTALL_AUTH[@]}" -X POST "${BASE}/api/v1/install/admin" \
     -H 'Content-Type: application/json' -d '{}')"
 [[ "${LOCKED}" == "404" ]] || fail "安装入口未锁定（${LOCKED}）"
 ok "安装入口已锁定"

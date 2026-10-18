@@ -299,3 +299,35 @@ async fn transaction_and_ping() {
     let value: String = sqlx::Row::try_get(&row, "value").unwrap();
     assert_eq!(value, "Pixora");
 }
+
+#[tokio::test]
+async fn first_admin_creation_is_atomic() {
+    let (repo, _dir) = sqlite_repo().await;
+    let mut first = sample_user("first@example.com", "9001");
+    first.role = "admin".to_string();
+    let mut second = sample_user("second@example.com", "9002");
+    second.role = "admin".to_string();
+
+    let (a, b) = tokio::join!(
+        repo.create_first_admin(&first),
+        repo.create_first_admin(&second)
+    );
+    let a = a.expect("第一个请求");
+    let b = b.expect("第二个请求");
+    assert_eq!(
+        usize::from(a.is_some()) + usize::from(b.is_some()),
+        1,
+        "并发创建安装管理员只能有一个成功"
+    );
+    let admins = repo
+        .list_users(
+            &UserFilter {
+                role: Some("admin".to_string()),
+                ..Default::default()
+            },
+            PageRequest::new(Some(1), Some(10), 10, 10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admins.total, 1, "库里只能有一个安装管理员");
+}

@@ -600,6 +600,8 @@ mod tests {
             data_dir: dir.path().join("data"),
             master_key: None,
             key_source: crate::config::KeySource::Missing,
+            install_token: "test-install-token".into(),
+            install_token_source: "test".into(),
             workers: 1,
             base_url: Some("https://img.example.com".into()),
             trust_proxy: 1,

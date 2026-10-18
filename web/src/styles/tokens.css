@@ -74,6 +74,9 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   /* 顶栏高度：脚本会按实际渲染结果覆盖这个值 */
   --nav-h: 64px;
+  /* 歌单侧栏宽度与它离屏幕边的距离；广场 hero 打开侧栏时按这套尺寸让位 */
+  --music-panel-w: 280px;
+  --music-panel-gap: 12px;
 }
 
 :root[data-theme="light"] {

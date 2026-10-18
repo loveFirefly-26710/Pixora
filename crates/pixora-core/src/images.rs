@@ -221,9 +221,9 @@ impl AppState {
         Ok(Page::new(items, total, request))
     }
 
-    /// 单张详情。非本人的公开图片会累加浏览量。
+    /// 单张详情。公开图片每打开一次就累加浏览量（谁打开的、属主还是访客都算）。
     pub async fn image_detail(&self, viewer: &Viewer, id: i64) -> Result<ImageDetailPayload> {
-        let view = self
+        let mut view = self
             .repo
             .find_image_view(id)
             .await?
@@ -235,10 +235,14 @@ impl AppState {
             return Err(AppError::not_found("图片"));
         }
 
-        if !is_owner && view.is_public() {
-            // 浏览量只对「别人看我的公开图」有意义，失败不影响返回
-            if let Err(err) = self.repo.increment_views(id).await {
-                tracing::debug!(error = %err, "浏览量累加失败");
+        // 公开图就算一次浏览：不按「属主 / 访客」过滤——自托管的广场上
+        // 站长自己点开也是真实浏览，而唯一用户往往就是站长，过滤掉的话
+        // 计数器永远停在 0。私有图不计数（只有属主与管理员看得到）。
+        // 失败不影响返回；成功了就把本地副本加一，响应里才是加过之后的数
+        if view.is_public() {
+            match self.repo.increment_views(id).await {
+                Ok(()) => view.views += 1,
+                Err(err) => tracing::debug!(error = %err, "浏览量累加失败"),
             }
         }
 
@@ -255,11 +259,14 @@ impl AppState {
             None => None,
         };
 
-        // 同相册的相邻图片，预览浮层的缩略图条要用
+        // 同相册的相邻图片，预览浮层的缩略图条要用。
+        // 只有属主与管理员能看到同相册的私有图；登录的旁观者不能因为「登录了」
+        // 就拿到别人私有图片的 id 与缩略图地址。
+        let can_see_private = viewer.id() == Some(view.owner_id) || viewer.is_admin();
         let siblings_filter = ImageFilter {
             owner_id: Some(view.owner_id),
             album_id: view.album_id,
-            public_only: viewer.is_anonymous(),
+            public_only: !can_see_private,
             ..Default::default()
         };
         let siblings = self
@@ -285,7 +292,7 @@ impl AppState {
             item,
             storage_driver: view.storage_driver.clone(),
             created_at: view.upload_time.to_rfc3339(),
-            original_filename_visible: !viewer.is_anonymous(),
+            original_filename_visible: viewer.id() == Some(view.owner_id) || viewer.is_admin(),
             album,
             siblings: sibling_views,
         })
@@ -404,6 +411,18 @@ impl AppState {
         match action {
             BatchAction::Delete => Ok(self.delete_images_inner(viewer, &owned).await?),
             BatchAction::Move => {
+                // 批量口也必须校验目标相册归属：只校验图片属主的话，
+                // 可以把别人的公开相册 id 填进来，污染对方的相册计数与归属。
+                if let Some(target) = album_id {
+                    let album = self
+                        .repo
+                        .find_album_by_id(target)
+                        .await?
+                        .ok_or_else(|| AppError::not_found("目标相册"))?;
+                    if album.owner_id != owner_id {
+                        return Err(AppError::forbidden("只能移动到图片属主自己的相册"));
+                    }
+                }
                 let moved = self
                     .repo
                     .move_images(&owned_ids, owner_id, album_id)
@@ -960,11 +979,11 @@ impl AppState {
         Ok(ImageItemPayload {
             id: view.id,
             title: view.title.clone(),
-            // 未登录用户拿不到原始文件名：它可能带真名或设备路径
-            original_name: if viewer.is_anonymous() {
-                None
-            } else {
+            // 原始文件名只给属主与管理员：登录了不等于有权看别人上传时的真名/路径
+            original_name: if viewer.id() == Some(view.owner_id) || viewer.is_admin() {
                 Some(view.original_name.clone())
+            } else {
+                None
             },
             short_hash: view.sha256.chars().take(8).collect(),
             sha256: view.sha256.clone(),

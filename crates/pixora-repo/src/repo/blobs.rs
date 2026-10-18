@@ -54,6 +54,17 @@ impl Repo {
         row.as_ref().map(Blob::from_row).transpose()
     }
 
+    /// 这个 blob 是否被某个用户的图片引用。相册封面只允许从自己的图里挑，
+    /// 不能拿任意 blob id 去探测别处是否存在这张图。
+    pub async fn owner_has_blob(&self, owner_id: i64, blob_id: i64) -> Result<bool> {
+        self.db
+            .exists(
+                "SELECT 1 FROM images WHERE owner_id = ? AND blob_id = ? AND deleted_at IS NULL",
+                Args::new().int(owner_id).int(blob_id),
+            )
+            .await
+    }
+
     /// 按原图哈希找这张图片的缩略图实体。
     ///
     /// 直链的形状是「原图哈希 + `?thumb=1`」：URL 里那个哈希标识的是这张图片，

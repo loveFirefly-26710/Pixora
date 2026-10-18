@@ -12,10 +12,11 @@
  * （提前 600px 预取，滑到底时下一页往往已经在路上了）。
  */
 
-import { requestPage } from "../core/api";
+import { request, requestPage } from "../core/api";
 import { h } from "../core/dom";
 import { relativeTime } from "../core/format";
 import {
+  autoPlayIfConfigured,
   currentTrack,
   musicState,
   subscribeMusic,
@@ -24,7 +25,7 @@ import {
 import { navigate, type PageContext } from "../core/router";
 import { currentUser, getState } from "../core/state";
 import { toastError } from "../core/toast";
-import type { ImageItem, MusicTrack } from "../core/types";
+import type { ImageDetail, ImageItem, MusicTrack } from "../core/types";
 import { createUploadPanel } from "../upload/panel";
 import { FIREFLY_MARK } from "../ui/brand";
 import { openLightbox } from "../ui/lightbox";
@@ -113,6 +114,8 @@ interface PlazaHeroHandle {
   setAutoState(enabled: boolean): void;
   setAutoCountdown(remaining: number): void;
   setMusic(playing: boolean, track: MusicTrack | null): void;
+  setFeaturedViews(item: ImageItem): void;
+  setPanelOpen(open: boolean): void;
 }
 
 interface PlazaHeroOptions {
@@ -151,6 +154,13 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
   const chipSub = h("div.hero-chip-sub", { text: "上传后出现在这里" });
   const trackTitle = h("div.hero-chip-title", { text: "今夜有光" });
   const trackSub = h("div.hero-chip-sub", { text: "PUBLIC / ORBIT · 03:24" });
+  const sourceChip = h(
+    "div.hero-chip.one",
+    null,
+    h("div.hero-chip-label", { text: "来自广场 · 随机一帧" }),
+    chipTitle,
+    chipSub,
+  );
 
   const core = h("span.hero-core", null, h("span.logo-mark", { html: FIREFLY_MARK }));
   const frameInner = h("div.hero-frame-inner", null, core);
@@ -223,13 +233,7 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
       h("div.hero-ring.r3", { "aria-hidden": "true" }),
       h("div.hero-arc", { "aria-hidden": "true" }),
       frame,
-      h(
-        "div.hero-chip.one",
-        null,
-        h("div.hero-chip-label", { text: "来自广场 · 随机一帧" }),
-        chipTitle,
-        chipSub,
-      ),
+      sourceChip,
       h(
         "div.hero-chip.two",
         null,
@@ -244,9 +248,15 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
     count.textContent = total > 0 ? `${total} 幅公开影像` : "广场还没有公开影像";
   }
 
+  /** 小卡片那两行文案：标题 + 「标签 · N 次浏览」。 */
+  function paintChip(item: ImageItem): void {
+    chipTitle.textContent = item.title?.trim() || item.tags[0] || "来自广场";
+    chipSub.textContent = `${item.tags.slice(0, 2).join(" / ") || "公开影像"} · ${item.views} 次浏览`;
+  }
+
   function setFeatured(item: ImageItem | null): void {
-    featured = item;
     if (!item) {
+      featured = null;
       frameInner.replaceChildren(core);
       frame.setAttribute(
         "aria-label",
@@ -256,6 +266,20 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
       chipSub.textContent = "上传后出现在这里";
       return;
     }
+
+    // 同一张图又来了（刷新后随机顺序没变）：只更新文案，不重建 <img>。
+    // 旋转动画挂在 img 上，换一个元素就会从 0° 重新转
+    if (featured && featured.id === item.id) {
+      featured = item;
+      paintChip(item);
+      return;
+    }
+
+    // 音乐播放中不换画面：唱片正转着，突然换一张像跳针。
+    // 等暂停、或用户自己点了别的图，画面再更新
+    if (playing && featured) return;
+
+    featured = item;
     const img = thumbImage({
       url: item.url,
       thumb_url: item.thumb_url,
@@ -273,8 +297,18 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
         ? `${playing ? "暂停" : "播放"}背景音乐（当前画面：${item.title ?? "广场图片"}）`
         : `打开 ${item.title ?? "这张图片"}`,
     );
-    chipTitle.textContent = item.title?.trim() || item.tags[0] || "来自广场";
-    chipSub.textContent = `${item.tags.slice(0, 2).join(" / ") || "公开影像"} · ${item.views} 次浏览`;
+    paintChip(item);
+  }
+
+  function setFeaturedViews(item: ImageItem): void {
+    if (!featured || featured.id !== item.id) return;
+    paintChip(item);
+  }
+
+  function setPanelOpen(open: boolean): void {
+    sourceChip.classList.toggle("is-hidden", open);
+    // 视觉上淡出之后，读屏也不该再念这张被侧栏让位的小卡片
+    sourceChip.setAttribute("aria-hidden", String(open));
   }
 
   function setMusic(nextPlaying: boolean, nextTrack: MusicTrack | null): void {
@@ -312,7 +346,16 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
 
   setAutoState(options.autoEnabled);
   if (options.autoEnabled) setAutoCountdown(options.autoSeconds);
-  return { root: hero, setFeatured, setTotal, setAutoState, setAutoCountdown, setMusic };
+  return {
+    root: hero,
+    setFeatured,
+    setTotal,
+    setAutoState,
+    setAutoCountdown,
+    setMusic,
+    setFeaturedViews,
+    setPanelOpen,
+  };
 }
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -321,7 +364,7 @@ export async function render(ctx: PageContext): Promise<void> {
   const site = getState().site;
 
   // 内容限宽居中：广场图片不铺满整屏，两侧留白（与其他页面同一套 .pad）
-  const root = h("div.pad");
+  const root = h("div.pad.plaza-pad");
   ctx.outlet.append(root);
   ctx = { ...ctx, outlet: root };
 
@@ -350,7 +393,40 @@ export async function render(ctx: PageContext): Promise<void> {
   let autoRemaining = autoSeconds;
   let autoTimer: number | null = null;
   let heroState: PlazaHeroHandle | null = null;
+  const viewedIds = new Set<number>();
   const musicEnabled = Boolean(site?.music?.enabled);
+
+  function paintTileViews(item: ImageItem): void {
+    const tile = grid.querySelector<HTMLElement>(`.tile[data-image-id="${item.id}"]`);
+    const sub = tile?.querySelector<HTMLElement>(".meta .s");
+    if (!sub) return;
+    let view = sub.querySelector<HTMLElement>(".v");
+    if (!view) {
+      view = h("span.v");
+      sub.append(view);
+    }
+    view.textContent = `浏览 ${item.views}`;
+  }
+
+  async function recordView(item: ImageItem): Promise<void> {
+    // 同一次页面会话里同一张图只算一次；属主自己点开也算——
+    // 服务端按公开图计数，不再按「别人看」过滤（唯一用户往往就是站长）
+    if (viewedIds.has(item.id)) return;
+    viewedIds.add(item.id);
+    try {
+      const detail = await request<ImageDetail>(`/images/${item.id}`);
+      item.views = detail.views;
+      paintTileViews(item);
+      heroState?.setFeaturedViews(item);
+    } catch {
+      viewedIds.delete(item.id);
+    }
+  }
+
+  function openPlazaItem(item: ImageItem): void {
+    void recordView(item);
+    openLightbox(items, item);
+  }
   if (isPlazaHome) {
     heroState = buildPlazaHero({
       autoSeconds,
@@ -359,20 +435,29 @@ export async function render(ctx: PageContext): Promise<void> {
       onUpload: () => jumpToUpload(),
       onToggleAuto: () => toggleAuto(),
       onToggleMusic: () => void toggleMusic(),
-      onOpen: (item) => openLightbox(items, item),
+      onOpen: openPlazaItem,
     });
     root.append(heroState.root);
 
     // 唱片只关心「是否在播放」和「哪一首」，不必跟着 timeupdate 每 250ms 重画
     let lastPlaying: boolean | null = null;
     let lastTrackId: string | null = null;
+    let lastPanelOpen: boolean | null = null;
     const syncHeroMusic = (): void => {
       const music = musicState();
       const track = currentTrack();
-      if (music.playing === lastPlaying && (track?.id ?? null) === lastTrackId) return;
+      if (
+        music.playing === lastPlaying &&
+        (track?.id ?? null) === lastTrackId &&
+        music.panelOpen === lastPanelOpen
+      ) {
+        return;
+      }
       lastPlaying = music.playing;
       lastTrackId = track?.id ?? null;
+      lastPanelOpen = music.panelOpen;
       heroState?.setMusic(music.playing, track);
+      heroState?.setPanelOpen(music.panelOpen);
     };
     const unsubscribeMusic = subscribeMusic(() => {
       if (!root.isConnected) {
@@ -382,6 +467,7 @@ export async function render(ctx: PageContext): Promise<void> {
       syncHeroMusic();
     });
     syncHeroMusic();
+    void autoPlayIfConfigured();
   } else {
     root.append(
       viewHead(
@@ -545,8 +631,10 @@ export async function render(ctx: PageContext): Promise<void> {
               // 只给用户自己写的标题与时间，不暴露上传者 UID / 原始文件名
               title: item.title,
               subtitle: relativeTime(item.upload_time),
+              // 广场每张图底部都带浏览量，0 也显示
+              alwaysShowViews: true,
               // 预览浮层拿累加后的整份列表：翻到哪就能在浮层里前后翻到哪
-              onOpen: (clicked) => openLightbox(items, clicked),
+              onOpen: openPlazaItem,
             }),
           );
         }
@@ -660,7 +748,8 @@ export async function render(ctx: PageContext): Promise<void> {
             imageTile(item, {
               title: item.title,
               subtitle: relativeTime(item.upload_time),
-              onOpen: (clicked) => openLightbox(items, clicked),
+              alwaysShowViews: true,
+              onOpen: openPlazaItem,
             }),
           );
         }

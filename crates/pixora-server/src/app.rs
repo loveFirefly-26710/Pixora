@@ -96,6 +96,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/random", get(r::public::random_image))
         .route("/music/playlist", get(r::music::playlist))
         .route("/music/lyrics", get(r::music::lyrics))
+        .route("/music/stream", get(r::music::stream))
         .route("/music/file", get(r::music::file))
         .route("/terms", get(r::public::terms))
         .route("/terms/consent", post(r::public::terms_consent))

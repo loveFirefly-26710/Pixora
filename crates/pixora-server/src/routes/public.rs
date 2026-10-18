@@ -17,7 +17,7 @@ use axum::Json;
 use pixora_core::AppError;
 use pixora_core::AppState;
 use pixora_repo::model::TermsVersion;
-use pixora_repo::repo::images::ImageFilter;
+use pixora_repo::repo::images::RandomFilter;
 
 use crate::http::{
     error_response, finish, finish_page, parse_i64, parse_str, request_context, rfc3339,
@@ -107,6 +107,7 @@ pub async fn site(
         "music": {
             "enabled": music.enabled,
             "source": music.source,
+            "autoplay": music.autoplay,
         },
         "recycle_retention_days": state
             .settings
@@ -513,71 +514,344 @@ pub async fn random_image(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await
+    {
+        Ok(auth) => auth,
+        Err(err) => return error_response(err),
+    };
+    let viewer = auth.as_ref().map(|auth| &auth.user);
     // 广场关闭公开浏览时，随机图也一并关掉，免得成为绕过开关的后门
     let site = match state.settings.site(state.config.base_url.as_deref()).await {
         Ok(site) => site,
         Err(err) => return error_response(err),
     };
-    if !site.plaza_public {
-        match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await {
-            // 未登录时这里是 Ok(None)，不是 Err；只看 Err 会让关闭广场后
-            // `/random` 继续对外发图，等于给开关留了个后门。
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return error_response(AppError::Forbidden(
-                    "站点已关闭广场公开浏览，登录后可以使用随机图".into(),
-                ))
+    if !site.plaza_public && viewer.is_none() {
+        return error_response(AppError::Forbidden(
+            "站点已关闭广场公开浏览，登录后可以使用随机图".into(),
+        ));
+    }
+
+    let param = |key: &str| {
+        params
+            .get(key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+    };
+    let scope = param("scope").unwrap_or("public").to_ascii_lowercase();
+    if !matches!(scope.as_str(), "public" | "plaza" | "mine" | "user") {
+        return error_response(AppError::bad_request(
+            "scope 只接受 public / plaza / mine / user",
+        ));
+    }
+
+    let mut filter = RandomFilter::default();
+    let mut public_only = true;
+
+    // 先用 uid 定下「看谁的图」；scope=mine / user 会进一步覆盖它。
+    if let Some(uid) = param("uid") {
+        let target = match state.repo.find_user_by_uid(uid).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return error_response(AppError::not_found("用户")),
+            Err(err) => return error_response(err.into()),
+        };
+        filter.owner_id = Some(target.id);
+    }
+
+    match scope.as_str() {
+        "plaza" => {
+            if !site.plaza_album_ids.is_empty() {
+                let allowed = match state.repo.list_public_albums().await {
+                    Ok(albums) => albums.into_iter().map(|album| album.id).collect::<std::collections::HashSet<_>>(),
+                    Err(err) => return error_response(err.into()),
+                };
+                filter.album_ids = site
+                    .plaza_album_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| allowed.contains(id))
+                    .collect();
+                if filter.album_ids.is_empty() {
+                    return error_response(AppError::not_found("图片"));
+                }
             }
-            Err(err) => return error_response(err),
+        }
+        "mine" => {
+            let Some(user) = viewer else {
+                return error_response(AppError::Unauthorized);
+            };
+            filter.owner_id = Some(user.id);
+            public_only = false;
+        }
+        "user" => {
+            let Some(user) = viewer else {
+                return error_response(AppError::Unauthorized);
+            };
+            let Some(uid) = param("uid") else {
+                return error_response(AppError::bad_request("scope=user 需要 uid"));
+            };
+            let target = match state.repo.find_user_by_uid(uid).await {
+                Ok(Some(target)) => target,
+                Ok(None) => return error_response(AppError::not_found("用户")),
+                Err(err) => return error_response(err.into()),
+            };
+            if target.id != user.id && !user.is_admin() {
+                return error_response(AppError::forbidden("只能查看自己的随机图"));
+            }
+            filter.owner_id = Some(target.id);
+            public_only = false;
+        }
+        _ => {}
+    }
+
+    if let Some(value) = param("visibility") {
+        match value.to_ascii_lowercase().as_str() {
+            "public" => filter.visibility = Some("public".into()),
+            "private" => {
+                let Some(owner) = filter.owner_id else {
+                    return error_response(AppError::forbidden(
+                        "私有图需要带 Token，并用 scope=mine 或指定相册",
+                    ));
+                };
+                if !viewer.map(|user| user.id == owner || user.is_admin()).unwrap_or(false) {
+                    return error_response(AppError::forbidden("不能读取别人的私有图"));
+                }
+                filter.visibility = Some("private".into());
+                public_only = false;
+            }
+            "any" => {
+                let authorized = filter.owner_id.map(|owner| {
+                    viewer.map(|user| user.id == owner || user.is_admin()).unwrap_or(false)
+                }).unwrap_or(false);
+                if !authorized {
+                    return error_response(AppError::forbidden(
+                        "读取私有图需要 Token，并用 scope=mine 或指定自己的相册",
+                    ));
+                }
+                public_only = false;
+            }
+            _ => return error_response(AppError::bad_request("visibility 只接受 public / private / any")),
         }
     }
 
-    let filter = ImageFilter {
-        public_only: true,
-        tag: params
-            .get("tag")
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty()),
-        query: params
-            .get("q")
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty()),
-        owner_id: match params.get("uid") {
-            Some(uid) => match state.repo.find_user_by_uid(uid.trim()).await {
-                Ok(Some(user)) => Some(user.id),
-                Ok(None) => return error_response(AppError::not_found("用户")),
+    // 指定相册：album_id 直接查；album 是当前 owner 名下的 slug。
+    let album_id = parse_i64(&params, "album_id").filter(|id| *id > 0);
+    let album_slug = param("album");
+    if album_id.is_some() || album_slug.is_some() {
+        let album = if let Some(id) = album_id {
+            match state.repo.find_album_by_id(id).await {
+                Ok(Some(album)) => album,
+                Ok(None) => return error_response(AppError::not_found("相册")),
                 Err(err) => return error_response(err.into()),
-            },
-            None => None,
-        },
-        ..Default::default()
-    };
+            }
+        } else {
+            let Some(owner_id) = filter
+                .owner_id
+                .or_else(|| viewer.map(|user| user.id))
+            else {
+                return error_response(AppError::bad_request(
+                    "用 album slug 指定相册时，需要同时给 uid，或先登录",
+                ));
+            };
+            match state
+                .repo
+                .find_album_by_slug(owner_id, album_slug.unwrap_or_default())
+                .await
+            {
+                Ok(Some(album)) => album,
+                Ok(None) => return error_response(AppError::not_found("相册")),
+                Err(err) => return error_response(err.into()),
+            }
+        };
+        if let Some(owner_id) = filter.owner_id {
+            if owner_id != album.owner_id {
+                return error_response(AppError::forbidden("相册不属于指定的用户"));
+            }
+        }
+        let can_private = viewer
+            .map(|user| user.id == album.owner_id || user.is_admin())
+            .unwrap_or(false);
+        if album.visibility != "public" && !can_private {
+            return error_response(AppError::not_found("相册"));
+        }
+        public_only = !can_private;
+        filter.album_ids = vec![album.id];
+        filter.owner_id = Some(album.owner_id);
+    }
 
-    let picked = match state.repo.random_image(&filter).await {
-        Ok(Some(view)) => view,
-        Ok(None) => return error_response(AppError::not_found("图片")),
+    // 管理员命名的集合：先当公开展示集合处理；与相册过滤同时给时取交集。
+    if let Some(name) = param("collection") {
+        let collections = match state.settings.plaza_collections().await {
+            Ok(value) => value,
+            Err(err) => return error_response(err),
+        };
+        let Some(ids) = collections.get(name) else {
+            return error_response(AppError::not_found("集合"));
+        };
+        let allowed = match state.repo.list_public_albums().await {
+            Ok(albums) => albums.into_iter().map(|album| album.id).collect::<std::collections::HashSet<_>>(),
+            Err(err) => return error_response(err.into()),
+        };
+        let ids: Vec<i64> = ids.iter().copied().filter(|id| allowed.contains(id)).collect();
+        if ids.is_empty() {
+            return error_response(AppError::not_found("图片"));
+        }
+        if filter.album_ids.is_empty() {
+            filter.album_ids = ids.clone();
+        } else {
+            filter.album_ids.retain(|id| ids.contains(id));
+        }
+        if filter.album_ids.is_empty() {
+            return error_response(AppError::not_found("图片"));
+        }
+        public_only = true;
+        filter.visibility = None;
+    }
+
+    filter.query = param("q").map(str::to_string);
+
+    // 标签：tag 是旧的单标签参数，tags 支持逗号分隔与 all / any。
+    let mut tags: Vec<String> = Vec::new();
+    if let Some(tag) = param("tag") {
+        tags.push(tag.to_string());
+    }
+    if let Some(list) = param("tags") {
+        for tag in list.split([',', '，']) {
+            let tag = tag.trim();
+            if !tag.is_empty() {
+                tags.push(tag.to_string());
+            }
+        }
+    }
+    tags.sort();
+    tags.dedup();
+    let tag_mode = param("tag_mode").unwrap_or("all").to_ascii_lowercase();
+    if tag_mode == "any" {
+        filter.tags_any = tags;
+    } else if tag_mode == "all" {
+        filter.tags_all = tags;
+    } else {
+        return error_response(AppError::bad_request("tag_mode 只接受 all / any"));
+    }
+    filter.exclude_tag = param("exclude_tag").map(str::to_string);
+
+    if let Some(raw) = param("exclude_ids") {
+        filter.exclude_ids = raw
+            .split(',')
+            .filter_map(|id| id.trim().parse::<i64>().ok())
+            .filter(|id| *id > 0)
+            .take(100)
+            .collect();
+    }
+
+    filter.min_width = parse_i64(&params, "min_width").filter(|value| *value > 0);
+    filter.min_height = parse_i64(&params, "min_height").filter(|value| *value > 0);
+    if let Some(orientation) = param("orientation") {
+        let orientation = orientation.to_ascii_lowercase();
+        if !matches!(orientation.as_str(), "landscape" | "portrait" | "square") {
+            return error_response(AppError::bad_request(
+                "orientation 只接受 landscape / portrait / square",
+            ));
+        }
+        filter.orientation = Some(orientation);
+    }
+    if let Some(raw) = param("ratio") {
+        let ratio = if let Some((w, h)) = raw.split_once(':') {
+            w.trim().parse::<f64>().ok().zip(h.trim().parse::<f64>().ok())
+        } else {
+            raw.parse::<f64>().ok().map(|value| (value, 1.0))
+        };
+        let Some((w, h)) = ratio.filter(|(w, h)| *w > 0.0 && *h > 0.0) else {
+            return error_response(AppError::bad_request("ratio 的格式应是 16:9 或 1.78"));
+        };
+        filter.aspect_ratio = Some(w / h);
+    }
+    if let Some(raw) = param("since") {
+        filter.uploaded_after = match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(value) => Some(value.with_timezone(&chrono::Utc)),
+            Err(_) => return error_response(AppError::bad_request("since 要是 RFC3339 时间")),
+        };
+    }
+    if let Some(raw) = param("until") {
+        filter.uploaded_before = match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(value) => Some(value.with_timezone(&chrono::Utc)),
+            Err(_) => return error_response(AppError::bad_request("until 要是 RFC3339 时间")),
+        };
+    }
+    if let Some(raw) = param("window") {
+        let hours = raw
+            .trim()
+            .trim_end_matches(['h', 'H'])
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .map(|value| value.min(24 * 365));
+        let Some(hours) = hours else {
+            return error_response(AppError::bad_request("window 要是小时数，例如 24h"));
+        };
+        let after = chrono::Utc::now() - chrono::Duration::hours(hours);
+        filter.uploaded_after = Some(match filter.uploaded_after {
+            Some(existing) if existing > after => existing,
+            _ => after,
+        });
+    }
+    filter.weight_recent = match param("weight") {
+        None => false,
+        Some("recent") => true,
+        Some(_) => {
+            return error_response(AppError::bad_request("weight 目前只支持 recent"))
+        }
+    };
+    filter.seed = parse_i64(&params, "seed")
+        .unwrap_or(0)
+        .max(0) as u64;
+    filter.public_only = public_only;
+
+    let count = match parse_i64(&params, "count") {
+        None => 1,
+        Some(value) if value >= 1 => value.min(50),
+        Some(_) => return error_response(AppError::bad_request("count 至少是 1，最多 50")),
+    };
+    let picked = match state.repo.random_images(&filter, count).await {
+        Ok(items) => items,
         Err(err) => return error_response(err.into()),
     };
-    let url = state.direct_url(&picked.sha256, &picked.ext, false).await;
-    let thumb = state.direct_url(&picked.sha256, &picked.ext, true).await;
+    if picked.is_empty() {
+        return error_response(AppError::not_found("图片"));
+    }
 
-    if params.get("format").map(|v| v == "json").unwrap_or(false) {
-        return finish(Ok(serde_json::json!({
+    let mut payloads: Vec<serde_json::Value> = Vec::with_capacity(picked.len());
+    for view in &picked {
+        let url = state.direct_url(&view.sha256, &view.ext, false).await;
+        let thumb = state.direct_url(&view.sha256, &view.ext, true).await;
+        payloads.push(serde_json::json!({
             "url": url,
             "thumb_url": thumb,
-            "id": picked.id,
-            "width": picked.width,
-            "height": picked.height,
-            "size": picked.size,
-            "ext": picked.ext,
-            "tags": picked.tags,
-            "owner_uid": picked.owner_uid,
-        })));
+            "id": view.id,
+            "width": view.width,
+            "height": view.height,
+            "size": view.size,
+            "ext": view.ext,
+            "tags": view.tags,
+            "owner_uid": view.owner_uid,
+        }));
+    }
+
+    if payloads.len() > 1 || param("format").map(|value| value == "json").unwrap_or(false) {
+        let body = if payloads.len() == 1 {
+            payloads.pop().unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Array(payloads)
+        };
+        return finish(Ok(body));
     }
 
     // 302 而不是 301：随机结果不该被永久缓存下来。
-    // 不用 `Redirect::temporary`——它是 307，虽然这里只有 GET、语义上都对，
-    // 但契约文档与客户端都按「302 跳转」理解，让实现和文档一致更省事。
+    let first = payloads.pop().unwrap_or(serde_json::Value::Null);
+    let url = first
+        .get("url")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
     let mut response = (StatusCode::FOUND, [(header::LOCATION, url)]).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,

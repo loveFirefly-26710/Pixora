@@ -82,6 +82,21 @@ impl TelegramDriver {
         )
     }
 
+    /// 远端错误对外只留一句可读描述：reqwest 的 Display 可能带完整请求 URL，
+    /// 而 Telegram 的 URL 路径里有 Bot Token。去掉 URL 后再兜一层字符串替换。
+    fn safe_error(&self, err: reqwest::Error) -> StorageError {
+        let text = err.without_url().to_string();
+        StorageError::remote(DRIVER, 0, self.scrub(&text))
+    }
+
+    fn scrub(&self, text: &str) -> String {
+        let token = self.config.bot_token.trim();
+        if token.is_empty() {
+            return text.to_string();
+        }
+        text.replace(token, "<bot-token>")
+    }
+
     /// 从存储键里解析出 (chat_id, message_id, file_id)。
     fn parse_key(key: &str) -> Result<(String, String, String)> {
         let mut parts = key.splitn(4, '/');
@@ -171,13 +186,13 @@ impl StorageDriver for TelegramDriver {
             .multipart(form)
             .send()
             .await
-            .map_err(|err| StorageError::remote(DRIVER, 0, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
 
         let status = response.status();
         let body: ApiResponse<SentDocument> = response
             .json()
             .await
-            .map_err(|err| StorageError::malformed(DRIVER, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
 
         if !status.is_success() || !body.ok {
             let message = body.description.unwrap_or_else(|| "未知错误".into());
@@ -211,12 +226,12 @@ impl StorageDriver for TelegramDriver {
             .query(&[("file_id", file_id)])
             .send()
             .await
-            .map_err(|err| StorageError::remote(DRIVER, 0, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         let status = response.status();
         let body: ApiResponse<TelegramFile> = response
             .json()
             .await
-            .map_err(|err| StorageError::malformed(DRIVER, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         if !body.ok {
             return Err(StorageError::remote(
                 DRIVER,
@@ -239,7 +254,7 @@ impl StorageDriver for TelegramDriver {
             .get(download_url)
             .send()
             .await
-            .map_err(|err| StorageError::remote(DRIVER, 0, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         if file_response.status() == reqwest::StatusCode::NOT_FOUND {
             return Err(StorageError::NotFound(key.to_string()));
         }
@@ -253,7 +268,7 @@ impl StorageDriver for TelegramDriver {
         let bytes = file_response
             .bytes()
             .await
-            .map_err(|err| StorageError::remote(DRIVER, 0, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         Ok(Box::new(std::io::Cursor::new(bytes.to_vec())))
     }
 
@@ -265,11 +280,11 @@ impl StorageDriver for TelegramDriver {
             .form(&[("chat_id", chat.as_str()), ("message_id", message.as_str())])
             .send()
             .await
-            .map_err(|err| StorageError::remote(DRIVER, 0, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         let body: ApiResponse<bool> = response
             .json()
             .await
-            .map_err(|err| StorageError::malformed(DRIVER, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         // 消息早已被手工删除的情况不算失败
         if body.ok {
             return Ok(());
@@ -289,11 +304,11 @@ impl StorageDriver for TelegramDriver {
             .query(&[("file_id", file_id)])
             .send()
             .await
-            .map_err(|err| StorageError::remote(DRIVER, 0, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         let body: ApiResponse<TelegramFile> = response
             .json()
             .await
-            .map_err(|err| StorageError::malformed(DRIVER, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         if !body.ok {
             return Err(StorageError::NotFound(key.to_string()));
         }
@@ -315,7 +330,7 @@ impl StorageDriver for TelegramDriver {
             .get(self.api_url("getMe"))
             .send()
             .await
-            .map_err(|err| StorageError::remote(DRIVER, 0, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         #[derive(Deserialize)]
         struct Me {
             username: Option<String>,
@@ -323,7 +338,7 @@ impl StorageDriver for TelegramDriver {
         let body: ApiResponse<Me> = response
             .json()
             .await
-            .map_err(|err| StorageError::malformed(DRIVER, err.to_string()))?;
+            .map_err(|err| self.safe_error(err))?;
         if !body.ok {
             return Err(StorageError::config(
                 DRIVER,
@@ -375,5 +390,21 @@ mod tests {
             driver.api_url("sendDocument"),
             "https://api.telegram.org/bot123:ABC/sendDocument"
         );
+    }
+
+    #[test]
+    fn errors_do_not_echo_bot_token() {
+        let driver = TelegramDriver::new(TelegramConfig {
+            bot_token: "123:ABC-secret".into(),
+            chat_id: "-100".into(),
+            api_base: "https://api.telegram.org".into(),
+            proxy: None,
+        })
+        .unwrap();
+        let text = driver.scrub(
+            "error sending request for url (https://api.telegram.org/bot123:ABC-secret/sendDocument)",
+        );
+        assert!(!text.contains("ABC-secret"), "{text}");
+        assert!(text.contains("<bot-token>"), "{text}");
     }
 }

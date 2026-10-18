@@ -368,8 +368,13 @@ impl AppState {
                 quota_bytes,
                 email_verified: true,
             };
-            match self.repo.create_user(&new).await {
-                Ok(user) => return Ok(user),
+            match self.repo.create_first_admin(&new).await {
+                Ok(Some(user)) => return Ok(user),
+                Ok(None) => {
+                    return Err(AppError::Conflict(
+                        "安装管理员已经创建，或另一个安装请求正在进行".into(),
+                    ))
+                }
                 // 唯一键冲突（UID 或邮箱）：换一个 UID 再来
                 Err(err) if err.is_unique_violation() => continue,
                 Err(err) => return Err(err.into()),
@@ -640,6 +645,8 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             master_key: Some(pixora_crypto::MasterKey::generate().expect("主密钥")),
             key_source: KeySource::Generated(dir.path().join("master.key")),
+            install_token: "test-install-token".into(),
+            install_token_source: "test".into(),
             workers: 1,
             base_url: None,
             trust_proxy: 0,

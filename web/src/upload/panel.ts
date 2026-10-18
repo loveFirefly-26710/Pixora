@@ -887,15 +887,31 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
         updateProgress();
         break;
       }
-      case "state":
+      case "state": {
         updateProgress();
-        if (albumSelect.value !== String(queue.getSettings().albumId ?? "")) {
-          albumSelect.value = String(queue.getSettings().albumId ?? "");
+        // 相册清单与上传设置是两条异步线：迟到的旧设置（尤其是 null）
+        // 不能把已经选好的相册冲掉，否则下拉会只剩一个空框。
+        const wanted = queue.getSettings().albumId;
+        const available = [...albumSelect.options]
+          .map((option) => option.value)
+          .filter((value) => value !== "");
+        if (wanted != null && available.includes(String(wanted))) {
+          if (albumSelect.value !== String(wanted)) albumSelect.value = String(wanted);
+        } else if (albumSelect.value !== "" && available.includes(albumSelect.value)) {
+          const fallback = Number(albumSelect.value);
+          if (Number.isFinite(fallback)) queue.setSettings({ albumId: fallback });
+        } else if (available.length > 0) {
+          const first = Number(available[0]);
+          if (Number.isFinite(first)) {
+            albumSelect.value = String(first);
+            queue.setSettings({ albumId: first });
+          }
         }
         tagsInput.value = queue.getSettings().tags;
         visibilitySelect.value = queue.getSettings().visibility;
         concurrencySelect.value = String(queue.getSettings().concurrency);
         break;
+      }
       case "notice":
         pushNotice(event.tone, event.text);
         break;

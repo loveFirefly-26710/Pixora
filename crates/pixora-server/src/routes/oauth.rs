@@ -62,6 +62,27 @@ fn with_state_cleared(state: &AppState, response: Response) -> Response {
     with_cookies(response, clear_state_cookie(state))
 }
 
+/// 补邮箱票据的浏览器绑定：票据是签名的，但签名只证明「是我们发的」，
+/// 不证明「当前浏览器就是发起 OAuth 的那一个」。把票据哈希放进 HttpOnly
+/// Cookie，complete 时必须对得上，防止把票据转给受害者、让对方替攻击者建号。
+const OAUTH_TICKET_COOKIE: &str = "pixora_oauth_ticket";
+const OAUTH_TICKET_TTL_SECONDS: i64 = 600;
+
+fn ticket_cookie(state: &AppState, ticket: &str) -> HeaderMap {
+    let hash = pixora_crypto::token::token_hash(ticket);
+    let secure = if state.config.cookie_secure() { "; Secure" } else { "" };
+    crate::http::cookie_headers(format!(
+        "{OAUTH_TICKET_COOKIE}={hash}; Path=/api/v1/auth/oauth; HttpOnly; SameSite=Lax; Max-Age={OAUTH_TICKET_TTL_SECONDS}{secure}"
+    ))
+}
+
+fn clear_ticket_cookie(state: &AppState) -> HeaderMap {
+    let secure = if state.config.cookie_secure() { "; Secure" } else { "" };
+    crate::http::cookie_headers(format!(
+        "{OAUTH_TICKET_COOKIE}=; Path=/api/v1/auth/oauth; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
+    ))
+}
+
 /// 回调地址：站点自己的地址 + 固定路径。必须与在对方平台登记的完全一致。
 ///
 /// 用设置里的站点地址（安装向导/后台写的），而不是只看环境变量：向导里填的
@@ -279,7 +300,8 @@ pub async fn oauth_callback(
             } else {
                 redirect(&target)
             };
-            with_state_cleared(&state, response)
+            let cookies = merge_cookies(clear_state_cookie(&state), ticket_cookie(&state, &ticket));
+            with_cookies(response, cookies)
         }
         Err(err) => with_state_cleared(&state, fail_redirect(err.message().as_str())),
     }
@@ -301,6 +323,16 @@ pub async fn complete_signup(
         Ok(value) => value,
         Err(resp) => return resp,
     };
+    let expected_binding = pixora_crypto::token::token_hash(&ticket);
+    let actual_binding = cookie_value(&headers, OAUTH_TICKET_COOKIE).unwrap_or_default();
+    if !pixora_crypto::token::constant_time_eq(&actual_binding, &expected_binding) {
+        return with_cookies(
+            error_response(AppError::bad_request(
+                "补全令牌不属于当前浏览器，请重新发起第三方登录",
+            )),
+            clear_ticket_cookie(&state),
+        );
+    }
     let email = match field_str(&body, "email") {
         Ok(value) => value,
         Err(resp) => return resp,
@@ -316,8 +348,10 @@ pub async fn complete_signup(
         .await
     {
         Ok(issued) => {
-            let cookies =
-                session_cookies(&state, &issued.session_token, &issued.csrf_token, false).await;
+            let cookies = merge_cookies(
+                session_cookies(&state, &issued.session_token, &issued.csrf_token, false).await,
+                clear_ticket_cookie(&state),
+            );
             let payload = match super::me_payload(
                 &state,
                 &issued.user,
@@ -331,7 +365,7 @@ pub async fn complete_signup(
             };
             with_cookies(finish::<serde_json::Value>(Ok(payload)), cookies)
         }
-        Err(err) => error_response(err),
+        Err(err) => with_cookies(error_response(err), clear_ticket_cookie(&state)),
     }
 }
 

@@ -44,6 +44,38 @@ async fn ensure_not_installed(state: &AppState) -> Result<(), Response> {
     }
 }
 
+/// 未安装时安装向导的每一枪都要口令：公网实例在运维走完向导之前，
+/// 不能让路过的人抢先建管理员。口令来自环境变量或数据目录里的 install.token。
+async fn ensure_install_token(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: Option<&serde_json::Value>,
+) -> Result<(), Response> {
+    let header = headers
+        .get("x-install-token")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let from_body = body
+        .and_then(|value| value.get("token"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let Some(token) = header.or(from_body) else {
+        return Err(crate::http::error_response(AppError::forbidden(
+            "安装口令缺失：请从服务端启动日志或数据目录的 install.token 获取",
+        )));
+    };
+    if !pixora_crypto::token::constant_time_eq(&token, &state.config.install_token) {
+        return Err(crate::http::error_response(AppError::forbidden(
+            "安装口令不正确，请核对服务端启动日志或数据目录的 install.token",
+        )));
+    }
+    Ok(())
+}
+
 /// 数一下库里有多少张表。
 ///
 /// 只用于向导界面上的「已检测到 N 张表」提示，查不出来就当 0——
@@ -80,6 +112,9 @@ pub async fn install_status(
 ) -> Response {
     let _rectx = request_context(&state, &headers, peer.addr()).await;
     if let Err(resp) = ensure_not_installed(&state).await {
+        return resp;
+    }
+    if let Err(resp) = ensure_install_token(&state, &headers, None).await {
         return resp;
     }
 
@@ -138,6 +173,9 @@ pub async fn install_database(
     if let Err(resp) = ensure_not_installed(&state).await {
         return resp;
     }
+    if let Err(resp) = ensure_install_token(&state, &headers, Some(&body)).await {
+        return resp;
+    }
 
     // 交给领域层：它探的是**当前进程已经连着的那个池**，不会因为另开一个池
     // 与后台任务抢 SQLite 写锁（早期版本就在这里踩过，表现是启动头几秒
@@ -191,6 +229,9 @@ pub async fn install_admin(
     if let Err(resp) = ensure_not_installed(&state).await {
         return resp;
     }
+    if let Err(resp) = ensure_install_token(&state, &headers, Some(&body)).await {
+        return resp;
+    }
 
     let email = match field_str(&body, "email") {
         Ok(value) => value,
@@ -238,12 +279,13 @@ pub async fn install_admin(
     };
 
     // 第一个管理员优先用 `1000` 这个「整百」UID：它是别人的参照（备份脚本、
-    // 目录结构都爱拿它举例），被占了才退回随机生成
+    // 目录结构都爱拿它举例），被占了才退回随机生成。
+    // 仓储层把「抢安装位 + 插用户」放在同一个事务里：并发请求只有一个能成功。
     let mut created = None;
     for candidate in uid_candidates() {
         match state
             .repo
-            .create_user(&NewUser {
+            .create_first_admin(&NewUser {
                 uid: candidate.clone(),
                 email: email.clone(),
                 password_hash: hash.clone(),
@@ -254,9 +296,12 @@ pub async fn install_admin(
             })
             .await
         {
-            Ok(user) => {
+            Ok(Some(user)) => {
                 created = Some(user);
                 break;
+            }
+            Ok(None) => {
+                return bad_request("安装管理员已经创建，或另一个安装请求正在进行");
             }
             Err(err) if err.is_unique_violation() => continue,
             Err(err) => return crate::http::error_response(err.into()),
@@ -265,6 +310,16 @@ pub async fn install_admin(
     let Some(admin) = created else {
         return crate::http::error_response(AppError::internal("UID 分配失败，请重试"));
     };
+
+    // 记下安装管理员：别的管理员不能改它、降级或切换登录。
+    // 路由版此前漏写了这一条，导致安装账号的既有保护失效。
+    if let Err(err) = state
+        .settings
+        .set(keys::INSTALL_ADMIN_UID, &admin.uid)
+        .await
+    {
+        return crate::http::error_response(err);
+    }
 
     // 默认相册：没有它的话，新用户在「我的相册」里看到的是空列表，
     // 上传时也没有默认的目标
@@ -316,6 +371,9 @@ pub async fn install_site(
 ) -> Response {
     let _rectx = request_context(&state, &headers, peer.addr()).await;
     if let Err(resp) = ensure_not_installed(&state).await {
+        return resp;
+    }
+    if let Err(resp) = ensure_install_token(&state, &headers, Some(&body)).await {
         return resp;
     }
 
@@ -399,6 +457,9 @@ pub async fn install_finish(
 ) -> Response {
     let _rectx = request_context(&state, &headers, peer.addr()).await;
     if let Err(resp) = ensure_not_installed(&state).await {
+        return resp;
+    }
+    if let Err(resp) = ensure_install_token(&state, &headers, None).await {
         return resp;
     }
 

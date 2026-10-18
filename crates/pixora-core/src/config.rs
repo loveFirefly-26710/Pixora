@@ -84,6 +84,10 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub master_key: Option<MasterKey>,
     pub key_source: KeySource,
+    /// 安装口令：环境变量、`{data_dir}/install.token` 或首次启动自动生成。
+    /// 未安装时所有 `/install/*` 接口都要求它，避免公网实例被人抢先接管。
+    pub install_token: String,
+    pub install_token_source: String,
     pub workers: usize,
     /// 显式配的站点地址；为空时由请求头推断
     pub base_url: Option<String>,
@@ -125,6 +129,7 @@ impl Config {
         let data_dir = PathBuf::from(env("PIXORA_DATA_DIR").unwrap_or_else(|| "./data".into()));
 
         let (master_key, key_source) = load_master_key(&data_dir)?;
+        let (install_token, install_token_source) = load_install_token(&data_dir)?;
 
         let bind = env("PIXORA_BIND")
             .unwrap_or_else(|| "0.0.0.0:8080".into())
@@ -170,6 +175,8 @@ impl Config {
             data_dir,
             master_key,
             key_source,
+            install_token,
+            install_token_source,
             workers,
             base_url,
             trust_proxy,
@@ -292,6 +299,47 @@ fn restrict_permissions(path: &Path) {
         let _ = path;
     }
 }
+
+/// 安装口令的加载顺序：环境变量 → 数据目录里的文件 → 自动生成。
+///
+/// 这个值只在未安装时有意义，但它会一直留在数据目录里：安装完成后接口整体
+/// 404，口令不再是入口；留着可以让重装/排障时不必猜一个一次性值。
+fn load_install_token(data_dir: &Path) -> Result<(String, String)> {
+    if let Some(raw) = env("PIXORA_INSTALL_TOKEN") {
+        return Ok((raw, "环境变量 PIXORA_INSTALL_TOKEN".into()));
+    }
+
+    let path = data_dir.join("install.token");
+    if path.exists() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            let token = raw.trim();
+            if !token.is_empty() {
+                return Ok((token.to_string(), format!("文件 {}", path.display())));
+            }
+        }
+    }
+
+    if let Err(err) = std::fs::create_dir_all(data_dir) {
+        tracing::warn!(dir = %data_dir.display(), error = %err, "数据目录不可用，安装口令只留在内存");
+        return Ok((
+            pixora_crypto::token::new_csrf_token()?,
+            "内存（数据目录不可写）".into(),
+        ));
+    }
+
+    let token = pixora_crypto::token::new_csrf_token()?;
+    match std::fs::write(&path, &token) {
+        Ok(()) => {
+            restrict_permissions(&path);
+            Ok((token, format!("首次启动自动生成，已写入 {}", path.display())))
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "安装口令写入失败，本次运行使用内存口令");
+            Ok((token, "内存（写入失败）".into()))
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

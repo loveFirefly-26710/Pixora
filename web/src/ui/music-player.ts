@@ -17,10 +17,12 @@ import {
   previous,
   seekMusic,
   selectTrack,
+  setMode,
   setPanelTab,
   subscribeMusic,
   toggleMusic,
   togglePanel,
+  type PlaybackMode,
 } from "../core/music";
 
 const DISC_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -58,8 +60,14 @@ let panelTabs: HTMLElement | null = null;
 let panelTitle: HTMLElement | null = null;
 let panelProgress: HTMLInputElement | null = null;
 let panelTime: HTMLElement | null = null;
+let panelMode: HTMLSelectElement | null = null;
 let panelCover: HTMLElement | null = null;
+let panelClose: HTMLButtonElement | null = null;
+let panelScrim: HTMLElement | null = null;
 let lastBodyKey = "";
+/** 侧栏开关的焦点收尾：打开时记下来源，关闭时还回去。 */
+let panelReturnFocus: HTMLElement | null = null;
+let lastPanelOpen = false;
 
 /** 顶栏胶囊。站点没启用音乐时调用方不会创建它。 */
 export function musicControl(): HTMLElement {
@@ -84,6 +92,8 @@ export function musicControl(): HTMLElement {
         type: "button",
         "data-music-queue": "",
         "aria-label": "打开歌单",
+        "aria-controls": panelId,
+        "aria-expanded": "false",
         title: "歌单与歌词",
       },
       h("span", { html: LIST_ICON }),
@@ -104,7 +114,12 @@ export function mountMusicPanel(): void {
   if (document.getElementById(panelId)) return;
   const cover = h("div.music-cover", { html: DISC_ICON });
   const title = h("div.music-now", null, h("b", { text: "萤火电台" }), h("span", { text: "背景音乐" }));
-  const close = h("button.music-close", { type: "button", "aria-label": "关闭歌单", text: "×" });
+  const close = h("button.music-close", {
+    type: "button",
+    "aria-label": "关闭歌单",
+    title: "关闭歌单",
+    text: "×",
+  });
   const tabs = h(
     "div.music-tabs",
     null,
@@ -121,11 +136,21 @@ export function mountMusicPanel(): void {
     "aria-label": "播放进度",
   });
   const time = h("span.music-time", { text: "0:00 / 0:00" });
+  const mode = h(
+    "select.music-mode",
+    { "aria-label": "播放模式", title: "播放模式" },
+    h("option", { value: "shuffle", text: "随机播放" }),
+    h("option", { value: "list", text: "列表循环" }),
+    h("option", { value: "once", text: "顺序播放" }),
+  );
+  mode.value = musicState().mode;
+  mode.addEventListener("change", () => setMode(mode.value as PlaybackMode));
   const controls = h(
     "div.music-panel-controls",
     null,
     h("button", { type: "button", "aria-label": "上一首", title: "上一首", on: { click: () => void previous() } }, h("span", { html: PREV_ICON })),
     h("button", { type: "button", "aria-label": "下一首", title: "下一首", on: { click: () => void next() } }, h("span", { html: NEXT_ICON })),
+    mode,
     h("span.spacer"),
     time,
   );
@@ -137,6 +162,10 @@ export function mountMusicPanel(): void {
     body,
     h("div.music-panel-foot", null, progress, controls),
   );
+  // 手机上的侧栏是底部抽屉：加一层可点击的暗幕，点它等于关掉，
+  // 同时把背景页面的滚动锁住（样式在 theme.css 的窄屏段）。
+  const scrim = h("div.music-scrim", { "aria-hidden": "true" });
+  scrim.addEventListener("click", () => closePanel());
   close.addEventListener("click", () => closePanel());
   for (const button of tabs.querySelectorAll<HTMLButtonElement>("[data-music-tab]")) {
     button.addEventListener("click", () => {
@@ -147,14 +176,25 @@ export function mountMusicPanel(): void {
     const duration = musicState().duration;
     if (duration > 0) seekMusic((Number(progress.value) / 100) * duration);
   });
-  document.body.append(panel);
+  document.body.append(scrim, panel);
   panelBody = body;
   panelTabs = tabs;
   panelTitle = title;
   panelProgress = progress;
   panelTime = time;
+  panelMode = mode;
   panelCover = cover;
+  panelClose = close;
+  panelScrim = scrim;
   lastBodyKey = "";
+  // Esc 关侧栏。看图浮层/弹窗自己用 Esc 时让它们先处理，
+  // 免得一次按键把两层界面一起收掉。
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !musicState().panelOpen) return;
+    if (document.querySelector(".modal, .lb")) return;
+    event.preventDefault();
+    closePanel();
+  });
   renderPanel();
 }
 
@@ -171,19 +211,51 @@ function syncControl(root: HTMLElement): void {
     button.setAttribute("title", track ? `${action} · ${track.title}` : action);
     button.setAttribute("aria-pressed", String(state.playing));
   }
+  const queue = root.querySelector<HTMLButtonElement>("[data-music-queue]");
+  if (queue) {
+    const action = state.panelOpen ? "关闭歌单" : "打开歌单";
+    queue.setAttribute("aria-label", action);
+    queue.setAttribute("title", action);
+    queue.setAttribute("aria-expanded", String(state.panelOpen));
+  }
 }
 
 function renderControls(): void {
   for (const root of document.querySelectorAll<HTMLElement>(".music-control")) syncControl(root);
 }
 
+function focusPanel(): void {
+  panelReturnFocus =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  // 等抽屉开始滑入再聚焦，避免浏览器把整个面板滚进视口时抢走动画
+  window.setTimeout(() => {
+    if (musicState().panelOpen) panelClose?.focus({ preventScroll: true });
+  }, 120);
+}
+
+function restorePanelFocus(): void {
+  const target = panelReturnFocus;
+  panelReturnFocus = null;
+  target?.focus({ preventScroll: true });
+}
+
 function renderPanel(): void {
   const panel = document.getElementById(panelId);
   if (!panel) return;
   const state = musicState();
-  panel.classList.toggle("is-open", state.panelOpen);
+  const open = state.panelOpen;
+  panel.classList.toggle("is-open", open);
   panel.classList.toggle("is-playing", state.playing);
-  panel.setAttribute("aria-hidden", String(!state.panelOpen));
+  panel.setAttribute("aria-hidden", String(!open));
+  // 关着的时候整块退出 Tab 顺序，避免键盘用户把焦点送进看不见的侧栏
+  panel.toggleAttribute("inert", !open);
+  document.documentElement.classList.toggle("music-panel-open", open);
+  panelScrim?.classList.toggle("is-open", open);
+  if (open !== lastPanelOpen) {
+    lastPanelOpen = open;
+    if (open) focusPanel();
+    else restorePanelFocus();
+  }
   if (panelTabs) {
     for (const button of panelTabs.querySelectorAll<HTMLButtonElement>("[data-music-tab]")) {
       const active = button.dataset.musicTab === state.tab;
@@ -219,6 +291,7 @@ function renderPanel(): void {
   if (panelTime) {
     panelTime.textContent = `${formatClock(state.currentTime)} / ${formatClock(duration)}`;
   }
+  if (panelMode) panelMode.value = state.mode;
 
   if (!panelBody) return;
   const key = [

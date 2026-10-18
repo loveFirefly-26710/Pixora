@@ -436,6 +436,8 @@ export function imageTile(
     title?: string | null;
     /** 是否显示浏览量；广场显示，相册/回收站不显示 */
     showViews?: boolean;
+    /** 浏览量是 0 也显示（广场要求每张图底部都有统计） */
+    alwaysShowViews?: boolean;
   } = {},
 ): HTMLElement {
   const thumb = h("div.ph", { class: `c${(item.id % 6) + 1}` });
@@ -454,7 +456,8 @@ export function imageTile(
   const time = options.subtitle ?? relativeTime(item.upload_time);
   const tags = options.showTags === false ? [] : item.tags.slice(0, 3);
   const title = (options.title ?? item.title ?? "").trim();
-  const showViews = options.showViews !== false && item.views > 0;
+  const showViews =
+    options.showViews !== false && (item.views > 0 || options.alwaysShowViews === true);
   const tile = h(
     "button.tile",
     {

@@ -58,7 +58,7 @@ export interface SiteInfo {
   /** 广场自动漫游间隔（秒）。0 = 关闭 */
   plaza_auto_refresh_seconds: number;
   /** 背景音乐：只有管理员启用后前端才显示播放按钮 */
-  music?: { enabled: boolean; source: "api" | "local" } | null;
+  music?: { enabled: boolean; source: "api" | "local"; autoplay?: boolean } | null;
   /** 回收站保留天数：0 = 关闭回收站（删除即彻底删除） */
   recycle_retention_days: number;
   /** 会话有效期：闲置多少分钟掉线、最长多少天 */
@@ -546,6 +546,8 @@ export interface AdminSettings {
     plaza_auto_refresh_seconds: number;
     /** 只在广场展示这些公开相册；空数组 = 全部公开图片 */
     plaza_album_ids?: number[];
+    /** 管理员命名的相册集合，随机图 API 可用 collection=名字 取 */
+    plaza_collections?: Record<string, number[]>;
     recycle_retention_days: number;
   };
   upload: {
@@ -619,6 +621,7 @@ export interface AdminSettings {
     platform: string;
     playlist_id: string;
     local_dir: string;
+    autoplay: boolean;
   };
 }
 

@@ -143,11 +143,18 @@ impl AppState {
         sort_order: Option<i64>,
         cover_blob_id: Option<Option<i64>>,
     ) -> Result<()> {
-        self.require_owned_album(viewer, album_id).await?;
+        let album = self.require_owned_album(viewer, album_id).await?;
 
         if let Some(name) = name {
             if name.trim().is_empty() {
                 return Err(AppError::bad_request("相册名称不能为空"));
+            }
+        }
+        // 封面只能从相册主人自己的图片里挑。否则随便填一个 blob id 就能通过
+        // 返回的缩略图地址判断「别处是否存在这张图」。
+        if let Some(Some(blob_id)) = cover_blob_id {
+            if !self.repo.owner_has_blob(album.owner_id, blob_id).await? {
+                return Err(AppError::bad_request("封面必须来自相册主人自己的图片"));
             }
         }
 
@@ -455,11 +462,13 @@ impl AppState {
 
     async fn album_payload(&self, album: &Album, image_count: i64, bytes: i64) -> AlbumPayload {
         let cover_url = match album.cover_blob_id {
-            Some(blob_id) => match self.repo.find_blob_by_id(blob_id).await {
-                Ok(Some(blob)) => Some(self.direct_url(&blob.sha256, &blob.ext, true).await),
-                _ => None,
-            },
-            None => None,
+            Some(blob_id) if self.repo.owner_has_blob(album.owner_id, blob_id).await.unwrap_or(false) => {
+                match self.repo.find_blob_by_id(blob_id).await {
+                    Ok(Some(blob)) => Some(self.direct_url(&blob.sha256, &blob.ext, true).await),
+                    _ => None,
+                }
+            }
+            _ => None,
         };
         AlbumPayload {
             id: album.id,
