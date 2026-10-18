@@ -56,6 +56,8 @@ pub mod keys {
     pub const PLAZA_AUTO_REFRESH_SECONDS: &str = "plaza.auto_refresh_seconds";
     /// 只展示这些公开相册（逗号分隔的 id）。空 = 全部公开图片
     pub const PLAZA_ALBUM_IDS: &str = "plaza.album_ids";
+    /// 管理员命名的相册集合：JSON 对象，值可以是 id 数组或逗号串
+    pub const PLAZA_COLLECTIONS: &str = "plaza.collections";
     /// 背景音乐总开关
     pub const MUSIC_ENABLED: &str = "music.enabled";
     /// 音乐来源：`api`（Meting 等）或 `local`（服务器本地目录）
@@ -65,6 +67,8 @@ pub mod keys {
     pub const MUSIC_PLATFORM: &str = "music.platform";
     pub const MUSIC_PLAYLIST_ID: &str = "music.playlist_id";
     pub const MUSIC_LOCAL_DIR: &str = "music.local_dir";
+    /// 打开首页时是否尝试自动播放（浏览器可能阻止，需用户再点一次）
+    pub const MUSIC_AUTOPLAY: &str = "music.autoplay";
     pub const UPLOAD_MAX_FILE: &str = "upload.max_file_bytes";
     pub const UPLOAD_MAX_BATCH: &str = "upload.max_batch";
     pub const UPLOAD_MAX_PIXELS: &str = "upload.max_pixels";
@@ -270,6 +274,8 @@ pub struct MusicSettings {
     pub platform: String,
     pub playlist_id: String,
     pub local_dir: String,
+    /// 打开首页时是否尝试自动播放
+    pub autoplay: bool,
 }
 
 /// 允许注册的邮箱域名白名单。
@@ -664,7 +670,43 @@ impl Settings {
                 .await?
                 .trim()
                 .to_string(),
+            autoplay: self.bool(keys::MUSIC_AUTOPLAY, false).await?,
         })
+    }
+
+    /// 管理员命名的相册集合。坏值忽略，空对象表示没配置。
+    pub async fn plaza_collections(&self) -> Result<std::collections::HashMap<String, Vec<i64>>> {
+        let raw = self.raw(keys::PLAZA_COLLECTIONS).await?;
+        let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+            return Ok(std::collections::HashMap::new());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return Ok(std::collections::HashMap::new());
+        };
+        let Some(object) = value.as_object() else {
+            return Ok(std::collections::HashMap::new());
+        };
+        let mut out = std::collections::HashMap::new();
+        for (name, item) in object.iter().take(50) {
+            let name = name.trim();
+            if name.is_empty() || name.chars().count() > 64 {
+                continue;
+            }
+            let ids: Vec<i64> = match item {
+                serde_json::Value::Array(array) => array
+                    .iter()
+                    .filter_map(|id| id.as_i64())
+                    .filter(|id| *id > 0)
+                    .take(200)
+                    .collect(),
+                serde_json::Value::String(text) => parse_id_list(Some(text)),
+                _ => Vec::new(),
+            };
+            if !ids.is_empty() {
+                out.insert(name.to_string(), ids);
+            }
+        }
+        Ok(out)
     }
 
     /// 访客的下载限额。

@@ -50,8 +50,9 @@ impl StorageError {
     }
 
     pub fn remote(driver: &'static str, status: u16, message: impl Into<String>) -> Self {
-        // 5xx 与服务端限流值得重试；4xx 是请求本身有问题，重试也不会变好
-        let retryable = status >= 500 || status == 429;
+        // 0 表示连接/超时这类没有拿到 HTTP 响应的网络错误：值得重试，也应当
+        // 回退本地。5xx 与服务端限流同理；4xx 是请求本身有问题，重试不会变好。
+        let retryable = status == 0 || status >= 500 || status == 429;
         Self::Remote {
             driver,
             status,

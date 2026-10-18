@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{Duration as ChronoDuration, Utc};
 use reqwest::Url;
 use serde::Serialize;
 
@@ -58,6 +59,23 @@ pub struct MusicPlaylist {
 }
 
 impl AppState {
+
+    /// 把第三方媒体地址签成站内代理地址。浏览器只请求同源的 `/music/*`，
+    /// 既避开混合内容（Meting 常返回 http 音频）与 CORS，也防止这个端点被拿去做
+    /// 任意 URL 代理：只有服务端从管理员配置的 API 响应里签过的地址才能取。
+    fn signed_media_url(&self, endpoint: &str, raw: &str, kind: &str) -> Result<String> {
+        let payload = serde_json::json!({
+            "url": raw,
+            "kind": kind,
+            "exp": (Utc::now() + ChronoDuration::minutes(720)).timestamp(),
+        })
+        .to_string();
+        let token = self.settings.sign_payload(&payload)?;
+        let mut url = Url::parse(&format!("http://music.local{endpoint}")).expect("静态地址");
+        url.query_pairs_mut().append_pair("token", &token);
+        Ok(format!("{}?{}", url.path(), url.query().unwrap_or_default()))
+    }
+
     pub async fn music_playlist(&self) -> Result<MusicPlaylist> {
         let settings = self.settings.music().await?;
         if !settings.enabled {
@@ -180,25 +198,42 @@ impl AppState {
             if tracks.len() >= MAX_TRACKS {
                 break;
             }
-            let Some(audio_url) = string_field(item, &["url", "audio", "src"])
+            let Some(raw_audio) = string_field(item, &["url", "audio", "src"])
                 .and_then(|raw| resolve_url(&url, &raw))
             else {
                 continue;
             };
+            let audio_url =
+                self.signed_media_url("/api/v1/music/stream", &raw_audio, "audio")?;
             let title = string_field(item, &["name", "title"])
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| format!("曲目 {}", index + 1));
             let artist = artist_field(item);
             let album =
                 string_field(item, &["album", "albumname", "album_name"]).unwrap_or_default();
-            let cover_url = string_field(item, &["pic", "cover", "image"])
-                .and_then(|raw| resolve_url(&url, &raw));
+            let cover_url = match string_field(item, &["pic", "cover", "image"])
+                .and_then(|raw| resolve_url(&url, &raw))
+            {
+                Some(raw) => Some(self.signed_media_url(
+                    "/api/v1/music/stream",
+                    &raw,
+                    "cover",
+                )?),
+                None => None,
+            };
             let (lyric_url, lyrics) = match string_field(item, &["lrc", "lyric"]) {
                 Some(raw) if raw.trim().starts_with('[') => (None, Some(raw)),
-                Some(raw) => (
-                    resolve_url(&url, &raw).map(|value| lyrics_proxy_url(&value)),
-                    None,
-                ),
+                Some(raw) => {
+                    let target = match resolve_url(&url, &raw) {
+                        Some(value) => Some(self.signed_media_url(
+                            "/api/v1/music/lyrics",
+                            &value,
+                            "lyric",
+                        )?),
+                        None => None,
+                    };
+                    (target, None)
+                }
                 None => (None, None),
             };
             let id = item
@@ -225,10 +260,19 @@ impl AppState {
     }
 
     /// 歌词：API 地址只允许与管理员配置的 Meting 地址同源，避免变成任意 URL 代理。
-    pub async fn music_lyrics(&self, url: Option<&str>, path: Option<&str>) -> Result<String> {
+    pub async fn music_lyrics(
+        &self,
+        token: Option<&str>,
+        url: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<String> {
         let settings = self.settings.music().await?;
         if !settings.enabled {
             return Err(AppError::not_found("歌词"));
+        }
+        if let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) {
+            let target = self.media_target(token, "lyric")?;
+            return self.fetch_lyrics_url(target).await;
         }
         if let Some(raw) = url.map(str::trim).filter(|value| !value.is_empty()) {
             if settings.source != "api" {
@@ -243,24 +287,7 @@ impl AppState {
             {
                 return Err(AppError::forbidden("歌词地址不在音乐 API 域名下"));
             }
-            let response = self
-                .http
-                .get(target)
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-                .map_err(|err| AppError::Config(format!("歌词请求失败：{err}")))?;
-            if !response.status().is_success() {
-                return Err(AppError::not_found("歌词"));
-            }
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|err| AppError::Config(format!("歌词读取失败：{err}")))?;
-            if bytes.len() > MAX_LYRICS_BYTES {
-                return Err(AppError::bad_request("歌词文件过大"));
-            }
-            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+            return self.fetch_lyrics_url(target).await;
         }
 
         let rel = path
@@ -278,6 +305,69 @@ impl AppState {
             return Err(AppError::bad_request("歌词文件过大"));
         }
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn fetch_lyrics_url(&self, target: Url) -> Result<String> {
+        let response = self
+            .http
+            .get(target)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|err| AppError::Config(format!("歌词请求失败：{err}")))?;
+        if !response.status().is_success() {
+            return Err(AppError::not_found("歌词"));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|err| AppError::Config(format!("歌词读取失败：{err}")))?;
+        if bytes.len() > MAX_LYRICS_BYTES {
+            return Err(AppError::bad_request("歌词文件过大"));
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// 校验服务端签发的媒体令牌。令牌里带 URL、类型与过期时间；
+    /// 只有从管理员配置的 API 响应里签出去的地址才允许被代理。
+    fn media_target(&self, token: &str, expected_kind: &str) -> Result<Url> {
+        let raw = self
+            .settings
+            .verify_payload(token.trim())
+            .map_err(|_| AppError::bad_request("媒体地址无效，请刷新歌单"))?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|_| AppError::bad_request("媒体地址已损坏，请刷新歌单"))?;
+        if value.get("kind").and_then(|kind| kind.as_str()) != Some(expected_kind) {
+            return Err(AppError::bad_request("媒体类型不匹配"));
+        }
+        let expires = value.get("exp").and_then(|exp| exp.as_i64()).unwrap_or(0);
+        if expires < Utc::now().timestamp() {
+            return Err(AppError::not_found("媒体地址已过期，请刷新歌单"));
+        }
+        let raw_url = value
+            .get("url")
+            .and_then(|url| url.as_str())
+            .ok_or_else(|| AppError::bad_request("媒体地址缺少 URL"))?;
+        let url = Url::parse(raw_url).map_err(|_| AppError::bad_request("媒体地址无效"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(AppError::bad_request("媒体地址只支持 http / https"));
+        }
+        Ok(url)
+    }
+
+    /// 外部音轨/封面的代理目标。
+    pub fn music_stream_target(&self, token: &str) -> Result<Url> {
+        let raw = self
+            .settings
+            .verify_payload(token.trim())
+            .map_err(|_| AppError::bad_request("媒体地址无效，请刷新歌单"))?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|_| AppError::bad_request("媒体地址已损坏，请刷新歌单"))?;
+        let kind = value.get("kind").and_then(|kind| kind.as_str()).unwrap_or("");
+        if kind != "audio" && kind != "cover" {
+            return Err(AppError::bad_request("媒体类型不匹配"));
+        }
+        self.media_target(token, kind)
     }
 
     /// 本地音乐文件（音频或封面）。只允许配置目录内、扩展名在白名单里的文件。
@@ -363,12 +453,6 @@ fn local_url(endpoint: &str, rel: &str) -> String {
 }
 
 /// 第三方歌词地址包成站内代理地址：前端只认站内路径，不直接跨域请求歌词。
-fn lyrics_proxy_url(raw: &str) -> String {
-    let mut url = Url::parse("http://music.local/api/v1/music/lyrics").expect("静态地址");
-    url.query_pairs_mut().append_pair("url", raw);
-    format!("{}?{}", url.path(), url.query().unwrap_or_default())
-}
-
 fn scan_local(root: &Path) -> Vec<MusicTrack> {
     let Ok(root) = root.canonicalize() else {
         return Vec::new();

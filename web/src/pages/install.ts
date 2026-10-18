@@ -9,7 +9,7 @@
  * 当前步按 `GET /install/status` 的 `step` 定位，刷新页面能接着填。
  */
 
-import { ApiError, request } from "../core/api";
+import { ApiError, request, type RequestOptions } from "../core/api";
 import { h, mount } from "../core/dom";
 import { formatNumber } from "../core/format";
 import type { PageContext } from "../core/router";
@@ -19,6 +19,33 @@ import type { InstallStatus } from "../core/types";
 import { card, cardNode, field, kvRow, pageHead, qtip, select, spinner, textInput } from "../ui/widgets";
 
 const STEP_TITLES = ["环境检查", "数据库", "管理员", "站点与邮件", "完成"];
+const INSTALL_TOKEN_KEY = "pixora-install-token";
+
+/** 安装口令只放在 sessionStorage：关掉标签页就消失，不长期留在磁盘上。 */
+let installToken = (() => {
+  try {
+    return sessionStorage.getItem(INSTALL_TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+})();
+
+function setInstallToken(value: string | null): void {
+  installToken = value ?? "";
+  try {
+    if (installToken) sessionStorage.setItem(INSTALL_TOKEN_KEY, installToken);
+    else sessionStorage.removeItem(INSTALL_TOKEN_KEY);
+  } catch {
+    /* 隐私模式下 sessionStorage 可能不可写，口令留在内存里也能装完 */
+  }
+}
+
+function installRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  return request<T>(path, {
+    ...options,
+    headers: { ...(options.headers ?? {}), "X-Install-Token": installToken },
+  });
+}
 
 /** 数据库类型。MariaDB 与 MySQL 共用驱动，提交时都写 mysql。 */
 const DRIVERS: Array<{ value: string; label: string; port: number | null; note: string }> = [
@@ -110,15 +137,64 @@ function stepFooter(...children: Node[]): HTMLElement {
 export async function installPage(ctx: PageContext): Promise<void> {
   const root = h("div.pad");
   mount(ctx.outlet, root);
-  root.append(loadingBlock("正在检查环境…"));
   const reload = (): void => void installPage(ctx);
+  if (!installToken) {
+    mount(root, tokenGate(reload, null));
+    return;
+  }
+  root.append(loadingBlock("正在检查环境…"));
 
   try {
-    const status = await request<InstallStatus>("/install/status");
+    const status = await installRequest<InstallStatus>("/install/status");
     mount(root, ...wizard(reload, status));
   } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      setInstallToken(null);
+      mount(root, tokenGate(reload, err.message));
+      return;
+    }
     mount(root, errorBlock(err, reload));
   }
+}
+
+/** 未安装实例的第一道门：先验安装口令，避免公网路人抢先建管理员。 */
+function tokenGate(reload: () => void, error: string | null): HTMLElement {
+  const input = textInput({
+    type: "password",
+    mono: true,
+    placeholder: "服务端启动日志里的安装口令",
+  });
+  const submit = h("button.btn.pri", { type: "button", text: "继续安装" });
+  const go = (): void => {
+    const token = input.value.trim();
+    if (!token) {
+      toastError("请先填写安装口令");
+      input.focus();
+      return;
+    }
+    setInstallToken(token);
+    reload();
+  };
+  submit.addEventListener("click", go);
+  input.addEventListener("keydown", (event) => {
+    if ((event as KeyboardEvent).key === "Enter") go();
+  });
+  queueMicrotask(() => input.focus());
+  return h(
+    "div",
+    null,
+    pageHead("安装向导", "第一次启动需要安装口令。"),
+    card(
+      null,
+      h("h4", { text: "安装口令" }),
+      h("div.tip", {
+        text: "服务端启动日志会打印 install_token；也可以查看数据目录里的 install.token。口令只存在当前标签页，装完即清。",
+      }),
+      error ? qtip("err", "口令被拒绝", error) : null,
+      field("安装口令", input),
+      submit,
+    ),
+  );
 }
 
 /**
@@ -281,7 +357,7 @@ function wizard(reload: () => void, status: InstallStatus): Node[] {
       password: isSqlite ? null : db.password.value,
     };
     try {
-      const result = await request<{ ok: boolean; message: string }>("/install/database", {
+      const result = await installRequest<{ ok: boolean; message: string }>("/install/database", {
         method: "POST",
         json: payload,
       });
@@ -355,7 +431,7 @@ function wizard(reload: () => void, status: InstallStatus): Node[] {
           return;
         }
         try {
-          await request("/install/admin", {
+          await installRequest("/install/admin", {
             method: "POST",
             json: { email, password: admin.password.value, site_name: admin.siteName.value.trim() },
           });
@@ -402,7 +478,7 @@ function wizard(reload: () => void, status: InstallStatus): Node[] {
           site.smtpHost.value.trim() || site.smtpUser.value.trim() || site.smtpPassword.value,
         );
         try {
-          await request("/install/site", {
+          await installRequest("/install/site", {
             method: "POST",
             json: {
               base_url: baseUrl,
@@ -420,9 +496,10 @@ function wizard(reload: () => void, status: InstallStatus): Node[] {
                 : null,
             },
           });
-          const done = await request<{ ok: boolean; admin_uid: string; login_url: string }>("/install/finish", {
+          const done = await installRequest<{ ok: boolean; admin_uid: string; login_url: string }>("/install/finish", {
             method: "POST",
           });
+          setInstallToken(null);
           mount(finishResult, finishPanel(done.admin_uid, done.login_url));
           mount(siteResult);
           go(5);

@@ -543,6 +543,8 @@ mod tests {
             data_dir: dir.path().join("data"),
             master_key: None,
             key_source: pixora_core::config::KeySource::Missing,
+            install_token: "test-install-token".into(),
+            install_token_source: "test".into(),
             workers: 1,
             base_url: Some("https://img.example.com".into()),
             // 测试里没有代理，直接信对端地址
@@ -977,15 +979,16 @@ mod tests {
     async fn upload_needs_a_token() {
         let (state, _dir) = test_state().await;
 
+        // 带着真文件但不带凭据：鉴权在读表单之前就拦下，回 401 而不是解析错误
         let response = app(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/upload")
-                    .header("content-type", "multipart/form-data; boundary=x")
-                    .body(Body::from("--x--\r\n"))
-                    .expect("构造请求"),
-            )
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::None,
+                PNG_1X1,
+                "pixel.png",
+                &[],
+                None,
+            ))
             .await
             .expect("发请求");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1324,6 +1327,74 @@ mod tests {
             second["data"]["id"].as_i64(),
             first["data"]["id"].as_i64(),
             "去重不等于复用图片记录"
+        );
+    }
+
+    /// 浏览量按「公开图每打开一次」计：属主自己点开也算。
+    /// 自托管的广场上唯一用户往往就是站长，按「别人看」过滤会让计数器永远停在 0；
+    /// 私有图不计数（它只对属主与管理员可见）。
+    #[tokio::test]
+    async fn public_image_views_count_for_owner_and_guests() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "views@example.com", "8405", false).await;
+        let plaintext = "px_live_test_views_token";
+        state
+            .repo
+            .create_api_token(&NewApiToken {
+                user_id: user.id,
+                name: "浏览量测试".into(),
+                token_hash: pixora_crypto::token::token_hash(plaintext),
+                display: "px_live_views…".into(),
+                scopes: vec!["upload".into(), "read".into()],
+                expires_at: None,
+            })
+            .await
+            .expect("签发令牌");
+
+        let uploaded = app(state.clone())
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Token(plaintext),
+                PNG_1X1,
+                "pixel.png",
+                &[("visibility", "public")],
+                None,
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let uploaded = body_json(uploaded).await;
+        let id = uploaded["data"]["id"].as_i64().expect("图片 id");
+
+        // 属主连续打开两次：每次 +1，响应里就是加过之后的数
+        for expected in [1_i64, 2] {
+            let detail = app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/v1/images/{id}"))
+                        .header("authorization", format!("Bearer {plaintext}"))
+                        .body(Body::empty())
+                        .expect("构造请求"),
+                )
+                .await
+                .expect("发请求");
+            let detail = body_json(detail).await;
+            assert_eq!(
+                detail["data"]["views"], expected,
+                "属主打开公开图也要计数：{detail}"
+            );
+        }
+
+        // 未登录访客打开同样计数
+        let anonymous = app(state.clone())
+            .oneshot(get(&format!("/api/v1/images/{id}"), None))
+            .await
+            .expect("发请求");
+        let anonymous = body_json(anonymous).await;
+        assert_eq!(
+            anonymous["data"]["views"], 3,
+            "访客打开公开图也要计数：{anonymous}"
         );
     }
 

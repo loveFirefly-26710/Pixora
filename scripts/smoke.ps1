@@ -204,24 +204,26 @@ try {
     Ok "静态资源带 ETag，重复请求拿 304"
 
     Step "安装向导"
-    $status = HttpText @("$script:Base/api/v1/install/status")
+    $installToken = (Get-Content (Join-Path $dataDir "install.token") -Raw).Trim()
+    $installHeader = @("-H", "X-Install-Token: $installToken")
+    $status = HttpText ($installHeader + @("$script:Base/api/v1/install/status"))
     ExpectJson $status { -not $d.data.installed } "未安装状态"
 
     # 用正斜杠路径：SQLite 的 DSN 里反斜杠会被当成转义
     $dbForApi = $dbPath -replace '\\', '/'
-    $check = HttpText @("-X", "POST", "$script:Base/api/v1/install/database", "-H", "Content-Type: application/json",
-        "-d", (JsonBody "db" @{ driver = "sqlite"; database = $dbForApi }))
+    $check = HttpText ($installHeader + @("-X", "POST", "$script:Base/api/v1/install/database", "-H", "Content-Type: application/json",
+        "-d", (JsonBody "db" @{ driver = "sqlite"; database = $dbForApi })))
     ExpectJson $check { $d.data.ok } "数据库连接与建表"
 
-    $admin = HttpText @("-X", "POST", "$script:Base/api/v1/install/admin", "-H", "Content-Type: application/json",
-        "-d", (JsonBody "admin" @{ email = "admin@example.com"; password = "Pixora2026Abc"; site_name = "Pixora" }))
+    $admin = HttpText ($installHeader + @("-X", "POST", "$script:Base/api/v1/install/admin", "-H", "Content-Type: application/json",
+        "-d", (JsonBody "admin" @{ email = "admin@example.com"; password = "Pixora2026Abc"; site_name = "Pixora" })))
     ExpectJson $admin { $d.data.email -eq "admin@example.com" } "创建管理员"
 
-    $site = HttpText @("-X", "POST", "$script:Base/api/v1/install/site", "-H", "Content-Type: application/json",
-        "-d", (JsonBody "site" @{ base_url = $script:Base; upload_prefix = "images"; smtp = $null }))
+    $site = HttpText ($installHeader + @("-X", "POST", "$script:Base/api/v1/install/site", "-H", "Content-Type: application/json",
+        "-d", (JsonBody "site" @{ base_url = $script:Base; upload_prefix = "images"; smtp = $null })))
     ExpectJson $site { $d.data.ok } "站点设置"
 
-    $finish = HttpText @("-X", "POST", "$script:Base/api/v1/install/finish")
+    $finish = HttpText ($installHeader + @("-X", "POST", "$script:Base/api/v1/install/finish"))
     ExpectJson $finish { $d.data.ok } "完成安装"
     ExpectStatus "$script:Base/api/v1/install/status" 404 "安装入口已锁定"
 

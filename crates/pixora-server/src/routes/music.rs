@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Query, Request, State};
-use axum::http::{header, HeaderValue};
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -30,9 +30,10 @@ pub async fn lyrics(
     State(state): State<Arc<AppState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    let token = params.get("token").map(String::as_str);
     let url = params.get("url").map(String::as_str);
     let path = params.get("path").map(String::as_str);
-    match state.music_lyrics(url, path).await {
+    match state.music_lyrics(token, url, path).await {
         Ok(text) => {
             let mut response = (axum::http::StatusCode::OK, text).into_response();
             response.headers_mut().insert(
@@ -51,6 +52,68 @@ pub async fn lyrics(
         }
         Err(err) => error_response(err),
     }
+}
+
+/// `GET /api/v1/music/stream?token=…` — 公开。
+///
+/// 第三方音频/封面的同源代理。令牌由服务端在生成歌单时签名，URL 只可能是
+/// 管理员配置的 Meting 响应里出现过的地址；浏览器因此不会遇到混合内容或 CORS。
+pub async fn stream(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(token) = params.get("token").map(String::as_str) else {
+        return error_response(AppError::bad_request("缺少媒体令牌"));
+    };
+    let target = match state.music_stream_target(token) {
+        Ok(url) => url,
+        Err(err) => return error_response(err),
+    };
+    let mut request = state
+        .http
+        .get(target)
+        .timeout(std::time::Duration::from_secs(600));
+    if let Some(range) = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        request = request.header(header::RANGE, range);
+    }
+    let upstream = match request.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            return error_response(AppError::Config(format!("音频代理请求失败：{err}")));
+        }
+    };
+    if !upstream.status().is_success() {
+        return error_response(AppError::not_found("音频"));
+    }
+    let status = upstream.status();
+    let upstream_headers = upstream.headers().clone();
+    let mut response = Response::new(axum::body::Body::from_stream(upstream.bytes_stream()));
+    *response.status_mut() = status;
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_RANGE,
+        header::ACCEPT_RANGES,
+        header::LAST_MODIFIED,
+        header::ETAG,
+    ] {
+        if let Some(value) = upstream_headers.get(&name) {
+            response.headers_mut().insert(name, value.clone());
+        }
+    }
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 /// `GET /api/v1/music/file?path=…` — 公开。

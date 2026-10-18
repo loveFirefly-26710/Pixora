@@ -138,6 +138,37 @@ pub struct ImageFilter {
     pub seed: u64,
 }
 
+/// 随机图查询的扩展条件。与列表的 ImageFilter 分开，避免把广场列表没用到
+/// 的方向/宽高/时间窗口/排除 id 等字段塞进通用过滤器。
+#[derive(Debug, Clone, Default)]
+pub struct RandomFilter {
+    pub owner_id: Option<i64>,
+    /// 只在这些相册里挑；空 = 不限
+    pub album_ids: Vec<i64>,
+    pub public_only: bool,
+    /// `public` / `private`；None 表示不按图片可见性加条件
+    pub visibility: Option<String>,
+    pub query: Option<String>,
+    /// 全部命中（AND）
+    pub tags_all: Vec<String>,
+    /// 任一命中（OR）
+    pub tags_any: Vec<String>,
+    pub exclude_tag: Option<String>,
+    pub exclude_ids: Vec<i64>,
+    pub min_width: Option<i64>,
+    pub min_height: Option<i64>,
+    /// landscape / portrait / square
+    pub orientation: Option<String>,
+    /// 目标宽高比（宽 / 高），带 3% 容差
+    pub aspect_ratio: Option<f64>,
+    pub uploaded_after: Option<DateTime<Utc>>,
+    pub uploaded_before: Option<DateTime<Utc>>,
+    /// 从最近 500 张里做一次偏向新图的加权抽样
+    pub weight_recent: bool,
+    /// 0 = 每次随机；非 0 时用确定性洗牌，方便轮播保持稳定
+    pub seed: u64,
+}
+
 impl ImageFilter {
     /// 把 0 号种子换成一个随机值，让「默认排序」每次都不一样。
     pub fn resolved_seed(&self) -> u64 {
@@ -1472,6 +1503,212 @@ impl Repo {
         Ok(Some(ImageView::from_row(row)?))
     }
 
+    /// 扩展随机图查询：支持相册、标签逻辑、方向/尺寸、时间窗口、排除 id、
+    /// 加权新图与确定性种子。`count` 最多 50，避免一次请求把整库拖出来。
+    pub async fn random_images(
+        &self,
+        filter: &RandomFilter,
+        count: i64,
+    ) -> Result<Vec<ImageView>> {
+        let count = count.clamp(1, 50);
+        // 无筛选的单张公开图继续走主键随机快路径，避免每次全表排序。
+        let simple_public = count == 1
+            && filter.seed == 0
+            && !filter.weight_recent
+            && filter.public_only
+            && filter.owner_id.is_none()
+            && filter.album_ids.is_empty()
+            && filter.visibility.is_none()
+            && filter.query.is_none()
+            && filter.tags_all.is_empty()
+            && filter.tags_any.is_empty()
+            && filter.exclude_tag.is_none()
+            && filter.exclude_ids.is_empty()
+            && filter.min_width.is_none()
+            && filter.min_height.is_none()
+            && filter.orientation.is_none()
+            && filter.aspect_ratio.is_none()
+            && filter.uploaded_after.is_none()
+            && filter.uploaded_before.is_none();
+        if simple_public {
+            if let Some(view) = self.random_public_image_fast().await? {
+                let mut views = vec![view];
+                self.fill_random_tags(&mut views).await?;
+                return Ok(views);
+            }
+            return Ok(Vec::new());
+        }
+
+        let (where_sql, args) = self.random_where(filter);
+
+        if filter.weight_recent {
+            let sql =
+                format!("{IMAGE_VIEW_SQL}{where_sql} ORDER BY i.upload_time DESC LIMIT 500");
+            let rows = self.db.fetch_all(&sql, args).await?;
+            let views: Vec<ImageView> = rows
+                .iter()
+                .map(ImageView::from_row)
+                .collect::<Result<_>>()?;
+            if views.is_empty() {
+                return Ok(Vec::new());
+            }
+            let seed = if filter.seed == 0 {
+                random_u64()
+            } else {
+                filter.seed
+            };
+            let picks = weighted_indices(views.len(), count as usize, seed);
+            let mut chosen: Vec<ImageView> =
+                picks.into_iter().map(|index| views[index].clone()).collect();
+            self.fill_random_tags(&mut chosen).await?;
+            return Ok(chosen);
+        }
+
+        let order = if filter.seed == 0 {
+            self.db
+                .sql_v("ORDER BY RANDOM()", "ORDER BY RAND()", "ORDER BY RANDOM()")
+        } else {
+            // 用 seed 做一次稳定的伪随机排序：同一个 seed 的轮播顺序不会跳。
+            format!(
+                "ORDER BY ((i.id * 1103515245 + {}) % 2147483647)",
+                (filter.seed % 2_147_483_647) as i64
+            )
+        };
+        let sql = format!("{IMAGE_VIEW_SQL}{where_sql} {order} LIMIT ?");
+        let rows = self.db.fetch_all(&sql, args.int(count)).await?;
+        let mut views: Vec<ImageView> = rows
+            .iter()
+            .map(ImageView::from_row)
+            .collect::<Result<_>>()?;
+        self.fill_random_tags(&mut views).await?;
+        Ok(views)
+    }
+
+    async fn fill_random_tags(&self, views: &mut [ImageView]) -> Result<()> {
+        let ids: Vec<i64> = views.iter().map(|view| view.id).collect();
+        let mut tag_map = self.tags_for_images(&ids).await?;
+        for view in views {
+            view.tags = tag_map.remove(&view.id).unwrap_or_default();
+        }
+        Ok(())
+    }
+
+    fn random_where(&self, filter: &RandomFilter) -> (String, Args) {
+        let mut builder = WhereBuilder::new();
+        builder = builder.and("i.deleted_at IS NULL", |args| args);
+        if filter.public_only {
+            builder = builder.and("i.visibility = 'public'", |args| args);
+        }
+        if let Some(visibility) = &filter.visibility {
+            let visibility = visibility.clone();
+            builder = builder.and("i.visibility = ?", move |args| args.text(visibility));
+        }
+        if let Some(owner_id) = filter.owner_id {
+            builder = builder.and("i.owner_id = ?", move |args| args.int(owner_id));
+        }
+        if !filter.album_ids.is_empty() {
+            let placeholders = vec!["?"; filter.album_ids.len()].join(", ");
+            let ids = filter.album_ids.clone();
+            builder = builder.and(&format!("i.album_id IN ({placeholders})"), move |mut args| {
+                for id in &ids {
+                    args = args.int(*id);
+                }
+                args
+            });
+        }
+        if let Some(query) = filter
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let pattern = like_pattern(query);
+            builder = builder.and(
+                "(i.title LIKE ? ESCAPE '\\' OR i.original_name LIKE ? ESCAPE '\\' \
+                  OR EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                              WHERE it.image_id = i.id AND t.name LIKE ? ESCAPE '\\'))",
+                move |args| {
+                    args.text(pattern.clone())
+                        .text(pattern.clone())
+                        .text(pattern)
+                },
+            );
+        }
+        for tag in &filter.tags_all {
+            let tag = tag.clone();
+            builder = builder.and(
+                "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                          WHERE it.image_id = i.id AND t.name = ?)",
+                move |args| args.text(tag),
+            );
+        }
+        if !filter.tags_any.is_empty() {
+            let placeholders = vec!["?"; filter.tags_any.len()].join(", ");
+            let tags = filter.tags_any.clone();
+            builder = builder.and(
+                &format!(
+                    "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                              WHERE it.image_id = i.id AND t.name IN ({placeholders}))"
+                ),
+                move |mut args| {
+                    for tag in &tags {
+                        args = args.text(tag.clone());
+                    }
+                    args
+                },
+            );
+        }
+        if let Some(tag) = &filter.exclude_tag {
+            let tag = tag.clone();
+            builder = builder.and(
+                "NOT EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                              WHERE it.image_id = i.id AND t.name = ?)",
+                move |args| args.text(tag),
+            );
+        }
+        if !filter.exclude_ids.is_empty() {
+            let placeholders = vec!["?"; filter.exclude_ids.len()].join(", ");
+            let ids = filter.exclude_ids.clone();
+            builder = builder.and(&format!("i.id NOT IN ({placeholders})"), move |mut args| {
+                for id in &ids {
+                    args = args.int(*id);
+                }
+                args
+            });
+        }
+        if let Some(width) = filter.min_width {
+            builder = builder.and("b.width >= ?", move |args| args.int(width));
+        }
+        if let Some(height) = filter.min_height {
+            builder = builder.and("b.height >= ?", move |args| args.int(height));
+        }
+        match filter.orientation.as_deref() {
+            Some("landscape") => builder = builder.and("b.width > b.height", |args| args),
+            Some("portrait") => builder = builder.and("b.width < b.height", |args| args),
+            Some("square") => {
+                builder = builder.and(
+                    "ABS(CAST(b.width AS DOUBLE PRECISION) - b.height) <= 0.03 * b.height",
+                    |args| args,
+                )
+            }
+            _ => {}
+        }
+        if let Some(ratio) = filter.aspect_ratio {
+            let scaled = (ratio * 1_000_000.0).round() as i64;
+            builder = builder.and(
+                "ABS(CAST(b.width AS DOUBLE PRECISION) * 1000000 / NULLIF(b.height, 0) - ?) <= 30000",
+                move |args| args.int(scaled),
+            );
+        }
+        if let Some(after) = filter.uploaded_after {
+            builder = builder.and("i.upload_time >= ?", move |args| args.text(ts(after)));
+        }
+        if let Some(before) = filter.uploaded_before {
+            builder = builder.and("i.upload_time <= ?", move |args| args.text(ts(before)));
+        }
+        (builder.sql_string(), builder.args())
+    }
+
     /// 公开图随机快路径：取 id 区间内的随机点，再找第一张 id 不小于它的公开图；
     /// 到末尾没有就回绕到第一张。仍然是均匀的「随机起点」，只是不保证每张图
     /// 被选中的概率完全相等（id 有空洞时会有偏差，对随机图 API 足够）。
@@ -1628,6 +1865,34 @@ const IMAGE_VIEW_SQL: &str = "SELECT i.id, i.owner_id, u.uid AS owner_uid, i.alb
    JOIN blobs b ON b.id = i.blob_id \
    JOIN users u ON u.id = i.owner_id \
    LEFT JOIN albums a ON a.id = i.album_id";
+
+/// 从按新到旧排列的候选里做加权抽样：越靠前权重越高，抽 count 个不重复。
+fn weighted_indices(len: usize, count: usize, seed: u64) -> Vec<usize> {
+    let mut available: Vec<usize> = (0..len).collect();
+    let mut out = Vec::new();
+    let mut state = seed.max(1);
+    while out.len() < count.min(len) && !available.is_empty() {
+        let total: f64 = available
+            .iter()
+            .map(|index| 1.0 / (*index as f64 + 1.0))
+            .sum();
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let target = (state as f64 / u64::MAX as f64) * total;
+        let mut acc = 0.0;
+        let mut pick = available.len() - 1;
+        for (position, index) in available.iter().enumerate() {
+            acc += 1.0 / (*index as f64 + 1.0);
+            if acc >= target {
+                pick = position;
+                break;
+            }
+        }
+        out.push(available.remove(pick));
+    }
+    out
+}
 
 /// 给随机图用的轻量随机数。不需要密码学强度，只要每次调用分布不同。
 fn random_u64() -> u64 {

@@ -6,10 +6,15 @@
 use chrono::{DateTime, Utc};
 
 use crate::args::{Args, WhereBuilder};
-use crate::error::Result;
+use crate::db::Dialect;
+use crate::error::{RepoError, Result};
 use crate::model::*;
 use crate::repo::images::PurgedBlobs;
 use crate::repo::{like_pattern, Page, PageRequest, Repo};
+
+/// 安装管理员只允许创建一次。这个键是抢占锁：并发向导请求里只有第一个
+/// 能插入它，其余的会撞唯一约束而退出。
+pub const INSTALL_ADMIN_CLAIM: &str = "install.admin_claim";
 
 /// 新建用户所需的字段。UID 由服务层生成并保证唯一。
 #[derive(Debug, Clone)]
@@ -125,6 +130,70 @@ impl Repo {
         self.find_user_by_email(&new.email)
             .await?
             .ok_or_else(|| crate::RepoError::NotFound(format!("新建用户 {}", new.email)))
+    }
+
+    /// 创建「第一个管理员」，并把整个操作与一次性抢占锁放在同一个事务里。
+    ///
+    /// 返回 `Ok(None)` 表示已经有另一个请求先抢到了安装管理员位置。这样即使
+    /// 运维点击创建的同时有人并发提交，也只会有第一个请求真正写入。
+    pub async fn create_first_admin(&self, new: &NewUser) -> Result<Option<User>> {
+        let mut tx = self.db.pool().begin().await?;
+        let claim = sqlx::query(&self.db.sql(
+            "INSERT INTO settings (name, value, encrypted, updated_at) VALUES (?, ?, 0, ?)",
+        ))
+        .bind(INSTALL_ADMIN_CLAIM)
+        .bind("1")
+        .bind(now_ts())
+        .execute(&mut *tx)
+        .await;
+        if let Err(err) = claim {
+            let err: RepoError = err.into();
+            if err.is_unique_violation() {
+                return Ok(None);
+            }
+            return Err(err);
+        }
+
+        let insert = "INSERT INTO users (uid, email, email_verified, password_hash, role, status, \
+                      quota_bytes, used_bytes, login_fail_count, created_at) \
+                      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?)";
+        let args = Args::new()
+            .text(&new.uid)
+            .text(&new.email)
+            .bool(new.email_verified)
+            .text(&new.password_hash)
+            .text(&new.role)
+            .text(&new.status)
+            .int(new.quota_bytes)
+            .text(now_ts());
+
+        let id = match self.db.dialect() {
+            Dialect::MySql => {
+                let affected = sqlx::query_with(&self.db.sql(insert), args.take())
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                if affected == 0 {
+                    return Err(RepoError::NotFound("插入用户未生效".into()));
+                }
+                let row = sqlx::query("SELECT LAST_INSERT_ID() AS id")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                get_i64(&row, "id")?
+            }
+            _ => {
+                let sql = format!("{} RETURNING id", insert);
+                let row = sqlx::query_with(&self.db.sql(&sql), args.take())
+                    .fetch_one(&mut *tx)
+                    .await?;
+                get_i64(&row, "id")?
+            }
+        };
+        tx.commit().await?;
+        self.find_user_by_id(id)
+            .await?
+            .map(Some)
+            .ok_or_else(|| RepoError::NotFound(format!("新建管理员 {id}")))
     }
 
     pub async fn update_user_password(&self, id: i64, password_hash: &str) -> Result<()> {

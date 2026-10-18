@@ -18,6 +18,7 @@ BASE="http://127.0.0.1:8099/api/v1"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIR="$ROOT/target/smoke"
 JAR="$DIR/cookies.txt"
+INSTALL_TOKEN="$(cat "$DIR/install.token" 2>/dev/null || true)"
 PASS=0
 FAIL=0
 
@@ -89,6 +90,7 @@ body() { cat > "$DIR/$1"; }
 post() {
   curl -s -b "$JAR" -c "$JAR" -X "$1" "$BASE$2" \
     -H 'Content-Type: application/json' -H "X-CSRF-Token: $(csrf)" \
+    -H "X-Install-Token: ${INSTALL_TOKEN}" \
     --data-binary "@$DIR/$3"
 }
 
@@ -97,9 +99,11 @@ req() {
   local method="$1" path="$2" data="${3:-}"
   if [ -n "$data" ]; then
     curl -s -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" \
-      -H 'Content-Type: application/json' -H "X-CSRF-Token: $(csrf)" --data "$data"
+      -H 'Content-Type: application/json' -H "X-CSRF-Token: $(csrf)" \
+      -H "X-Install-Token: ${INSTALL_TOKEN}" --data "$data"
   else
-    curl -s -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" -H "X-CSRF-Token: $(csrf)"
+    curl -s -b "$JAR" -c "$JAR" -X "$method" "$BASE$path" \
+      -H "X-CSRF-Token: $(csrf)" -H "X-Install-Token: ${INSTALL_TOKEN}"
   fi
 }
 

@@ -67,6 +67,14 @@ let refs: {
 } | null = null;
 
 /**
+ * 顶栏高度的观察器。
+ *
+ * `resize` 事件在移动端旋转、分屏或窄屏换行时不一定按最终布局触发；
+ * 直接盯顶栏自己的尺寸更稳，粘性侧栏与歌单抽屉都靠这个变量对齐。
+ */
+let navResizeObserver: ResizeObserver | null = null;
+
+/**
  * 当前路径命中的、最长的那条 match。
  *
  * 只有它对应的条目该高亮：`/account` 与 `/account/security` 是前缀关系，
@@ -459,6 +467,12 @@ export function mountShell(root: HTMLElement): HTMLElement {
   refs = { shell, navbar, sidebar, tabbar, outlet, banner };
   refreshBanner();
   syncNavHeight(navbar);
+  if (typeof ResizeObserver === "function") {
+    navResizeObserver = new ResizeObserver(() => {
+      if (refs) syncNavHeight(refs.navbar);
+    });
+    navResizeObserver.observe(navbar);
+  }
   mountMusicPanel();
   void preloadMusic();
   window.addEventListener("resize", () => {
@@ -494,6 +508,10 @@ export function refreshNav(): void {
   refs.navbar = navbar;
   // 换页时顶栏内容会变（搜索框、按钮），高度跟着量一次
   syncNavHeight(navbar);
+  if (navResizeObserver) {
+    navResizeObserver.disconnect();
+    navResizeObserver.observe(navbar);
+  }
 
   const tabbar = renderTabbar();
   refs.tabbar.replaceWith(tabbar);

@@ -35,7 +35,8 @@ const ENDPOINTS: Endpoint[] = [
   { method: "GET", path: "/api/v1/plaza", purpose: "广场搜索，公开端点不需要鉴权", scope: "公开" },
   { method: "GET", path: "/api/v1/random", purpose: "随机一张公开图片，302 跳直链", scope: "公开" },
   { method: "GET", path: "/api/v1/music/playlist", purpose: "背景音乐歌单", scope: "公开" },
-  { method: "GET", path: "/api/v1/music/lyrics", purpose: "歌词文本（API 代理或本地 .lrc）", scope: "公开" },
+  { method: "GET", path: "/api/v1/music/stream", purpose: "第三方音频/封面的同源代理，支持 Range", scope: "公开" },
+  { method: "GET", path: "/api/v1/music/lyrics", purpose: "歌词文本（API 代理由签名令牌）", scope: "公开" },
   { method: "GET", path: "/api/v1/music/file", purpose: "本地音乐文件，支持 Range", scope: "公开" },
   { method: "GET", path: "/api/v1/fs/tree", purpose: "数据目录递归查询", scope: "read" },
   { method: "GET", path: "/api/v1/queue/{job_id}", purpose: "查询队列任务状态", scope: "read" },
@@ -336,17 +337,20 @@ curl -X POST "${uploadUrl}" \\
         "div.card",
         null,
         h("h4", { text: "随机图" }),
-        h("div", { style: { fontSize: "12.5px", color: "var(--muted)", marginBottom: "8px" }, text: "每次请求都挑一张公开图片。可以直接当图片地址用（302 跳直链），也可以要 JSON 元数据。" }),
+        h("div", { style: { fontSize: "12.5px", color: "var(--muted)", marginBottom: "8px" }, text: "默认从全部公开图片里挑；支持相册/集合/标签/方向/尺寸/时间窗口/排除 id/count，带 Token 时可以只看自己的私有库。单张默认 302，count>1 或 format=json 返回 JSON。" }),
         codeBlock(
           null,
           `# 直接当 <img src> 用：每次刷新换一张
 ${base}/api/v1/random
 
-# 只要某个标签的
-${base}/api/v1/random?tag=风景
+# 只从某个公开相册里挑，一次三张横图
+curl "${base}/api/v1/random?album_id=7&count=3&orientation=landscape&format=json"
 
-# 要元数据（url / 尺寸 / 标签）就加 format=json
-curl "${base}/api/v1/random?format=json"`,
+# 自己的私有库（Token 需要 read）
+curl -H "Authorization: Bearer px_live_xxx"   "${base}/api/v1/random?scope=mine&visibility=private&format=json"
+
+# 命名集合 + 排除刚看过的图，适合轮播
+curl "${base}/api/v1/random?collection=壁纸&exclude_ids=1,2,3&seed=42&count=10&format=json"`,
         ),
         h("div.tip", { text: "302 而非 301：随机结果不该被缓存。挑不到图返回 404；关闭广场公开浏览后，未登录调用一并关闭。" }),
       ),

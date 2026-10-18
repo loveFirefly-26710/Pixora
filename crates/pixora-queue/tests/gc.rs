@@ -31,6 +31,8 @@ async fn test_state(dir: &tempfile::TempDir) -> Arc<AppState> {
         data_dir: data_dir.clone(),
         master_key: Some(pixora_crypto::MasterKey::generate().unwrap()),
         key_source: KeySource::Env,
+        install_token: "test-install-token".into(),
+        install_token_source: "test".into(),
         workers: 1,
         base_url: Some("http://127.0.0.1:8080".to_string()),
         trust_proxy: 0,

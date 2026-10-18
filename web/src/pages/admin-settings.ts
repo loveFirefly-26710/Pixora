@@ -111,8 +111,10 @@ interface SettingsDraft {
   plazaAutoRefresh: HTMLInputElement;
   /** 首页只展示这些公开相册；空 = 全部公开图片 */
   plazaAlbumIds: Set<number>;
+  plazaCollections: HTMLTextAreaElement;
   recycleRetention: HTMLInputElement;
   musicEnabled: boolean;
+  musicAutoplay: boolean;
   musicSource: HTMLSelectElement;
   musicApiUrl: HTMLInputElement;
   musicPlatform: HTMLSelectElement;
@@ -251,6 +253,15 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       max: "3600",
     }),
     plazaAlbumIds: new Set(data.site.plaza_album_ids ?? []),
+    plazaCollections: (() => {
+      const area = h("textarea.f", {
+        rows: "4",
+        style: { width: "100%", fontFamily: "var(--font-mono)", fontSize: "12px" },
+        placeholder: '{ "壁纸": [7, 9] }',
+      });
+      area.value = JSON.stringify(data.site.plaza_collections ?? {}, null, 2);
+      return area;
+    })(),
     recycleRetention: textInput({
       value: String(data.site.recycle_retention_days ?? 30),
       type: "number",
@@ -259,6 +270,7 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       max: "365",
     }),
     musicEnabled: data.music?.enabled ?? false,
+    musicAutoplay: data.music?.autoplay ?? false,
     musicSource: select(
       [
         { value: "api", label: "Meting API（推荐）" },
@@ -528,6 +540,13 @@ function plazaAlbumsCard(draft: SettingsDraft, data: AdminSettings): HTMLElement
     }),
     list,
     h("div.flexline", { style: { marginTop: "8px", alignItems: "center" } }, summary, h("span.spacer"), clear),
+    h("div.fld", { style: { marginTop: "14px" } },
+      h("label.f", { text: "命名集合（随机图 API 用）" }),
+      draft.plazaCollections,
+      h("div.tip", {
+        text: 'JSON 对象，键是集合名，值是相册 id 数组。例如 { "壁纸": [7, 9] }。随机图请求 /api/v1/random?collection=壁纸 时只从这些公开相册里挑。',
+      }),
+    ),
   );
 }
 
@@ -589,6 +608,14 @@ function musicCard(draft: SettingsDraft): HTMLElement {
     switchRow("启用背景音乐", "关闭后顶栏按钮与歌单侧栏一起隐藏", draft.musicEnabled, (next) => {
       draft.musicEnabled = next;
     }),
+    switchRow(
+      "打开首页自动播放",
+      "浏览器可能阻止自动播放；被拦下时点一下圆形主图即可开始",
+      draft.musicAutoplay,
+      (next) => {
+        draft.musicAutoplay = next;
+      },
+    ),
     field("音乐来源", draft.musicSource),
     apiBox,
     localBox,
@@ -1493,6 +1520,22 @@ async function save(
     toastError("音乐 API 地址要以 http:// 或 https:// 开头");
     return;
   }
+  let plazaCollections: Record<string, number[]> = {};
+  try {
+    const parsed = JSON.parse(draft.plazaCollections.value.trim() || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("not an object");
+    }
+    for (const [name, value] of Object.entries(parsed)) {
+      if (!Array.isArray(value) || value.some((id) => !Number.isInteger(id) || id <= 0)) {
+        throw new Error(name);
+      }
+      plazaCollections[name] = value as number[];
+    }
+  } catch {
+    toastError("命名集合要写成 JSON 对象，值是相册 id 数组，例如 { \"壁纸\": [7, 9] }");
+    return;
+  }
   const rateIssue = validateRateLimit(rateDraft);
   if (rateIssue) {
     toastError(rateIssue);
@@ -1526,6 +1569,7 @@ async function save(
       plaza_grid_columns: Number(draft.plazaColumns.value) || 3,
       plaza_auto_refresh_seconds: autoRefreshSeconds(draft.plazaAutoRefresh),
       plaza_album_ids: [...draft.plazaAlbumIds],
+      plaza_collections: plazaCollections,
       recycle_retention_days: Math.min(365, Math.max(0, intOf(draft.recycleRetention))),
       require_login_to_upload: draft.requireLogin,
       register_enabled: draft.registerEnabled,
@@ -1571,6 +1615,7 @@ async function save(
     },
     music: {
       enabled: draft.musicEnabled,
+      autoplay: draft.musicAutoplay,
       source: draft.musicSource.value,
       api_url: draft.musicApiUrl.value.trim(),
       platform: draft.musicPlatform.value,

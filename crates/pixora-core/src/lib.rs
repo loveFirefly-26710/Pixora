@@ -155,6 +155,15 @@ impl AppState {
         {
             tracing::warn!(error = %err, "内置一次性邮箱清单写入失败，反垃圾第一层暂不可用");
         }
+        // 未安装时公开的安装向导必须先拿到口令；否则谁先访问谁就能建管理员。
+        // 口令来自环境变量或数据目录里的 install.token，这里只在未安装时打印。
+        if !state.settings.is_installed().await.unwrap_or(false) {
+            tracing::warn!(
+                install_token = %state.config.install_token,
+                source = %state.config.install_token_source,
+                "实例尚未安装：访问 /#/install 需要安装口令；口令也会写入数据目录的 install.token"
+            );
+        }
         Ok(state)
     }
 

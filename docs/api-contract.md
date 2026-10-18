@@ -614,31 +614,67 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
 
 ### `GET /api/v1/random` — 公开
 
-随机取一张公开图片，用来做「随机壁纸 / 每日一图」这类接入。
+随机取一张或一批图片，用来做随机壁纸、轮播和每日一图。默认只从公开图片里挑；带 Token / 会话时可以把范围收到自己的库、私有相册或指定用户。
+
+**范围与权限**
 
 | 参数 | 说明 |
 |---|---|
-| `tag` | 只在某个标签里挑 |
-| `q` | 关键词过滤，规则同广场搜索 |
-| `uid` | 只看某个用户（纯数字 UID，例如 `1001`；不是 `u_1001`）的图片 |
-| `format` | 填 `json` 返回 JSON，省略则 302 跳转到图片直链 |
+| `scope` | `public`（默认，全部公开图）/ `plaza`（只按管理员的首页展示相册）/ `mine`（自己的库，需要登录或 Token）/ `user`（指定用户，需要登录；普通用户只能指定自己，管理员可看任意用户） |
+| `uid` | 指定用户 UID（纯数字，如 `1001`）。默认只取这个人的公开图；管理员配合 `scope=user` 可包含私有图 |
+| `album_id` | 指定相册 id。公开相册匿名可取；私有相册只允许相册主人或管理员 |
+| `album` | 相册 slug；需要同时给 `uid`，或先登录（按当前账号的相册解析） |
+| `collection` | 管理员在后台「命名集合」里定义的公开相册集合名，例如 `collection=壁纸`。集合只取公开图片 |
+| `visibility` | `public` / `private` / `any`。非公开范围需要 Token 且只能看自己的（管理员除外）；匿名传 `private` / `any` 返回 403 |
 
-当前这个端点只从**全部公开图片**里挑，没有按相册过滤的参数；`tag` / `q` / `uid` 之外的范围控制还没开放。
+**筛选与播放控制**
 
-默认行为是 **302 跳转**（不是 301：随机结果不该被浏览器永久缓存；响应带 `Cache-Control: no-store`）。
-`?format=json` 时返回：
+| 参数 | 说明 |
+|---|---|
+| `q` | 关键词，匹配标题、原始文件名与标签 |
+| `tag` | 单个精确标签（兼容旧参数） |
+| `tags` | 逗号分隔的标签列表，配合 `tag_mode` |
+| `tag_mode` | `all`（默认，全部命中）/ `any`（任一命中） |
+| `exclude_tag` | 排除带这个标签的图片 |
+| `exclude_ids` | 逗号分隔的图片 id，最多 100 个；轮播时用它避免连续重复 |
+| `min_width` / `min_height` | 最小像素宽/高 |
+| `orientation` | `landscape` / `portrait` / `square` |
+| `ratio` | 目标宽高比，例如 `16:9` 或 `1.78`，允许 3% 误差 |
+| `since` / `until` | RFC3339 时间范围 |
+| `window` | 只看最近多少小时上传的图，例如 `window=24h`；与 `since` 同时给时取更晚的那个 |
+| `weight` | 目前只支持 `recent`：从最近 500 张里做偏向新图的加权抽样 |
+| `seed` | 非 0 时用确定性伪随机顺序；同一个 seed 多次调用结果稳定，适合轮播 |
+| `count` | 返回张数，1–50，默认 1 |
+| `format` | 填 `json` 返回 JSON；单张且不填时 302 跳转到图片直链 |
+
+`count > 1` 时无论是否填 `format=json` 都返回数组：
 
 ```json
-{ "data": { "url": "https://…/images/a3f9….webp", "thumb_url": "https://…/images/a3f9….webp?thumb=2",
-            "id": 88214, "width": 1600, "height": 900, "size": 2411724,
-            "ext": "webp", "tags": ["风景"], "owner_uid": "1001" } }
+{ "data": [ { "url": "https://…/images/a3f9….webp", "thumb_url": "…",
+              "id": 88214, "width": 1600, "height": 900, "size": 2411724,
+              "ext": "webp", "tags": ["风景"], "owner_uid": "1001" } ],
+  "error": null }
 ```
 
-挑不到符合条件的图片时返回 `NOT_FOUND`。`plaza_public=false` 时端点对未登录调用关闭，与广场一致。
+单张 `format=json` 返回一个对象；不填 `format` 则 302。挑不到符合条件的图片时返回 `NOT_FOUND`。`plaza_public=false` 时端点对未登录调用关闭，与广场一致。
+
+示例：
+
+```bash
+# 指定公开相册，取 5 张横图
+curl "https://img.example.com/api/v1/random?album_id=7&count=5&orientation=landscape&format=json"
+
+# 自己的私有库（Token 至少要有 read 权限）
+curl -H "Authorization: Bearer px_live_xxx" \
+  "https://img.example.com/api/v1/random?scope=mine&visibility=private&count=1&format=json"
+
+# 轮播：排除刚看过的图，保证同一个 seed 的顺序稳定
+curl "https://img.example.com/api/v1/random?collection=壁纸&exclude_ids=1,2,3&seed=42&count=10&format=json"
+```
 
 ### 背景音乐（公开）
 
-管理员在「系统设置 → 背景音乐」里选择 Meting API 或服务器本地目录；关闭音乐后这些端点返回空歌单或 404。播放器只认站内地址，第三方 API 的请求与歌词读取都由服务端代理。
+管理员在「系统设置 → 背景音乐」里选择 Meting API 或服务器本地目录，并可以打开「首页自动播放」。播放器只认站内地址：第三方 API 的音频、封面和歌词都由服务端代理，既避开 CORS，也避免 HTTPS 页面加载 http 音频被浏览器拦截。歌单的播放模式（随机 / 列表循环 / 顺序）是前端用户偏好，默认随机。
 
 #### `GET /api/v1/music/playlist`
 
@@ -649,20 +685,24 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
   "tracks": [
     { "id": "101", "title": "夜航", "artist": "Meting Artist", "album": "Mock Album",
       "duration_seconds": 0,
-      "cover_url": "https://…/cover.jpg",
-      "audio_url": "https://…/audio.mp3",
-      "lyric_url": "/api/v1/music/lyrics?url=https%3A%2F%2F…",
+      "cover_url": "/api/v1/music/stream?token=…",
+      "audio_url": "/api/v1/music/stream?token=…",
+      "lyric_url": "/api/v1/music/lyrics?token=…",
       "lyrics": null }
   ],
   "message": null
 } }
 ```
 
-`source` 是 `api` 或 `local`。本地曲目的 `audio_url` / `cover_url` / `lyric_url` 都指向站内的 `/music/*`；API 曲目的 `audio_url` 是第三方直链，`lyric_url` 是站内歌词代理。配置不完整或第三方接口失败时 `tracks` 为空、`message` 给出原因。
+`source` 是 `api` 或 `local`。本地曲目的 `audio_url` / `cover_url` / `lyric_url` 都指向站内的 `/music/*`；API 曲目的媒体地址是服务端签发的同源代理令牌（12 小时有效），刷新歌单即可续期。配置不完整或第三方接口失败时 `tracks` 为空、`message` 给出原因。
 
-#### `GET /api/v1/music/lyrics?url=…` 或 `?path=…`
+#### `GET /api/v1/music/stream?token=…`
 
-返回 `text/plain; charset=utf-8` 的 LRC 文本。`url` 只接受与管理员配置的音乐 API 同源（协议 + 主机 + 端口）的地址；`path` 只接受本地音乐目录内的 `.lrc`。不存在时返回 404。
+第三方音频/封面的同源代理，支持 Range。令牌由服务端在生成歌单时签名，只能取管理员配置的 API 响应里出现过的 URL，不能当作任意 URL 代理使用。
+
+#### `GET /api/v1/music/lyrics?token=…` 或 `?path=…`
+
+返回 `text/plain; charset=utf-8` 的 LRC 文本。API 曲目用歌单里给出的签名令牌；本地曲目用 `path`，只接受本地音乐目录内的 `.lrc`。不存在时返回 404。
 
 #### `GET /api/v1/music/file?path=…`
 
@@ -997,7 +1037,8 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
             "plaza_public": true, "plaza_album_ids": [7, 9],
             "require_login_to_upload": true, "register_enabled": true,
             "email_domains": "example.com",
-            "plaza_grid_columns": 3, "plaza_auto_refresh_seconds": 5, "recycle_retention_days": 30 },
+            "plaza_grid_columns": 3, "plaza_auto_refresh_seconds": 5, "recycle_retention_days": 30,
+            "plaza_collections": { "壁纸": [7, 9] } },
   "upload": { "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
               "max_width": 0, "max_height": 0, "queue_depth": 500,
               "formats": ["jpg","png"], "format_options": [ { "ext": "jpg", "label": "JPG" } ] },
@@ -1018,15 +1059,16 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
   "appearance": { "background": null, "default_avatar": null },
   "plaza_albums": [ { "id": 7, "name": "旅行", "slug": "travel",
                       "owner_uid": "1001", "owner_email": "user@example.com", "image_count": 236 } ],
-  "music": { "enabled": true, "source": "api",
+  "music": { "enabled": true, "source": "api", "autoplay": false,
              "api_url": "https://api.i-meto.com/meting/api",
              "platform": "netease", "playlist_id": "2884035", "local_dir": "" }
 } }
 ```
 
 - `plaza_albums` 是全站正常账号的公开相册，供「首页展示相册」勾选；`site.plaza_album_ids` 里的 id 若已不是公开相册，广场查询会自动忽略。
+- `plaza_collections` 是命名相册集合（最多 50 个、每个最多 200 个 id），供随机图 API 的 `collection=` 使用；它只取公开图片。
 - `music.source=api` 时用 `api_url + platform + playlist_id` 拉歌单；`source=local` 时扫描 `local_dir`。`local_dir` 只在管理端下发，不会出现在 `/site` 里。
-- `PUT` 的 `music` 子对象接受 `enabled` / `source` / `api_url` / `platform` / `playlist_id` / `local_dir`。启用 API 时必须填 `api_url` 与 `playlist_id`；启用本地时必须填 `local_dir`。平台只接受 `netease` / `tencent` / `kugou` / `kuwo` / `migu` / `baidu` / `xiami` / `joox`。
+- `PUT` 的 `music` 子对象接受 `enabled` / `source` / `autoplay` / `api_url` / `platform` / `playlist_id` / `local_dir`。`autoplay` 只控制首页自动尝试播放，浏览器拦截时会等用户点一下主图。启用 API 时必须填 `api_url` 与 `playlist_id`；启用本地时必须填 `local_dir`。平台只接受 `netease` / `tencent` / `kugou` / `kuwo` / `migu` / `baidu` / `xiami` / `joox`。
 
 - `PUT /api/v1/admin/settings` ← 上述任意子对象（只写传入的键）
 
@@ -1056,6 +1098,8 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
 ## 9. 安装向导
 
 未安装时（`settings.install.completed` 非真）这组接口可用，安装完成后一律返回 404。
+
+**安装口令**：所有 `/install/*` 请求都要带 `X-Install-Token`（JSON 接口也接受 body 的 `token` 字段）。口令来自 `PIXORA_INSTALL_TOKEN`；未配置时首次启动自动生成，写入 `{data_dir}/install.token` 并打印到启动日志。缺失或错误返回 `FORBIDDEN`。创建第一个管理员带一次性抢占锁，并发请求只有一个能成功。
 
 - `GET /api/v1/install/status` → `{ "data": { "installed": false, "step": 2,
   "env": { "data_dir": "/data", "env_source": "PIXORA_DATA_DIR",

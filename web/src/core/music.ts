@@ -18,6 +18,8 @@ export interface LyricLine {
   text: string;
 }
 
+export type PlaybackMode = "shuffle" | "list" | "once";
+
 export interface MusicSnapshot {
   enabled: boolean;
   loading: boolean;
@@ -33,9 +35,22 @@ export interface MusicSnapshot {
   tab: "playlist" | "lyrics";
   lyrics: string;
   lyricTrackId: string | null;
+  mode: PlaybackMode;
 }
 
 type Listener = () => void;
+
+const MODE_KEY = "pixora-music-mode";
+
+function loadMode(): PlaybackMode {
+  try {
+    const saved = localStorage.getItem(MODE_KEY);
+    if (saved === "list" || saved === "once" || saved === "shuffle") return saved;
+  } catch {
+    /* 隐私模式读不到就按默认 */
+  }
+  return "shuffle";
+}
 
 const state: MusicSnapshot = {
   enabled: false,
@@ -51,12 +66,14 @@ const state: MusicSnapshot = {
   tab: "playlist",
   lyrics: "",
   lyricTrackId: null,
+  mode: loadMode(),
 };
 
 const listeners = new Set<Listener>();
 const lyricCache = new Map<string, string>();
 let audio: HTMLAudioElement | null = null;
 let loadingPromise: Promise<void> | null = null;
+let lastPlayErrorAt = 0;
 
 function notify(): void {
   for (const listener of listeners) listener();
@@ -163,7 +180,7 @@ async function loadPlaylist(): Promise<void> {
       state.tracks = data.tracks ?? [];
       state.message = data.message;
       state.loaded = true;
-      if (state.tracks.length > 0) prepareTrack(0);
+      if (state.tracks.length > 0) prepareTrack(initialIndex());
     } catch (err) {
       state.message = err instanceof Error ? err.message : "歌单加载失败";
       state.loaded = true;
@@ -174,6 +191,13 @@ async function loadPlaylist(): Promise<void> {
     }
   })();
   return loadingPromise;
+}
+
+function initialIndex(): number {
+  if (state.mode === "shuffle" && state.tracks.length > 1) {
+    return Math.floor(Math.random() * state.tracks.length);
+  }
+  return 0;
 }
 
 function prepareTrack(index: number): void {
@@ -240,7 +264,11 @@ async function startPlayback(): Promise<void> {
   try {
     await player.play();
   } catch {
-    toastError(new Error("浏览器没有开始播放，请再点一次播放按钮"));
+    const now = Date.now();
+    if (now - lastPlayErrorAt > 8000) {
+      lastPlayErrorAt = now;
+      toastError(new Error("播放没有开始，请再点一次"));
+    }
   }
 }
 
@@ -264,20 +292,57 @@ export function selectTrack(index: number): void {
   void startPlayback();
 }
 
+function randomIndex(): number {
+  if (state.tracks.length <= 1) return 0;
+  let next = state.index;
+  while (next === state.index) next = Math.floor(Math.random() * state.tracks.length);
+  return next;
+}
+
 export async function next(): Promise<void> {
-  if (state.tracks.length === 0) return;
   if (!state.loaded) await loadPlaylist();
   if (state.tracks.length === 0) return;
-  prepareTrack((state.index + 1) % state.tracks.length);
-  void startPlayback();
+  if (state.mode === "shuffle") {
+    prepareTrack(randomIndex());
+    void startPlayback();
+    return;
+  }
+  if (state.index + 1 < state.tracks.length) {
+    prepareTrack(state.index + 1);
+    void startPlayback();
+    return;
+  }
+  if (state.mode === "list") {
+    prepareTrack(0);
+    void startPlayback();
+    return;
+  }
+  // 顺序播放：到最后一首停下，保留在当前曲目
+  const player = ensureAudio();
+  player.pause();
+  player.currentTime = 0;
+  state.currentTime = 0;
+  state.playing = false;
+  notify();
 }
 
 export async function previous(): Promise<void> {
-  if (state.tracks.length === 0) return;
   if (!state.loaded) await loadPlaylist();
   if (state.tracks.length === 0) return;
-  prepareTrack((state.index - 1 + state.tracks.length) % state.tracks.length);
-  void startPlayback();
+  if (state.mode === "shuffle") {
+    prepareTrack(randomIndex());
+    void startPlayback();
+    return;
+  }
+  if (state.index > 0) {
+    prepareTrack(state.index - 1);
+    void startPlayback();
+    return;
+  }
+  if (state.mode === "list") {
+    prepareTrack(state.tracks.length - 1);
+    void startPlayback();
+  }
 }
 
 export function seekMusic(seconds: number): void {
@@ -313,6 +378,31 @@ export function closePanel(): void {
 export function setPanelTab(tab: "playlist" | "lyrics"): void {
   state.tab = tab;
   notify();
+}
+
+export function setMode(mode: PlaybackMode): void {
+  state.mode = mode;
+  try {
+    localStorage.setItem(MODE_KEY, mode);
+  } catch {
+    /* 存不下就只在本次生效 */
+  }
+  notify();
+}
+
+/** 首页自动播放：管理员开了才试；浏览器拦截就安静地等用户点主图。 */
+export async function autoPlayIfConfigured(): Promise<void> {
+  if (!configured()) return;
+  if (!getState().site?.music?.autoplay) return;
+  if (!state.loaded) await loadPlaylist();
+  if (state.tracks.length === 0 || state.playing) return;
+  const player = ensureAudio();
+  if (!player.src) prepareTrack(initialIndex());
+  try {
+    await player.play();
+  } catch {
+    /* 自动播放被浏览器拦下：不弹错，用户点一下即可 */
+  }
 }
 
 /** 解析 LRC：一行可有多个时间戳；`[ar:]` 这类元信息忽略。 */

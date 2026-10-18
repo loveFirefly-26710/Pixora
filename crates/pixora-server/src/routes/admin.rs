@@ -1794,6 +1794,10 @@ pub async fn settings_get(
         Ok(rows) => rows,
         Err(err) => return crate::http::error_response(err.into()),
     };
+    let plaza_collections = match state.settings.plaza_collections().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
 
     finish::<serde_json::Value>(Ok(serde_json::json!({
         "site": {
@@ -1801,6 +1805,7 @@ pub async fn settings_get(
             "base_url": site.base_url,
             "plaza_public": site.plaza_public,
             "plaza_album_ids": site.plaza_album_ids,
+            "plaza_collections": plaza_collections,
             "require_login_to_upload": site.require_login_to_upload,
             "register_enabled": site.register_enabled,
             // 注册开关可能被「容量触顶自动关闭」替管理员翻成关闭：把状态与口径
@@ -1909,6 +1914,7 @@ pub async fn settings_get(
             "platform": music.platform,
             "playlist_id": music.playlist_id,
             "local_dir": music.local_dir,
+            "autoplay": music.autoplay,
         },
     })))
 }
@@ -1956,7 +1962,35 @@ pub async fn settings_put(
                     .collect::<Vec<_>>()
                     .join(",")
             });
-        let writes: [(&str, Option<String>); 10] = [
+        let plaza_collections = site
+            .get("plaza_collections")
+            .and_then(|value| value.as_object())
+            .map(|object| {
+                let mut clean = serde_json::Map::new();
+                for (name, item) in object.iter().take(50) {
+                    let name = name.trim();
+                    if name.is_empty() || name.chars().count() > 64 {
+                        continue;
+                    }
+                    let ids: Vec<i64> = match item {
+                        serde_json::Value::Array(array) => array
+                            .iter()
+                            .filter_map(|id| id.as_i64())
+                            .filter(|id| *id > 0)
+                            .take(200)
+                            .collect(),
+                        serde_json::Value::String(text) => {
+                            pixora_core::settings::parse_id_list(Some(text))
+                        }
+                        _ => Vec::new(),
+                    };
+                    if !ids.is_empty() {
+                        clean.insert(name.to_string(), serde_json::json!(ids));
+                    }
+                }
+                serde_json::Value::Object(clean).to_string()
+            });
+        let writes: [(&str, Option<String>); 11] = [
             (keys::SITE_NAME, field_opt_str(&site, "name")),
             (keys::SITE_BASE_URL, field_opt_str(&site, "base_url")),
             (
@@ -1964,6 +1998,7 @@ pub async fn settings_put(
                 field_opt_bool(&site, "plaza_public").map(|value| value.to_string()),
             ),
             (keys::PLAZA_ALBUM_IDS, plaza_album_ids),
+            (keys::PLAZA_COLLECTIONS, plaza_collections),
             (
                 keys::UPLOAD_REQUIRE_LOGIN,
                 field_opt_bool(&site, "require_login_to_upload").map(|value| value.to_string()),
@@ -2076,10 +2111,14 @@ pub async fn settings_put(
         if local_dir.chars().count() > 1000 {
             return bad_request("音乐目录路径太长了");
         }
-        let writes: [(&str, Option<String>); 6] = [
+        let writes: [(&str, Option<String>); 7] = [
             (
                 keys::MUSIC_ENABLED,
                 field_opt_bool(&music, "enabled").map(|value| value.to_string()),
+            ),
+            (
+                keys::MUSIC_AUTOPLAY,
+                field_opt_bool(&music, "autoplay").map(|value| value.to_string()),
             ),
             (keys::MUSIC_SOURCE, Some(source.to_string())),
             (keys::MUSIC_API_URL, Some(api_url)),

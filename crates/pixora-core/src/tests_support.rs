@@ -42,6 +42,8 @@ pub fn test_config(dir: &TempDir) -> Config {
         data_dir: dir.path().to_path_buf(),
         master_key: Some(pixora_crypto::MasterKey::generate().expect("主密钥")),
         key_source: KeySource::Generated(dir.path().join("master.key")),
+            install_token: "test-install-token".into(),
+            install_token_source: "test".into(),
         workers: 1,
         base_url: None,
         trust_proxy: 0,

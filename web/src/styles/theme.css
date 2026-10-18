@@ -1355,6 +1355,36 @@ tr.pick td {
   overflow: hidden;
 }
 
+/* 歌单侧栏打开时，广场整页给右侧让出它的位置：
+   hero 和图片网格一起收窄，圆片顺着网格往画面中间滑，
+   既不会被侧栏压住，下面的图片也不会被盖掉。
+   让出的宽度按「内容区右缘到侧栏左缘」实算：.pad 自己居中，宽屏上它右侧
+   本来就有边距，固定扣一段面板宽度会把那份边距再扣一次，图片离侧栏就会
+   空出一大条。留 24px 的缝，刚好够放下圆角与阴影。 */
+.plaza-pad {
+  transition: padding-right .48s cubic-bezier(.22, .75, .24, 1);
+}
+
+@media (min-width: 768px) {
+  html.music-panel-open .plaza-pad {
+    padding-right: max(
+      24px,
+      calc(
+        var(--music-panel-gap) + var(--music-panel-w)
+        - max(0px, (100vw - var(--content-max)) / 2) + 24px
+      )
+    );
+  }
+}
+
+/* 窄一些的笔记本上，收窄后的文案列放不下 88px 的大标题；
+   开侧栏时把标题收一档，避免「萤火广场」折行。 */
+@media (min-width: 1024px) and (max-width: 1199px) {
+  html.music-panel-open .plaza-hero-title {
+    font-size: clamp(44px, 5.6vw, 64px);
+  }
+}
+
 .plaza-hero-copy {
   position: relative;
   z-index: 2;
@@ -1613,6 +1643,13 @@ tr.pick td {
   top: 7%;
   right: 0;
   animation: theme-float 8s ease-in-out infinite;
+  transition: opacity .25s ease, transform .25s ease;
+}
+
+.hero-chip.one.is-hidden {
+  opacity: 0;
+  transform: translateY(-6px);
+  pointer-events: none;
 }
 
 .hero-chip.two {
@@ -2565,6 +2602,24 @@ tr.pick td {
     padding: 10px 14px;
     gap: 12px;
   }
+
+  /* 平板也按单列摆：两列时圆片已经贴到右侧，侧栏一开就会压住。
+     单列之后圆片居中，开侧栏时再靠 hero 的右内边距整体左移。 */
+  .plaza-hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    padding-top: 18px;
+  }
+
+  .plaza-hero-visual {
+    justify-self: center;
+    max-width: 370px;
+    margin: 2px auto 8px;
+  }
+
+  .plaza-hero-title {
+    font-size: clamp(46px, 11vw, 72px);
+  }
 }
 
 @media (max-width: 900px) {
@@ -2582,22 +2637,6 @@ tr.pick td {
 
   .nav-actions {
     margin-left: auto;
-  }
-
-  .plaza-hero {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 14px;
-    padding-top: 18px;
-  }
-
-  .plaza-hero-visual {
-    justify-self: center;
-    max-width: 370px;
-    margin: 2px auto 8px;
-  }
-
-  .plaza-hero-title {
-    font-size: clamp(46px, 11vw, 72px);
   }
 
   .view-head {
@@ -2724,11 +2763,15 @@ tr.pick td {
   }
 
   .tile .meta .s {
+    gap: 4px;
     font-size: 9.5px;
   }
 
+  /* 广场要求每张图底部都能看到浏览量，手机上也不例外；
+     空间不够时让它换到第二行，而不是整条藏掉。 */
   .tile .meta .s .v {
-    display: none;
+    margin-left: auto;
+    font-size: 9px;
   }
 
   .card {
@@ -2956,15 +2999,23 @@ tr.pick td {
   height: 18px;
 }
 
+/* 手机底部抽屉的暗幕；宽屏不显示，侧栏本身就是浮在内容上的一列。 */
+.music-scrim {
+  display: none;
+}
+
 .music-panel {
   position: fixed;
   z-index: 60;
-  top: calc(var(--nav-h) + 12px);
-  right: 16px;
+  top: calc(var(--nav-h) + var(--music-panel-gap));
+  right: var(--music-panel-gap);
   display: flex;
   flex-direction: column;
-  width: 342px;
+  width: var(--music-panel-w);
+  height: min(480px, calc(100vh - var(--nav-h) - 28px));
+  height: min(480px, calc(100dvh - var(--nav-h) - 28px));
   max-height: calc(100vh - var(--nav-h) - 28px);
+  max-height: calc(100dvh - var(--nav-h) - 28px);
   border: 1px solid var(--border2);
   border-radius: 18px;
   background: var(--surface-solid);
@@ -2975,12 +3026,23 @@ tr.pick td {
   pointer-events: none;
   transform: translateX(calc(100% + 28px));
   transition: transform .3s cubic-bezier(.2, .7, .2, 1), opacity .22s ease;
+  overscroll-behavior: contain;
 }
 
 .music-panel.is-open {
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);
+}
+
+/* 平板宽度仍走右侧抽屉，但底部还有固定 tabbar：面板不能压到它。 */
+@media (min-width: 768px) and (max-width: 1024px) {
+  .music-panel {
+    height: min(480px, calc(100vh - var(--nav-h) - var(--tabbar-h) - var(--safe-bottom) - 24px));
+    height: min(480px, calc(100dvh - var(--nav-h) - var(--tabbar-h) - var(--safe-bottom) - 24px));
+    max-height: calc(100vh - var(--nav-h) - var(--tabbar-h) - var(--safe-bottom) - 24px);
+    max-height: calc(100dvh - var(--nav-h) - var(--tabbar-h) - var(--safe-bottom) - 24px);
+  }
 }
 
 .music-panel-head {
@@ -3092,6 +3154,8 @@ tr.pick td {
   overflow-y: auto;
   padding: 0 10px 8px;
   scrollbar-width: thin;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .music-empty {
@@ -3259,6 +3323,17 @@ tr.pick td {
   height: 16px;
 }
 
+.music-mode {
+  max-width: 92px;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
 .music-time {
   color: var(--muted);
   font-family: var(--font-mono);
@@ -3280,12 +3355,80 @@ tr.pick td {
     padding: 4px;
   }
 
+  /* 手机不再把侧栏钉在顶栏下面：改成贴着底栏的抽屉，
+     上方留出一段页面，关闭按钮和列表都在拇指够得着的位置。 */
   .music-panel {
-    top: calc(var(--nav-h) + 8px);
-    right: 8px;
-    left: 8px;
-    width: auto;
-    max-height: calc(100vh - var(--nav-h) - 88px);
+    top: auto;
+    right: auto;
+    bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 8px);
+    left: 50%;
+    width: min(560px, calc(100vw - 16px));
+    height: min(560px, 68vh, calc(100vh - var(--nav-h) - var(--tabbar-h) - 24px));
+    height: min(560px, 68dvh, calc(100dvh - var(--nav-h) - var(--tabbar-h) - 24px));
+    max-height: none;
+    border-radius: 20px;
+    transform: translate(-50%, calc(100% + 80px));
+    transition: transform .36s cubic-bezier(.18, .82, .22, 1), opacity .24s ease;
+  }
+
+  .music-panel.is-open {
+    transform: translate(-50%, 0);
+  }
+
+  .music-panel-head {
+    padding: 15px 16px 10px;
+  }
+
+  .music-cover {
+    width: 46px;
+    height: 46px;
+  }
+
+  .music-close {
+    width: 36px;
+    height: 36px;
+    font-size: 21px;
+  }
+
+  .music-tabs {
+    padding: 0 16px 11px;
+  }
+
+  .music-tabs button {
+    min-height: 38px;
+    font-size: 12.5px;
+  }
+
+  .music-panel-body {
+    padding: 0 12px 8px;
+  }
+
+  .music-row {
+    min-height: 48px;
+    padding: 8px 10px;
+  }
+
+  .music-panel-foot {
+    padding: 10px 16px 14px;
+  }
+
+  .music-progress {
+    height: 24px;
+  }
+
+  .music-panel-controls button {
+    width: 36px;
+    height: 36px;
+  }
+
+  .music-mode {
+    min-height: 30px;
+    max-width: 108px;
+    font-size: 12px;
+  }
+
+  .music-time {
+    font-size: 11px;
   }
 
   .music-lyrics {
@@ -3293,7 +3436,65 @@ tr.pick td {
   }
 }
 
+/* 手机抽屉，以及横屏手机这类很矮的窗口，都需要暗幕与背景滚动锁定。 */
+@media (max-width: 767px), (max-width: 1024px) and (max-height: 520px) {
+  html.music-panel-open,
+  html.music-panel-open body {
+    overflow: hidden;
+  }
 
+  .music-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(2, 9, 8, .48);
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .26s ease;
+  }
+
+  .music-scrim.is-open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* 横屏手机/矮窗口：抽屉占满顶栏以下的空间，别让固定的底栏把播放控件挤掉。 */
+@media (max-width: 1024px) and (max-height: 520px) {
+  .music-panel {
+    top: calc(var(--nav-h) + 8px);
+    right: 8px;
+    left: 8px;
+    bottom: calc(8px + var(--safe-bottom));
+    width: auto;
+    height: auto;
+    max-height: none;
+    border-radius: 16px;
+    transform: translateY(calc(100% + 24px));
+    transition: transform .32s cubic-bezier(.18, .82, .22, 1), opacity .22s ease;
+  }
+
+  .music-panel.is-open {
+    transform: translateY(0);
+  }
+
+  .music-panel-body {
+    min-height: 0;
+  }
+
+  .music-close,
+  .music-panel-controls button {
+    width: 34px;
+    height: 34px;
+  }
+
+  .music-tabs button {
+    min-height: 36px;
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .ambient-aurora,
@@ -3312,7 +3513,9 @@ tr.pick td {
     animation: none !important;
   }
 
-  .music-panel {
+  .music-panel,
+  .music-scrim,
+  .plaza-pad {
     transition: none;
   }
 }

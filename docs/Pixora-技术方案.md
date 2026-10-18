@@ -450,7 +450,7 @@ https://img.example.com/images/a3f9c1b8...e7.webp
 | PATCH | `/api/v1/albums/{id}` | 改相册名称、可见性、排序 | write |
 | DELETE | `/api/v1/albums/{id}` | 删除相册 | write |
 | GET | `/api/v1/plaza` | 广场搜索，公开端点 | 公开 |
-| GET | `/api/v1/random` | 随机一张公开图片：302 跳直链，`?format=json` 返回 JSON | 公开 |
+| GET | `/api/v1/random` | 随机一张/一批图：支持相册、集合、标签、方向/尺寸、时间窗口、count、seed、exclude_ids；带 Token 可看自己的私有库 | 公开 |
 | GET | `/api/v1/music/playlist` | 背景音乐歌单（Meting API 或本地目录） | 公开 |
 | GET | `/api/v1/music/lyrics` | 歌词文本；第三方歌词由服务端代理 | 公开 |
 | GET | `/api/v1/music/file` | 本地音乐文件，支持 Range | 公开 |
