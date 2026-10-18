@@ -1456,15 +1456,22 @@ impl Repo {
         Ok(())
     }
 
-    /// 浏览一次。广场的「最热」用得上。
-    pub async fn increment_views(&self, id: i64) -> Result<()> {
+    /// 浏览一次，返回自增后的浏览量。广场的「最热」用得上。
+    ///
+    /// PostgreSQL / SQLite 本可以用 `RETURNING`，但 MySQL 不支持同一写法；
+    /// 这里统一先更新再读一次，两条语句都不重，读到的也是并发累加后的真实值。
+    pub async fn increment_views(&self, id: i64) -> Result<i64> {
         self.db
             .execute(
                 "UPDATE images SET views = views + 1 WHERE id = ?",
                 Args::new().int(id),
             )
             .await?;
-        Ok(())
+        let row = self
+            .db
+            .fetch_one("SELECT views FROM images WHERE id = ?", Args::new().int(id))
+            .await?;
+        get_i64(&row, "views")
     }
 
     /// 随机取一张图。给随机图 API 用：博客头图、桌面壁纸这类场景。

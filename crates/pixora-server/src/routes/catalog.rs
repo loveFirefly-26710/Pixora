@@ -255,6 +255,41 @@ pub async fn image_detail(
     finish::<pixora_core::images::ImageDetailPayload>(state.image_detail(&viewer, image_id).await)
 }
 
+/// `POST /api/v1/images/{id}/view`：广场点击图片时记一次浏览。
+///
+/// 只返回最新浏览量，不组装详情与相邻缩略图；写请求照常过 CSRF 双提交，
+/// 匿名访客用 `/site` 下发的那枚令牌即可。
+pub async fn image_view(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(image_id): Path<i64>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match crate::http::authenticate_optional(&state, &headers, rectx.ip.as_deref()).await {
+        Ok(auth) => auth,
+        Err(err) => return crate::http::error_response(err),
+    };
+    if let Some(auth) = auth.as_ref() {
+        if let Err(resp) = super::ensure_scope(auth, "read") {
+            return resp;
+        }
+    }
+    if let Err(err) = crate::http::verify_csrf(auth.as_ref(), &headers, &method) {
+        return crate::http::error_response(err);
+    }
+    let viewer = viewer_for(auth.as_ref(), query.contains_key("uid"));
+    match state.record_view(&viewer, image_id).await {
+        Ok(views) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "views": views,
+            "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+        }))),
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
 /// `PATCH /api/v1/images/{id}`。
 ///
 /// `album_id` 的三态是这里最容易做错的地方：

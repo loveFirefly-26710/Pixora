@@ -637,6 +637,7 @@ mod tests {
             base_url: Some("https://img.example.com".into()),
             trust_proxy: 1,
             web_dir: None,
+            music_dir: None,
             accel_prefix: None,
             secure_cookies: false,
             samesite: crate::config::SameSite::Lax,

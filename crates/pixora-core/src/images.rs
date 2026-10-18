@@ -238,10 +238,10 @@ impl AppState {
         // 公开图就算一次浏览：不按「属主 / 访客」过滤——自托管的广场上
         // 站长自己点开也是真实浏览，而唯一用户往往就是站长，过滤掉的话
         // 计数器永远停在 0。私有图不计数（只有属主与管理员看得到）。
-        // 失败不影响返回；成功了就把本地副本加一，响应里才是加过之后的数
+        // 失败不影响返回；成功了就用自增后的真实值，响应里才是准确的数
         if view.is_public() {
             match self.repo.increment_views(id).await {
-                Ok(()) => view.views += 1,
+                Ok(views) => view.views = views,
                 Err(err) => tracing::debug!(error = %err, "浏览量累加失败"),
             }
         }
@@ -296,6 +296,28 @@ impl AppState {
             album,
             siblings: sibling_views,
         })
+    }
+
+    /// 记一次浏览，只做权限判断与自增，返回最新浏览量。
+    ///
+    /// 广场点击图片时走这里，不再为了拿一个数字去组装整份详情（含相邻缩略图）。
+    /// 公开图每次都加一，属主自己看也算；私有图只有属主/管理员能看，但不计数。
+    pub async fn record_view(&self, viewer: &Viewer, id: i64) -> Result<i64> {
+        let view = self
+            .repo
+            .find_image_view(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("图片"))?;
+        let is_owner = viewer.id() == Some(view.owner_id);
+        if !is_owner && !viewer.is_admin() && !view.is_public() {
+            return Err(AppError::not_found("图片"));
+        }
+        if view.is_public() {
+            let views = self.repo.increment_views(id).await?;
+            Ok(views)
+        } else {
+            Ok(view.views)
+        }
     }
 
     /// 修改单张：标题、可见性、所属相册、标签。

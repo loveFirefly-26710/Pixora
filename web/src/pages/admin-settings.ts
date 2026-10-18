@@ -90,6 +90,12 @@ const SECURITY_OPTIONS = [
   { value: "plain", label: "不加密（仅内网自建）" },
 ];
 
+/** Firefly 常用的两条公共备用 Meting 源，一键追加，省得手敲。 */
+const COMMON_MUSIC_BACKUPS = [
+  "https://api.injahow.cn/meting/?server=:server&type=:type&id=:id",
+  "https://api.moeyao.cn/meting/?server=:server&type=:type&id=:id",
+];
+
 /** Meting 支持的平台名。与 core::music::PLATFORMS 保持一致。 */
 const MUSIC_PLATFORMS = [
   { value: "netease", label: "网易云音乐" },
@@ -102,6 +108,12 @@ const MUSIC_PLATFORMS = [
   { value: "joox", label: "JOOX" },
 ];
 
+/** 一个命名集合：名字 + 勾选的相册 id。 */
+interface PlazaCollectionDraft {
+  name: string;
+  albumIds: Set<number>;
+}
+
 /** 页面上可编辑的值集中在这一份里。 */
 interface SettingsDraft {
   siteName: HTMLInputElement;
@@ -111,12 +123,18 @@ interface SettingsDraft {
   plazaAutoRefresh: HTMLInputElement;
   /** 首页只展示这些公开相册；空 = 全部公开图片 */
   plazaAlbumIds: Set<number>;
-  plazaCollections: HTMLTextAreaElement;
+  /** 命名集合：每个集合从公开相册里勾选 */
+  plazaCollections: PlazaCollectionDraft[];
   recycleRetention: HTMLInputElement;
   musicEnabled: boolean;
   musicAutoplay: boolean;
+  /** 新访客默认音量，0～1 */
+  musicDefaultVolume: HTMLInputElement;
   musicSource: HTMLSelectElement;
-  musicApiUrl: HTMLInputElement;
+  /** 主 API 在前，备用 API 按顺序排在后面 */
+  musicApiUrls: string[];
+  /** 环境变量指定的容器内目录；有值时本地目录输入框只读 */
+  musicLocalDirEnv: string | null;
   musicPlatform: HTMLSelectElement;
   musicPlaylistId: HTMLInputElement;
   musicLocalDir: HTMLInputElement;
@@ -253,15 +271,9 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       max: "3600",
     }),
     plazaAlbumIds: new Set(data.site.plaza_album_ids ?? []),
-    plazaCollections: (() => {
-      const area = h("textarea.f", {
-        rows: "4",
-        style: { width: "100%", fontFamily: "var(--font-mono)", fontSize: "12px" },
-        placeholder: '{ "壁纸": [7, 9] }',
-      });
-      area.value = JSON.stringify(data.site.plaza_collections ?? {}, null, 2);
-      return area;
-    })(),
+    plazaCollections: Object.entries(data.site.plaza_collections ?? {})
+      .map(([name, ids]) => ({ name, albumIds: new Set(ids) }))
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN")),
     recycleRetention: textInput({
       value: String(data.site.recycle_retention_days ?? 30),
       type: "number",
@@ -271,6 +283,18 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     }),
     musicEnabled: data.music?.enabled ?? false,
     musicAutoplay: data.music?.autoplay ?? false,
+    musicDefaultVolume: (() => {
+      const input = h("input.music-default-volume", {
+        type: "range",
+        min: "0",
+        max: "1",
+        step: "0.01",
+        value: String(Math.max(0, Math.min(1, data.music?.default_volume ?? 0.3))),
+        "aria-label": "默认音量",
+      });
+      input.id = "music-default-volume";
+      return input;
+    })(),
     musicSource: select(
       [
         { value: "api", label: "Meting API（推荐）" },
@@ -278,11 +302,13 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       ],
       data.music?.source === "local" ? "local" : "api",
     ),
-    musicApiUrl: textInput({
-      value: data.music?.api_url ?? "https://api.i-meto.com/meting/api",
-      mono: true,
-      placeholder: "https://your-meting.example.com/api",
-    }),
+    musicApiUrls: (() => {
+      const urls = (data.music?.api_urls ?? [])
+        .map((url) => url.trim())
+        .filter((url) => url.length > 0);
+      return urls.length > 0 ? urls : [data.music?.api_url ?? ""];
+    })(),
+    musicLocalDirEnv: data.music?.local_dir_env ?? null,
     musicPlatform: select(MUSIC_PLATFORMS, data.music?.platform ?? "netease"),
     musicPlaylistId: textInput({
       value: data.music?.playlist_id ?? "",
@@ -542,31 +568,280 @@ function plazaAlbumsCard(draft: SettingsDraft, data: AdminSettings): HTMLElement
     h("div.flexline", { style: { marginTop: "8px", alignItems: "center" } }, summary, h("span.spacer"), clear),
     h("div.fld", { style: { marginTop: "14px" } },
       h("label.f", { text: "命名集合（随机图 API 用）" }),
-      draft.plazaCollections,
+      plazaCollectionsEditor(draft, albums),
       h("div.tip", {
-        text: 'JSON 对象，键是集合名，值是相册 id 数组。例如 { "壁纸": [7, 9] }。随机图请求 /api/v1/random?collection=壁纸 时只从这些公开相册里挑。',
+        text: "每个集合勾选若干公开相册；随机图请求 /api/v1/random?collection=集合名 时只从这些相册里挑。",
       }),
     ),
   );
 }
 
+/** 命名集合编辑器：每个集合从公开相册里勾选，不再手写 JSON。 */
+function plazaCollectionsEditor(
+  draft: SettingsDraft,
+  albums: NonNullable<AdminSettings["plaza_albums"]>,
+): HTMLElement {
+  const box = h("div.plaza-collection-list");
+  const knownIds = new Set(albums.map((album) => album.id));
+  let focusIndex: number | null = null;
+
+  const nextName = (): string => {
+    const names = new Set(draft.plazaCollections.map((item) => item.name.trim()));
+    let n = 1;
+    while (names.has(`集合 ${n}`)) n += 1;
+    return `集合 ${n}`;
+  };
+
+  const add = h("button.btn.sm", { type: "button", text: "新增集合" });
+  add.addEventListener("click", () => {
+    if (draft.plazaCollections.length >= 50) {
+      toastError("命名集合最多 50 个");
+      return;
+    }
+    draft.plazaCollections.push({ name: nextName(), albumIds: new Set() });
+    focusIndex = draft.plazaCollections.length - 1;
+    paint();
+  });
+
+  function paint(): void {
+    mount(
+      box,
+      ...draft.plazaCollections.map((collection, index) => collectionBlock(collection, index)),
+      draft.plazaCollections.length === 0
+        ? h("div.tip", {
+            text: "还没有命名集合。新增一个并勾选相册，随机图就能按集合取图。",
+          })
+        : null,
+      add,
+    );
+    add.disabled = draft.plazaCollections.length >= 50;
+    add.title = add.disabled ? "最多 50 个命名集合" : "";
+    if (focusIndex !== null) {
+      const input = box.querySelectorAll<HTMLInputElement>(".plaza-collection-name")[focusIndex];
+      focusIndex = null;
+      input?.focus();
+      input?.select();
+    }
+  }
+
+  function collectionBlock(collection: PlazaCollectionDraft, index: number): HTMLElement {
+    const count = h("span.plaza-collection-count");
+    const updateCount = (): void => {
+      count.textContent = `已选 ${collection.albumIds.size} 个`;
+    };
+    updateCount();
+
+    const name = textInput({ value: collection.name, placeholder: "例如：壁纸" });
+    name.classList.add("plaza-collection-name");
+    name.setAttribute("aria-label", `第 ${index + 1} 个命名集合的名称`);
+    name.maxLength = 64;
+    name.addEventListener("input", () => {
+      collection.name = name.value;
+    });
+    name.addEventListener("blur", () => {
+      collection.name = name.value.trim();
+      name.value = collection.name;
+    });
+
+    const grid = h("div.plaza-collection-grid");
+    if (albums.length === 0) {
+      grid.append(h("div.tip", { text: "目前没有公开相册；设为公开后再回来勾选。" }));
+    } else {
+      for (const album of albums) {
+        const check = h("input", {
+          type: "checkbox",
+          checked: collection.albumIds.has(album.id),
+          "aria-label": `在集合中勾选相册 ${album.name}`,
+        });
+        check.addEventListener("change", () => {
+          if (check.checked) collection.albumIds.add(album.id);
+          else collection.albumIds.delete(album.id);
+          updateCount();
+        });
+        grid.append(
+          h(
+            "label.plaza-collection-album",
+            null,
+            check,
+            h(
+              "span",
+              null,
+              h("b", { text: album.name, title: album.name }),
+              h("small", {
+                text: `${album.owner_email} · ${album.image_count} 张`,
+                title: `${album.owner_email} · u_${album.owner_uid}`,
+              }),
+            ),
+          ),
+        );
+      }
+    }
+
+    // 集合里可能还留着后来改成私有或已删除的相册 id。界面不把它们画成
+    // 勾选项，但保存时保留：相册重新公开后又能取到；也可以在这里清掉。
+    const stale = [...collection.albumIds].filter((id) => !knownIds.has(id));
+    let staleNote: HTMLElement | null = null;
+    if (stale.length > 0) {
+      const clearStale = h("button.btn.sm.gho", {
+        type: "button",
+        text: "清除失效引用",
+      });
+      clearStale.addEventListener("click", () => {
+        for (const id of stale) collection.albumIds.delete(id);
+        staleNote?.remove();
+        staleNote = null;
+        updateCount();
+      });
+      staleNote = h(
+        "div.tip.plaza-collection-stale",
+        null,
+        h("span", {
+          text: `另有 ${stale.length} 个相册已不在公开列表里；保存时会保留这些引用。`,
+        }),
+        clearStale,
+      );
+    }
+
+    const remove = h("button.btn.sm.dgr", { type: "button", text: "删除集合" });
+    remove.addEventListener("click", async () => {
+      const label = collection.name.trim() || `集合 ${index + 1}`;
+      if (collection.albumIds.size > 0) {
+        const ok = await confirmDialog({
+          title: "删除命名集合",
+          message: `删除「${label}」？点「保存设置」后生效。`,
+          confirmText: "删除",
+          danger: true,
+        });
+        if (!ok) return;
+      }
+      draft.plazaCollections.splice(index, 1);
+      paint();
+    });
+
+    return h(
+      "div.plaza-collection",
+      null,
+      h(
+        "div.plaza-collection-head",
+        null,
+        h("span.plaza-collection-label", { text: "集合名称" }),
+        name,
+        count,
+        remove,
+      ),
+      h("div.tip", { text: "勾选这个集合包含的公开相册：" }),
+      grid,
+      staleNote,
+    );
+  }
+
+  paint();
+  return box;
+}
+
 /** 背景音乐：优先 Meting API，也可以扫描服务器本地目录。 */
 function musicCard(draft: SettingsDraft): HTMLElement {
+  const apiRows = h("div.music-api-list");
+  let focusRow: number | null = null;
+  const paintApiRows = (): void => {
+    if (draft.musicApiUrls.length === 0) draft.musicApiUrls.push("");
+    const urls = draft.musicApiUrls;
+    const rows = urls.map((url, index) => {
+      const input = textInput({
+        value: url,
+        mono: true,
+        placeholder:
+          index === 0
+            ? "主 API，例如 https://music.example.com/api"
+            : "备用 API，按顺序尝试",
+      });
+      input.setAttribute(
+        "aria-label",
+        index === 0 ? "主 Meting API 地址" : `备用 Meting API 地址 ${index}`,
+      );
+      input.addEventListener("input", () => {
+        draft.musicApiUrls[index] = input.value;
+      });
+      const remove = h("button.btn.sm.gho.music-api-del", {
+        type: "button",
+        text: "删除",
+        title: index === 0 ? "删除后下一条成为主 API" : "删除这条备用 API",
+      });
+      remove.disabled = urls.length <= 1;
+      remove.addEventListener("click", () => {
+        if (draft.musicApiUrls.length <= 1) return;
+        draft.musicApiUrls.splice(index, 1);
+        paintApiRows();
+      });
+      return h(
+        "div.music-api-row",
+        null,
+        h("span.music-api-role", { text: index === 0 ? "主 API" : `备用 ${index}` }),
+        input,
+        remove,
+      );
+    });
+    apiRows.replaceChildren(...rows);
+    if (focusRow !== null) {
+      apiRows.querySelectorAll<HTMLInputElement>("input")[focusRow]?.focus();
+      focusRow = null;
+    }
+  };
+  paintApiRows();
+
+  const addApi = h("button.btn.sm", { type: "button", text: "添加备用 API" });
+  addApi.addEventListener("click", () => {
+    if (draft.musicApiUrls.length >= 10) {
+      toastError(new Error("音乐 API 最多 10 个"));
+      return;
+    }
+    draft.musicApiUrls.push("");
+    focusRow = draft.musicApiUrls.length - 1;
+    paintApiRows();
+  });
+  const addCommon = h("button.btn.sm.gho", { type: "button", text: "填入常用备用源" });
+  addCommon.addEventListener("click", () => {
+    for (const url of COMMON_MUSIC_BACKUPS) {
+      if (draft.musicApiUrls.some((item) => item.trim() === url)) continue;
+      if (draft.musicApiUrls.length >= 10) {
+        toastError(new Error("音乐 API 最多 10 个"));
+        break;
+      }
+      draft.musicApiUrls.push(url);
+    }
+    paintApiRows();
+  });
+
   const apiBox = h(
     "div",
     null,
-    field("API 地址", draft.musicApiUrl, "Meting 风格接口，例如 https://api.i-meto.com/meting/api"),
+    h("label.f", { text: "Meting API 列表（第一个是主 API）" }),
+    apiRows,
+    h("div.music-api-actions", null, addApi, addCommon),
+    h("div.tip", {
+      text: "主 API 失败或返回空歌单时，会按顺序尝试后面的备用 API。地址可带 :server / :type / :id / :auth / :r 占位符，服务端会替换。",
+    }),
     field("音乐平台", draft.musicPlatform),
     field("歌单 ID", draft.musicPlaylistId, "填歌单页地址里的 ID；不同平台的 ID 不通用。"),
   );
+
+  const localEnv = draft.musicLocalDirEnv;
+  if (localEnv) draft.musicLocalDir.disabled = true;
   const localBox = h(
     "div",
     null,
     field(
       "本地音乐目录",
       draft.musicLocalDir,
-      "服务器上的绝对路径。支持 mp3 / m4a / aac / flac / ogg / opus / wav / webm；同名 .lrc 与 cover 图会一起读取。",
+      localEnv
+        ? `已由环境变量 PIXORA_MUSIC_DIR 指定为 ${localEnv}，这里的输入会被忽略；Docker 里这个值应是容器内挂载点。`
+        : "服务器上的绝对路径。支持 mp3 / m4a / aac / flac / ogg / opus / wav / webm；同名 .lrc 与 cover 图会一起读取。",
     ),
+    h("div.tip", {
+      text: localEnv
+        ? "修改容器内路径需要调整 PIXORA_MUSIC_DIR 并重建容器；界面上改目录不会生效。"
+        : "Docker 部署推荐设置 PIXORA_MUSIC_DIR=/music，并把宿主机音乐目录挂载到 /music；设置后本输入框会被忽略。",
+    }),
   );
   const paint = (): void => {
     const local = draft.musicSource.value === "local";
@@ -576,6 +851,28 @@ function musicCard(draft: SettingsDraft): HTMLElement {
   draft.musicSource.addEventListener("change", paint);
   paint();
 
+  const defaultVolumeValue = h("b.music-default-volume-value", {
+    text: `${Math.round(Number(draft.musicDefaultVolume.value) * 100)}%`,
+  });
+  draft.musicDefaultVolume.addEventListener("input", () => {
+    defaultVolumeValue.textContent = `${Math.round(Number(draft.musicDefaultVolume.value) * 100)}%`;
+  });
+  const defaultVolumeBox = h(
+    "div.fld",
+    null,
+    h(
+      "div.flexline",
+      null,
+      h("label.f", { for: "music-default-volume", text: "默认音量" }),
+      h("span.spacer"),
+      defaultVolumeValue,
+    ),
+    draft.musicDefaultVolume,
+    h("div.tip", {
+      text: "新访客第一次播放时使用；用户拖过音量后以浏览器本地记忆为准。0 表示默认静音。",
+    }),
+  );
+
   const result = h("div", { style: { marginTop: "8px" } });
   const test = h("button.btn.sm", {
     type: "button",
@@ -584,17 +881,26 @@ function musicCard(draft: SettingsDraft): HTMLElement {
   test.addEventListener("click", async () => {
     test.disabled = true;
     test.textContent = "读取中…";
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 15000);
     try {
-      const data = await request<MusicPlaylist>("/music/playlist");
+      const data = await request<MusicPlaylist>("/music/playlist", {
+        signal: controller.signal,
+      });
       result.replaceChildren(
         data.tracks.length > 0
           ? qtip("ok", `歌单可用：${data.tracks.length} 首`, data.tracks.slice(0, 3).map((track) => track.title).join(" · "))
           : qtip("warn", "歌单为空", data.message ?? "还没有可以播放的曲目。"),
       );
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : String(err);
+      const message = controller.signal.aborted
+        ? "读取超时（15 秒）：音乐 API 或备用源不可达，检查地址与网络后再试。"
+        : err instanceof ApiError
+          ? err.message
+          : String(err);
       result.replaceChildren(qtip("err", "读取失败", message));
     } finally {
+      window.clearTimeout(timer);
       test.disabled = false;
       test.textContent = "测试已保存的歌单";
     }
@@ -610,7 +916,7 @@ function musicCard(draft: SettingsDraft): HTMLElement {
     }),
     switchRow(
       "打开首页自动播放",
-      "浏览器可能阻止自动播放；被拦下时点一下圆形主图即可开始",
+      "浏览器可能拦截有声自动播放；被拦下后会在第一次点击、触摸、按键、滚轮、滚动或鼠标移动时尝试开始。多数浏览器只认点击/触摸/按键，点播放器按钮则按按钮自己的动作处理。",
       draft.musicAutoplay,
       (next) => {
         draft.musicAutoplay = next;
@@ -619,6 +925,7 @@ function musicCard(draft: SettingsDraft): HTMLElement {
     field("音乐来源", draft.musicSource),
     apiBox,
     localBox,
+    defaultVolumeBox,
     h("div.flexline", { style: { marginTop: "6px" } }, test),
     result,
   );
@@ -1499,41 +1806,72 @@ async function save(
     toastError("像素上限填不对：单位是万，填 8000 表示 8000 万像素");
     return;
   }
+  const apiUrls = draft.musicApiUrls
+    .map((url) => url.trim())
+    .filter((url) => url.length > 0);
+  const defaultVolume = Math.min(
+    1,
+    Math.max(0, Number(draft.musicDefaultVolume.value) || 0),
+  );
   if (draft.musicEnabled) {
-    if (draft.musicSource.value === "local" && !draft.musicLocalDir.value.trim()) {
-      toastError("启用本地音乐时，要填写服务器上的音乐目录");
+    if (
+      draft.musicSource.value === "local" &&
+      !draft.musicLocalDir.value.trim() &&
+      !draft.musicLocalDirEnv
+    ) {
+      toastError("启用本地音乐时，要填写服务器上的音乐目录，或设置 PIXORA_MUSIC_DIR");
       return;
     }
     if (
       draft.musicSource.value === "api" &&
-      (!draft.musicApiUrl.value.trim() || !draft.musicPlaylistId.value.trim())
+      (apiUrls.length === 0 || !draft.musicPlaylistId.value.trim())
     ) {
-      toastError("启用 API 音乐时，API 地址与歌单 ID 都要填");
+      toastError("启用 API 音乐时，至少填一个 API 地址和歌单 ID");
       return;
     }
   }
-  if (
-    draft.musicSource.value === "api" &&
-    draft.musicApiUrl.value.trim() &&
-    !/^https?:\/\//i.test(draft.musicApiUrl.value.trim())
-  ) {
-    toastError("音乐 API 地址要以 http:// 或 https:// 开头");
+  if (apiUrls.length > 10) {
+    toastError("音乐 API 最多 10 个");
     return;
   }
-  let plazaCollections: Record<string, number[]> = {};
-  try {
-    const parsed = JSON.parse(draft.plazaCollections.value.trim() || "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("not an object");
-    }
-    for (const [name, value] of Object.entries(parsed)) {
-      if (!Array.isArray(value) || value.some((id) => !Number.isInteger(id) || id <= 0)) {
-        throw new Error(name);
+  if (draft.musicSource.value === "api") {
+    for (const url of apiUrls) {
+      if (!/^https?:\/\//i.test(url)) {
+        toastError(`音乐 API 地址要以 http:// 或 https:// 开头：${url}`);
+        return;
       }
-      plazaCollections[name] = value as number[];
     }
-  } catch {
-    toastError("命名集合要写成 JSON 对象，值是相册 id 数组，例如 { \"壁纸\": [7, 9] }");
+  }
+  const plazaCollections = new Map<string, number[]>();
+  for (const [index, collection] of draft.plazaCollections.entries()) {
+    const name = collection.name.trim();
+    if (!name) {
+      toastError(`第 ${index + 1} 个命名集合还没有填名称`);
+      return;
+    }
+    if ([...name].length > 64) {
+      toastError(`命名集合的名称最长 64 个字符：${name}`);
+      return;
+    }
+    if (plazaCollections.has(name)) {
+      toastError(`命名集合重名了：${name}`);
+      return;
+    }
+    const ids = [...collection.albumIds]
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .sort((a, b) => a - b);
+    if (ids.length === 0) {
+      toastError(`集合「${name}」还没有勾选相册`);
+      return;
+    }
+    if (ids.length > 200) {
+      toastError(`集合「${name}」最多包含 200 个相册`);
+      return;
+    }
+    plazaCollections.set(name, ids);
+  }
+  if (plazaCollections.size > 50) {
+    toastError("命名集合最多 50 个");
     return;
   }
   const rateIssue = validateRateLimit(rateDraft);
@@ -1569,7 +1907,7 @@ async function save(
       plaza_grid_columns: Number(draft.plazaColumns.value) || 3,
       plaza_auto_refresh_seconds: autoRefreshSeconds(draft.plazaAutoRefresh),
       plaza_album_ids: [...draft.plazaAlbumIds],
-      plaza_collections: plazaCollections,
+      plaza_collections: Object.fromEntries(plazaCollections),
       recycle_retention_days: Math.min(365, Math.max(0, intOf(draft.recycleRetention))),
       require_login_to_upload: draft.requireLogin,
       register_enabled: draft.registerEnabled,
@@ -1616,8 +1954,10 @@ async function save(
     music: {
       enabled: draft.musicEnabled,
       autoplay: draft.musicAutoplay,
+      default_volume: defaultVolume,
       source: draft.musicSource.value,
-      api_url: draft.musicApiUrl.value.trim(),
+      api_urls: apiUrls,
+      api_url: apiUrls[0] ?? "",
       platform: draft.musicPlatform.value,
       playlist_id: draft.musicPlaylistId.value.trim(),
       local_dir: draft.musicLocalDir.value.trim(),
@@ -1658,19 +1998,28 @@ async function save(
 
   button.disabled = true;
   button.textContent = "保存中…";
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 20000);
   try {
-    await request("/admin/settings", { method: "PUT", json: body });
+    await request("/admin/settings", { method: "PUT", json: body, signal: controller.signal });
     // 频率限制那几张卡片走另外两个接口，跟这一次保存一起提交
     await saveRateLimit(rateDraft);
     toastOk("设置已保存");
-    // 站名、背景图在 /site 里，单文件上限与格式在 /me 的生效策略里：
-    // 两边都重拉一次，页面上的标题、背景与上传提示当场跟着变
-    await refreshIdentity();
-    // 音乐配置可能刚改过：停掉旧曲并重新拉歌单，顶栏按钮与广场随后自动更新
-    void reloadMusic();
+    // 站点身份与歌单都在后台刷新，不让保存按钮等第三方音乐接口。
+    // 先刷新站点，再 reloadMusic，新的默认音量才能在本次会话里生效。
+    // 站名、背景图来自 /site，单文件上限与格式来自 /me；音乐配置可能刚改过。
+    void refreshIdentity()
+      .catch(() => undefined)
+      .then(() => reloadMusic());
     reload();
   } catch (err) {
-    toastError(err);
+    if (controller.signal.aborted) {
+      toastError(new Error("保存超时（20 秒），请检查网络后再试"));
+    } else {
+      toastError(err);
+    }
+  } finally {
+    window.clearTimeout(timer);
     button.disabled = false;
     button.textContent = "保存设置";
   }

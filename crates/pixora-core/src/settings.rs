@@ -62,13 +62,18 @@ pub mod keys {
     pub const MUSIC_ENABLED: &str = "music.enabled";
     /// 音乐来源：`api`（Meting 等）或 `local`（服务器本地目录）
     pub const MUSIC_SOURCE: &str = "music.source";
+    /// 旧版的单个 API 地址；只用于迁移，新配置写 `music.api_urls`
     pub const MUSIC_API_URL: &str = "music.api_url";
+    /// 有序的 Meting API 列表（JSON 数组），第一个是主 API
+    pub const MUSIC_API_URLS: &str = "music.api_urls";
     /// Meting 的平台名：netease / tencent / kugou / kuwo ...
     pub const MUSIC_PLATFORM: &str = "music.platform";
     pub const MUSIC_PLAYLIST_ID: &str = "music.playlist_id";
     pub const MUSIC_LOCAL_DIR: &str = "music.local_dir";
     /// 打开首页时是否尝试自动播放（浏览器可能阻止，需用户再点一次）
     pub const MUSIC_AUTOPLAY: &str = "music.autoplay";
+    /// 新访客的默认音量（0～1）；用户拖过音量后以本地记忆为准
+    pub const MUSIC_DEFAULT_VOLUME: &str = "music.default_volume";
     pub const UPLOAD_MAX_FILE: &str = "upload.max_file_bytes";
     pub const UPLOAD_MAX_BATCH: &str = "upload.max_batch";
     pub const UPLOAD_MAX_PIXELS: &str = "upload.max_pixels";
@@ -238,6 +243,8 @@ pub mod defaults {
     pub const MUSIC_PLATFORM: &str = "netease";
     /// 一个常用的公共 Meting 地址，管理员可以换成自己的实例
     pub const MUSIC_API_URL: &str = "https://api.i-meto.com/meting/api";
+    /// 浏览器里没有本地音量记忆时的默认音量
+    pub const MUSIC_DEFAULT_VOLUME: f64 = 0.3;
     pub const SITE_NAME: &str = "Pixora";
     pub const FROM_NAME: &str = "Pixora 管理团队";
     pub const SMTP_HOST: &str = "smtp.qiye.aliyun.com";
@@ -270,12 +277,15 @@ pub struct MusicSettings {
     pub enabled: bool,
     /// `api` 或 `local`
     pub source: String,
-    pub api_url: String,
+    /// 有序列表：第一个是主 API，其余按顺序作为备用
+    pub api_urls: Vec<String>,
     pub platform: String,
     pub playlist_id: String,
     pub local_dir: String,
     /// 打开首页时是否尝试自动播放
     pub autoplay: bool,
+    /// 新访客的默认音量（0～1）
+    pub default_volume: f64,
 }
 
 /// 允许注册的邮箱域名白名单。
@@ -651,14 +661,30 @@ impl Settings {
         } else {
             defaults::MUSIC_PLATFORM.to_string()
         };
+        let legacy = self
+            .string(keys::MUSIC_API_URL, defaults::MUSIC_API_URL)
+            .await?
+            .trim()
+            .to_string();
+        let mut api_urls: Vec<String> = self
+            .raw(keys::MUSIC_API_URLS)
+            .await?
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+            .collect();
+        api_urls.truncate(10);
+        // 老配置只有单个 api_url：没有新列表时继续用它，保存一次后就会写成列表。
+        if api_urls.is_empty() && !legacy.is_empty() {
+            api_urls.push(legacy);
+        }
         Ok(MusicSettings {
             enabled: self.bool(keys::MUSIC_ENABLED, false).await?,
             source,
-            api_url: self
-                .string(keys::MUSIC_API_URL, defaults::MUSIC_API_URL)
-                .await?
-                .trim()
-                .to_string(),
+            api_urls,
             platform,
             playlist_id: self
                 .string(keys::MUSIC_PLAYLIST_ID, "")
@@ -671,6 +697,9 @@ impl Settings {
                 .trim()
                 .to_string(),
             autoplay: self.bool(keys::MUSIC_AUTOPLAY, false).await?,
+            default_volume: parse_default_volume(
+                self.raw(keys::MUSIC_DEFAULT_VOLUME).await?.as_deref(),
+            ),
         })
     }
 
@@ -1059,6 +1088,14 @@ pub fn normalize_auto_refresh_seconds(value: i64) -> i64 {
     }
 }
 
+/// 默认音量：缺省或坏值按 0.3，超出 0～1 的夹回边界。
+fn parse_default_volume(raw: Option<&str>) -> f64 {
+    raw.and_then(|text| text.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 1.0))
+        .unwrap_or(defaults::MUSIC_DEFAULT_VOLUME)
+}
+
 /// 解析逗号分隔的 id 清单：去重、丢掉非正数与坏值，最多保留 200 项。
 pub fn parse_id_list(raw: Option<&str>) -> Vec<i64> {
     let mut out = Vec::new();
@@ -1125,6 +1162,19 @@ mod tests {
         assert_eq!(defaults::SMTP_HOST, "smtp.qiye.aliyun.com");
         assert_eq!(defaults::GRID_COLUMNS, 3);
         assert_eq!(defaults::PLAZA_AUTO_REFRESH_SECONDS, 5);
+        assert_eq!(defaults::MUSIC_DEFAULT_VOLUME, 0.3);
+    }
+
+    #[test]
+    fn default_volume_is_normalized() {
+        assert_eq!(parse_default_volume(None), 0.3);
+        assert_eq!(parse_default_volume(Some("")), 0.3);
+        assert_eq!(parse_default_volume(Some("not-a-number")), 0.3);
+        assert_eq!(parse_default_volume(Some("0")), 0.0);
+        assert_eq!(parse_default_volume(Some("0.45")), 0.45);
+        assert_eq!(parse_default_volume(Some("1")), 1.0);
+        assert_eq!(parse_default_volume(Some("1.5")), 1.0);
+        assert_eq!(parse_default_volume(Some("-0.2")), 0.0);
     }
 
     #[test]

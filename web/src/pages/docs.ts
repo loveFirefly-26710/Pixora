@@ -27,6 +27,7 @@ const ENDPOINTS: Endpoint[] = [
   { method: "POST", path: "/api/v1/blobs/exists", purpose: "批量预检哈希，判断哪些文件已存在", scope: "upload" },
   { method: "GET", path: "/api/v1/images", purpose: "图片列表，支持分页与标签筛选", scope: "read" },
   { method: "GET", path: "/api/v1/images/{id}", purpose: "单张图片详情", scope: "read" },
+  { method: "POST", path: "/api/v1/images/{id}/view", purpose: "记录一次浏览，返回最新浏览量", scope: "read" },
   { method: "PATCH", path: "/api/v1/images/{id}", purpose: "改标签、可见性、所属相册", scope: "write" },
   { method: "DELETE", path: "/api/v1/images/{id}", purpose: "删除图片（引用计数归零才删物理文件）", scope: "write" },
   { method: "POST", path: "/api/v1/images/batch", purpose: "批量删除 / 移动 / 打标签 / 改可见性", scope: "write" },

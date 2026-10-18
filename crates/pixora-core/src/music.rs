@@ -28,6 +28,8 @@ const MAX_TRACKS: usize = 500;
 const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LYRICS_BYTES: usize = 512 * 1024;
 const MAX_SCAN_DEPTH: usize = 3;
+/// 第三方音乐接口与 CDN 经常对默认客户端 UA 更敏感；用常见的浏览器标识。
+pub const MUSIC_REQUEST_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
 const AUDIO_EXTS: &[&str] = &["mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "webm"];
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "avif", "gif"];
@@ -59,6 +61,19 @@ pub struct MusicPlaylist {
 }
 
 impl AppState {
+    /// 本地音乐根目录：环境变量优先，其次后台填的目录。
+    /// 扫描歌单、读音频文件、读歌词三条路必须用同一个根，否则 Docker 下
+    /// 歌单能列出来、点播放却找不到文件。
+    fn local_music_root(&self, settings: &crate::settings::MusicSettings) -> Option<PathBuf> {
+        self.config.music_dir.clone().or_else(|| {
+            let dir = settings.local_dir.trim();
+            if dir.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(dir))
+            }
+        })
+    }
 
     /// 把第三方媒体地址签成站内代理地址。浏览器只请求同源的 `/music/*`，
     /// 既避开混合内容（Meting 常返回 http 音频）与 CORS，也防止这个端点被拿去做
@@ -88,21 +103,26 @@ impl AppState {
         }
 
         if settings.source == "local" {
-            let root = settings.local_dir.trim();
-            if root.is_empty() {
+            // Docker 里不能填宿主机绝对路径：把宿主机目录挂到容器内，
+            // 再用 PIXORA_MUSIC_DIR 指定容器内路径；它优先于后台输入。
+            let from_env = self.config.music_dir.is_some();
+            let Some(root) = self.local_music_root(&settings) else {
                 return Ok(MusicPlaylist {
                     enabled: true,
                     source: "local".into(),
                     tracks: Vec::new(),
                     message: Some("管理员还没有填写本地音乐目录".into()),
                 });
-            }
-            let root = PathBuf::from(root);
+            };
             let tracks = tokio::task::spawn_blocking(move || scan_local(&root))
                 .await
                 .map_err(|err| AppError::internal(format!("音乐目录扫描失败：{err}")))?;
             let message = if tracks.is_empty() {
-                Some("音乐目录里没有可播放的音频文件".into())
+                Some(if from_env {
+                    "PIXORA_MUSIC_DIR 指向的目录里没有可播放的音频文件".into()
+                } else {
+                    "音乐目录里没有可播放的音频文件".into()
+                })
             } else {
                 None
             };
@@ -114,8 +134,7 @@ impl AppState {
             });
         }
 
-        let api_url = settings.api_url.trim();
-        if api_url.is_empty() || settings.playlist_id.trim().is_empty() {
+        if settings.api_urls.is_empty() || settings.playlist_id.trim().is_empty() {
             return Ok(MusicPlaylist {
                 enabled: true,
                 source: "api".into(),
@@ -124,7 +143,7 @@ impl AppState {
             });
         }
         match self
-            .fetch_api_tracks(api_url, &settings.platform, &settings.playlist_id)
+            .fetch_api_tracks(&settings.api_urls, &settings.platform, &settings.playlist_id)
             .await
         {
             Ok(tracks) => Ok(MusicPlaylist {
@@ -144,31 +163,79 @@ impl AppState {
 
     async fn fetch_api_tracks(
         &self,
-        api_url: &str,
+        api_urls: &[String],
         platform: &str,
         playlist_id: &str,
     ) -> Result<Vec<MusicTrack>> {
-        let mut url = Url::parse(api_url).map_err(|_| {
-            AppError::Config("音乐 API 地址无法解析，请填写完整的 http(s) 地址".into())
-        })?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(AppError::Config("音乐 API 地址只支持 http / https".into()));
-        }
         let platform = if PLATFORMS.contains(&platform) {
             platform
         } else {
             "netease"
         };
-        url.query_pairs_mut()
-            .append_pair("server", platform)
-            .append_pair("type", "playlist")
-            .append_pair("id", playlist_id.trim());
+        // 顺序由后台列表决定，第一项是主 API；重复地址只请求一次。
+        let mut sources: Vec<&str> = Vec::new();
+        for url in api_urls {
+            let url = url.trim();
+            if !url.is_empty() && !sources.iter().any(|existing| *existing == url) {
+                sources.push(url);
+            }
+        }
+        if sources.is_empty() {
+            return Err(AppError::Config("管理员还没有填音乐 API 地址".into()));
+        }
+
+        let multiple = sources.len() > 1;
+        let deadline = std::time::Instant::now() + Duration::from_secs(12);
+        let attempt_cap = if multiple {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(12)
+        };
+        let mut last_error: Option<String> = None;
+        for source in sources {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining < Duration::from_millis(200) {
+                break;
+            }
+            let timeout = remaining.min(attempt_cap);
+            match self
+                .fetch_api_source(source, platform, playlist_id, timeout)
+                .await
+            {
+                Ok(tracks) if !tracks.is_empty() => return Ok(tracks),
+                Ok(_) => last_error = Some("歌单没有返回可播放的曲目".into()),
+                Err(err) => last_error = Some(err.message().to_string()),
+            }
+        }
+        let prefix = if multiple {
+            "主 API 与备用 API 都没有拿到曲目"
+        } else {
+            "音乐 API 没有拿到曲目"
+        };
+        Err(AppError::Config(match last_error {
+            Some(message) => format!("{prefix}：{message}"),
+            None => prefix.to_string(),
+        }))
+    }
+
+    async fn fetch_api_source(
+        &self,
+        api_url: &str,
+        platform: &str,
+        playlist_id: &str,
+        timeout: Duration,
+    ) -> Result<Vec<MusicTrack>> {
+        // Meting 地址常写成 `?server=:server&type=:type&id=:id` 的模板。
+        // 再 append 一遍参数会让 Node 版 Meting-API 取到字面量 `:server`
+        // （它读第一个值），歌单于是整份空掉。这里统一替换占位符。
+        let url = api_request_url(api_url, platform, playlist_id)?;
 
         let response = self
             .http
             .get(url.clone())
             .header(reqwest::header::ACCEPT, "application/json")
-            .timeout(Duration::from_secs(12))
+            .header(reqwest::header::USER_AGENT, MUSIC_REQUEST_UA)
+            .timeout(timeout)
             .send()
             .await
             .map_err(|err| AppError::Config(format!("音乐 API 请求失败：{err}")))?;
@@ -185,8 +252,22 @@ impl AppState {
         if bytes.len() > MAX_JSON_BYTES {
             return Err(AppError::Config("音乐 API 响应过大".into()));
         }
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|_| AppError::Config("音乐 API 返回的不是 JSON".into()))?;
+        // 少数 Meting-API 部署会把 QQ 音乐包成 JSONP（`callback({...})`），
+        // 多见于 `OVERSEAS=1`。能剥就剥，不为这一种部署多配一个开关。
+        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                let text = String::from_utf8_lossy(&bytes);
+                let text = text.trim().trim_start_matches('\u{feff}').trim();
+                match (text.find('('), text.rfind(')')) {
+                    (Some(start), Some(end)) if end > start => {
+                        serde_json::from_str(text[start + 1..end].trim())
+                            .map_err(|_| AppError::Config("音乐 API 返回的不是 JSON".into()))?
+                    }
+                    _ => return Err(AppError::Config("音乐 API 返回的不是 JSON".into())),
+                }
+            }
+        };
         let items = value
             .as_array()
             .or_else(|| value.get("data").and_then(serde_json::Value::as_array))
@@ -278,13 +359,18 @@ impl AppState {
             if settings.source != "api" {
                 return Err(AppError::not_found("歌词"));
             }
-            let base = Url::parse(&settings.api_url)
-                .map_err(|_| AppError::Config("音乐 API 地址无效".into()))?;
             let target = Url::parse(raw).map_err(|_| AppError::bad_request("歌词地址无效"))?;
-            if target.scheme() != base.scheme()
-                || target.host_str() != base.host_str()
-                || target.port_or_known_default() != base.port_or_known_default()
-            {
+            // 直连歌词地址只允许落在管理员配置的任意一个音乐 API 域名下。
+            let allowed = settings.api_urls.iter().any(|source| {
+                Url::parse(source)
+                    .map(|base| {
+                        target.scheme() == base.scheme()
+                            && target.host_str() == base.host_str()
+                            && target.port_or_known_default() == base.port_or_known_default()
+                    })
+                    .unwrap_or(false)
+            });
+            if !allowed {
                 return Err(AppError::forbidden("歌词地址不在音乐 API 域名下"));
             }
             return self.fetch_lyrics_url(target).await;
@@ -297,7 +383,10 @@ impl AppState {
         if settings.source != "local" {
             return Err(AppError::not_found("歌词"));
         }
-        let file = resolve_local_path(&settings.local_dir, rel, &["lrc"]).await?;
+        let Some(root) = self.local_music_root(&settings) else {
+            return Err(AppError::not_found("歌词"));
+        };
+        let file = resolve_local_path(&root.to_string_lossy(), rel, &["lrc"]).await?;
         let bytes = tokio::fs::read(&file)
             .await
             .map_err(|_| AppError::not_found("歌词"))?;
@@ -311,6 +400,7 @@ impl AppState {
         let response = self
             .http
             .get(target)
+            .header(reqwest::header::USER_AGENT, MUSIC_REQUEST_UA)
             .timeout(Duration::from_secs(10))
             .send()
             .await
@@ -376,7 +466,15 @@ impl AppState {
         if !settings.enabled || settings.source != "local" {
             return Err(AppError::not_found("音乐文件"));
         }
-        resolve_local_path(&settings.local_dir, rel, &[AUDIO_EXTS, IMAGE_EXTS].concat()).await
+        let Some(root) = self.local_music_root(&settings) else {
+            return Err(AppError::not_found("音乐文件"));
+        };
+        resolve_local_path(
+            &root.to_string_lossy(),
+            rel,
+            &[AUDIO_EXTS, IMAGE_EXTS].concat(),
+        )
+        .await
     }
 }
 
@@ -435,6 +533,63 @@ fn duration_field(item: &serde_json::Value) -> i64 {
         }
     }
     0
+}
+
+/// 把管理员填写的 Meting 地址拼成一次歌单请求。
+///
+/// 支持两种写法：
+///   - `https://host/api`：直接追加 `server` / `type` / `id`；
+///   - `https://host/api?server=:server&type=:type&id=:id&auth=:auth&r=:r`：
+///     替换占位符，绝不留下重复的查询参数（Node 版 Meting-API 读第一个值）。
+fn api_request_url(api_url: &str, platform: &str, playlist_id: &str) -> Result<Url> {
+    let mut url = Url::parse(api_url).map_err(|_| {
+        AppError::Config("音乐 API 地址无法解析，请填写完整的 http(s) 地址".into())
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(AppError::Config("音乐 API 地址只支持 http / https".into()));
+    }
+
+    let playlist_id = playlist_id.trim();
+    let nonce = Utc::now().timestamp_millis().to_string();
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let mut has_server = false;
+    let mut has_type = false;
+    let mut has_id = false;
+    for (key, value) in &mut pairs {
+        match key.as_str() {
+            "server" => {
+                *value = platform.to_string();
+                has_server = true;
+            }
+            "type" => {
+                *value = "playlist".to_string();
+                has_type = true;
+            }
+            "id" => {
+                *value = playlist_id.to_string();
+                has_id = true;
+            }
+            // 模板里的认证参数通常就是空值；保留字面量 `:auth` 会被对方当成令牌。
+            "auth" if value == ":auth" => value.clear(),
+            // `:r` 是防缓存的随机数，换成当前毫秒。
+            "r" if value.is_empty() || value == ":r" => *value = nonce.clone(),
+            _ => {}
+        }
+    }
+    if !has_server {
+        pairs.push(("server".to_string(), platform.to_string()));
+    }
+    if !has_type {
+        pairs.push(("type".to_string(), "playlist".to_string()));
+    }
+    if !has_id {
+        pairs.push(("id".to_string(), playlist_id.to_string()));
+    }
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+    Ok(url)
 }
 
 fn resolve_url(base: &Url, raw: &str) -> Option<String> {
@@ -615,4 +770,76 @@ async fn resolve_local_path(root: &str, rel: &str, allowed: &[&str]) -> Result<P
         return Err(AppError::not_found("音乐文件"));
     }
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pairs(url: &Url) -> Vec<(String, String)> {
+        url.query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn api_url_replaces_meting_template_instead_of_duplicating() {
+        let url = api_request_url(
+            "https://music.example.com/api?server=:server&type=:type&id=:id&auth=:auth&r=:r",
+            "netease",
+            " 2884035 ",
+        )
+        .expect("模板地址");
+        let pairs = pairs(&url);
+        assert_eq!(
+            pairs.iter().filter(|(key, _)| key == "server").count(),
+            1,
+            "server 只能出现一次"
+        );
+        assert_eq!(
+            pairs.iter().filter(|(key, _)| key == "type").count(),
+            1,
+            "type 只能出现一次"
+        );
+        assert_eq!(
+            pairs.iter().filter(|(key, _)| key == "id").count(),
+            1,
+            "id 只能出现一次"
+        );
+        assert!(pairs.contains(&("server".into(), "netease".into())));
+        assert!(pairs.contains(&("type".into(), "playlist".into())));
+        assert!(pairs.contains(&("id".into(), "2884035".into())));
+        assert!(pairs.contains(&("auth".into(), String::new())));
+        let r = pairs
+            .iter()
+            .find(|(key, _)| key == "r")
+            .map(|(_, value)| value)
+            .expect("r 参数");
+        assert!(!r.is_empty() && r != ":r");
+    }
+
+    #[test]
+    fn api_url_appends_params_to_a_plain_endpoint() {
+        let url =
+            api_request_url("https://music.example.com/api", "tencent", "42").expect("普通地址");
+        let pairs = pairs(&url);
+        assert!(pairs.contains(&("server".into(), "tencent".into())));
+        assert!(pairs.contains(&("type".into(), "playlist".into())));
+        assert!(pairs.contains(&("id".into(), "42".into())));
+    }
+
+    #[test]
+    fn api_url_overrides_existing_concrete_values() {
+        let url = api_request_url(
+            "https://music.example.com/api?server=netease&type=song&id=old&format=json",
+            "tencent",
+            "new-id",
+        )
+        .expect("已有参数的地址");
+        let pairs = pairs(&url);
+        assert!(pairs.contains(&("server".into(), "tencent".into())));
+        assert!(pairs.contains(&("type".into(), "playlist".into())));
+        assert!(pairs.contains(&("id".into(), "new-id".into())));
+        assert!(pairs.contains(&("format".into(), "json".into())));
+    }
 }

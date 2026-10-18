@@ -37,6 +37,7 @@ async fn test_state(dir: &tempfile::TempDir) -> Arc<AppState> {
         base_url: Some("http://127.0.0.1:8080".to_string()),
         trust_proxy: 0,
         web_dir: None,
+        music_dir: None,
         accel_prefix: None,
         secure_cookies: false,
         samesite: pixora_core::config::SameSite::Lax,

@@ -44,16 +44,15 @@ pub async fn site(
         Err(err) => return crate::http::error_response(err),
     };
 
-    // 游客上传要带 CSRF 双提交头，而访客没有会话（也就没有令牌）：这里补发一个
-    // ——它本身不授权任何东西，只是「同一个浏览器」的凭据
+    // 访客没有会话，也就没有会话下发的 CSRF 令牌。游客上传、浏览计数这些
+    // 匿名写操作都要双提交，所以每次访客拿站点信息时都补一枚——它本身
+    // 不授权任何东西，只是「同一个浏览器」的凭据。
     let guest_limits = match (auth.is_none(), state.guest_uploader().await) {
         (true, Ok(Some(user))) => state.effective_upload_limits(&user).await.ok(),
         _ => None,
     };
-    let csrf_cookie = match (&auth, &guest_limits) {
-        (None, Some(_))
-            if crate::http::cookie_value(&headers, crate::http::CSRF_COOKIE).is_none() =>
-        {
+    let csrf_cookie = match &auth {
+        None if crate::http::cookie_value(&headers, crate::http::CSRF_COOKIE).is_none() => {
             pixora_crypto::token::new_csrf_token()
                 .ok()
                 .map(|token| crate::http::csrf_cookie(&state, &token))
@@ -108,6 +107,7 @@ pub async fn site(
             "enabled": music.enabled,
             "source": music.source,
             "autoplay": music.autoplay,
+            "default_volume": music.default_volume,
         },
         "recycle_retention_days": state
             .settings

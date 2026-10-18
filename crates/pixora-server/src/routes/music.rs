@@ -73,6 +73,7 @@ pub async fn stream(
     let mut request = state
         .http
         .get(target)
+        .header(header::USER_AGENT, pixora_core::music::MUSIC_REQUEST_UA)
         .timeout(std::time::Duration::from_secs(600));
     if let Some(range) = headers
         .get(header::RANGE)

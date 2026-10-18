@@ -396,6 +396,7 @@ mod tests {
             base_url: None,
             trust_proxy: 0,
             web_dir: None,
+            music_dir: None,
             accel_prefix: None,
             secure_cookies: false,
             samesite: crate::config::SameSite::Lax,

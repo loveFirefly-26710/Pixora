@@ -1,6 +1,6 @@
 # Pixora 部署方案
 
-当前版本 0.1.4。本文按部署方式分三条主线：纯 Docker、Linux 单二进制、Windows 单二进制。前端嵌在后端二进制里，前后端同源，不再支持把前端单独发到静态托管。每条线都从准备工作写到验收，命令可以直接复制。
+当前版本 0.1.6。本文按部署方式分三条主线：纯 Docker、Linux 单二进制、Windows 单二进制。前端嵌在后端二进制里，前后端同源，不再支持把前端单独发到静态托管。每条线都从准备工作写到验收，命令可以直接复制。
 
 第一次部署建议先走 Docker + SQLite（§4.2），跑通后再换数据库。遇到报错先看 §10 的对照表。
 
@@ -221,6 +221,8 @@ docker compose config >/dev/null && echo "编排语法 OK"
 主密钥的占位符故意不是合法的十六进制：忘了改，应用启动会直接报错，不会拿占位文字当密钥用。
 
 SQLite 版 compose 里 `PIXORA_TRUST_PROXY` 默认是 `1`，因为前面有 Caddy。直接暴露公网、前面没有反向代理时改成 `0`，否则客户端可以伪造 `X-Forwarded-For` 绕过 IP 黑名单和限流。HTTPS 下 `PIXORA_SECURE_COOKIES` 不填也会按 `PIXORA_BASE_URL` 自动开；如果站点从 HTTPS 改成 HTTP 调试，记得显式设成 `false`，并清掉浏览器里的旧 Cookie。
+
+本地音乐库要在容器里读：在 compose 的 `volumes` 里加 `- ./music:/music:ro`，再给应用加 `PIXORA_MUSIC_DIR: /music`。这样后台「本地音乐目录」填什么都不作数，实际扫描的是容器内的 `/music`；换宿主机目录时改挂载并重建即可。
 
 数据库密码建议用 `openssl rand -hex 16` 生成。密码里的 `$` 会被 Compose 当变量插值，`@`、`:` 会把 DSN 拆错；用十六进制可以完全避开这些坑。非要用特殊字符，就把 DSN 里的字符做百分号编码，并把 `$` 写成 `$$`。
 

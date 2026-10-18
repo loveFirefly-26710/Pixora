@@ -1590,6 +1590,45 @@ tr.pick td {
   animation: music-spin 24s linear infinite;
 }
 
+/* 播放时用 Web Audio 的频谱变量驱动光环与圆片的呼吸；
+   拿不到分析器时保持原来的静态观感，不影响听歌。 */
+.plaza-hero-visual.is-playing .hero-halo {
+  animation: none;
+  opacity: calc(.55 + var(--music-level, 0) * .4);
+  transform: scale(calc(1 + var(--music-level, 0) * .08));
+  transition: transform .1s linear, opacity .1s linear;
+}
+
+.plaza-hero-visual.is-playing .hero-ring.r1,
+.plaza-hero-visual.is-playing .hero-ring.r3 {
+  opacity: calc(.7 + var(--music-level, 0) * .3);
+  transform: scale(calc(1 + var(--music-bass, 0) * .045));
+  transition: transform .1s linear, opacity .1s linear;
+}
+
+.plaza-hero-visual.is-playing .hero-ring.r2 {
+  opacity: calc(.55 + var(--music-level, 0) * .45);
+}
+
+.plaza-hero-visual.is-playing .hero-frame {
+  transform: scale(calc(1 + var(--music-bass, 0) * .035));
+  box-shadow: 0 0 0 9px var(--primary-soft), 0 0 calc(68px + var(--music-level, 0) * 55px) var(--glow), inset 0 0 46px rgba(0, 0, 0, 0.4);
+  transition: transform .09s linear, box-shadow .12s linear;
+}
+
+.plaza-hero-visual.is-playing .hero-frame-inner {
+  transform: scale(calc(1 + var(--music-level, 0) * .025));
+  transition: transform .1s linear;
+}
+
+.plaza-hero-visual.is-playing .hero-frame:hover .hero-frame-inner {
+  transform: scale(calc(1.03 + var(--music-level, 0) * .025));
+}
+
+.plaza-hero-visual.is-playing .hero-arc {
+  filter: brightness(calc(1 + var(--music-level, 0) * .55));
+}
+
 .hero-frame.is-tapping {
   animation: hero-card-tap .58s cubic-bezier(.2, .8, .2, 1);
 }
@@ -2999,6 +3038,165 @@ tr.pick td {
   height: 18px;
 }
 
+/* 后台的音乐 API 主备列表 */
+.music-api-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+
+.music-api-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.music-api-role {
+  flex: 0 0 52px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.music-api-row input.f {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.music-api-row .music-api-del {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.music-api-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+/* 后台：新访客默认音量 */
+.music-default-volume {
+  width: 100%;
+  height: 24px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.music-default-volume-value {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* 后台：命名集合里勾选公开相册 */
+.plaza-collection-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.plaza-collection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.plaza-collection-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.plaza-collection-label {
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.plaza-collection-name {
+  flex: 1 1 120px;
+  width: auto;
+  min-width: 0;
+}
+
+.plaza-collection-count {
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.plaza-collection-head .btn {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 10px;
+  margin-left: auto;
+}
+
+.plaza-collection-list > .btn {
+  align-self: flex-start;
+}
+
+.plaza-collection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 6px;
+  max-height: 190px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.plaza-collection-album {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.plaza-collection-album > span {
+  min-width: 0;
+}
+
+.plaza-collection-album b,
+.plaza-collection-album small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plaza-collection-album b {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.plaza-collection-album small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.plaza-collection-stale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 /* 手机底部抽屉的暗幕；宽屏不显示，侧栏本身就是浮在内容上的一列。 */
 .music-scrim {
   display: none;
@@ -3270,11 +3468,22 @@ tr.pick td {
 }
 
 .music-lyric {
+  display: block;
+  width: 100%;
   padding: 3px 0;
+  border: 0;
+  background: transparent;
   color: var(--faint);
+  font-family: inherit;
   font-size: 13px;
   line-height: 1.75;
+  text-align: center;
+  cursor: pointer;
   transition: color .2s ease, transform .2s ease;
+}
+
+.music-lyric:hover {
+  color: var(--text);
 }
 
 .music-lyric.on {
@@ -3297,15 +3506,16 @@ tr.pick td {
 .music-panel-controls {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   margin-top: 5px;
 }
 
 .music-panel-controls button {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  flex: none;
+  width: 26px;
+  height: 26px;
   border: 0;
   border-radius: 50%;
   background: transparent;
@@ -3323,21 +3533,127 @@ tr.pick td {
   height: 16px;
 }
 
+.music-panel-controls button.music-panel-play {
+  width: 34px;
+  height: 34px;
+  margin: 0 1px;
+  border: 1px solid var(--border2);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.music-panel-controls button.music-panel-play:hover {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-fg);
+  box-shadow: 0 0 18px var(--glow);
+}
+
+.music-panel-play svg {
+  width: 18px;
+  height: 18px;
+}
+
+.music-panel-play .ic-pause {
+  display: none;
+}
+
+.music-panel.is-playing .music-panel-play .ic-play {
+  display: none;
+}
+
+.music-panel.is-playing .music-panel-play .ic-pause {
+  display: block;
+}
+
 .music-mode {
-  max-width: 92px;
-  padding: 3px 5px;
+  max-width: 80px;
+  padding: 2px 4px;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface-2);
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: 10px;
   cursor: pointer;
 }
 
 .music-time {
   color: var(--muted);
   font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* 音乐侧栏底部的音量卡片 */
+.music-volume-card {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+
+.music-volume-label {
+  flex: none;
+  color: var(--muted);
   font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.music-volume-mute {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.music-volume-mute:hover {
+  background: var(--surface);
+  color: var(--primary);
+}
+
+.music-volume-mute svg {
+  width: 16px;
+  height: 16px;
+}
+
+.music-volume-mute .ic-mute {
+  display: none;
+}
+
+.music-volume-mute.is-muted .ic-volume {
+  display: none;
+}
+
+.music-volume-mute.is-muted .ic-mute {
+  display: block;
+}
+
+.music-volume-range {
+  flex: 1;
+  min-width: 0;
+  height: 18px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.music-volume-value {
+  flex: none;
+  min-width: 34px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: right;
+  white-space: nowrap;
 }
 
 @media (max-width: 1100px) {
@@ -3421,6 +3737,11 @@ tr.pick td {
     height: 36px;
   }
 
+  .music-panel-controls button.music-panel-play {
+    width: 42px;
+    height: 42px;
+  }
+
   .music-mode {
     min-height: 30px;
     max-width: 108px;
@@ -3428,6 +3749,36 @@ tr.pick td {
   }
 
   .music-time {
+    font-size: 11px;
+  }
+
+  .music-volume-card {
+    gap: 8px;
+    min-height: 44px;
+    margin-top: 9px;
+    padding: 5px 9px;
+  }
+
+  .music-volume-label {
+    font-size: 11px;
+  }
+
+  .music-volume-mute {
+    width: 32px;
+    height: 32px;
+  }
+
+  .music-volume-mute svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .music-volume-range {
+    height: 24px;
+  }
+
+  .music-volume-value {
+    min-width: 38px;
     font-size: 11px;
   }
 

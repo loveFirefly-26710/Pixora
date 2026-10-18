@@ -14,13 +14,16 @@ import {
   musicState,
   next,
   parseLyrics,
+  playFrom,
   previous,
   seekMusic,
   selectTrack,
   setMode,
+  setMusicVolume,
   setPanelTab,
   subscribeMusic,
   toggleMusic,
+  toggleMusicMute,
   togglePanel,
   type PlaybackMode,
 } from "../core/music";
@@ -54,6 +57,16 @@ const NEXT_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"
   <path d="M17 6v12M6 6.6v10.8c0 .7.8 1.1 1.4.7l7-5.4a.9.9 0 0 0 0-1.4l-7-5.4c-.6-.4-1.4 0-1.4.7z" fill="currentColor"/>
 </svg>`;
 
+const VOLUME_ICON = `<svg class="ic-volume" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+  <path d="M4.5 9.5h3.2L12 6.2v11.6L7.7 14.5H4.5z" fill="currentColor"/>
+  <path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.7a7.6 7.6 0 0 1 0 10.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+</svg>`;
+
+const MUTE_ICON = `<svg class="ic-mute" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+  <path d="M4.5 9.5h3.2L12 6.2v11.6L7.7 14.5H4.5z" fill="currentColor"/>
+  <path d="m16 9.5 5 5M21 9.5l-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+</svg>`;
+
 const panelId = "pixora-music-panel";
 let panelBody: HTMLElement | null = null;
 let panelTabs: HTMLElement | null = null;
@@ -61,6 +74,10 @@ let panelTitle: HTMLElement | null = null;
 let panelProgress: HTMLInputElement | null = null;
 let panelTime: HTMLElement | null = null;
 let panelMode: HTMLSelectElement | null = null;
+let panelPlay: HTMLButtonElement | null = null;
+let panelVolume: HTMLInputElement | null = null;
+let panelVolumeValue: HTMLElement | null = null;
+let panelMute: HTMLButtonElement | null = null;
 let panelCover: HTMLElement | null = null;
 let panelClose: HTMLButtonElement | null = null;
 let panelScrim: HTMLElement | null = null;
@@ -145,10 +162,52 @@ export function mountMusicPanel(): void {
   );
   mode.value = musicState().mode;
   mode.addEventListener("change", () => setMode(mode.value as PlaybackMode));
+  const play = h(
+    "button.music-panel-play",
+    {
+      type: "button",
+      "aria-label": "播放",
+      title: "播放",
+      on: { click: () => void toggleMusic() },
+    },
+    h("span", { html: `${PLAY_ICON}${PAUSE_ICON}` }),
+  );
+  const volume = h("input.music-volume-range", {
+    type: "range",
+    min: "0",
+    max: "1",
+    step: "0.01",
+    value: String(musicState().volume),
+    "aria-label": "音量",
+  });
+  const volumeValue = h("span.music-volume-value", {
+    text: `${Math.round(musicState().volume * 100)}%`,
+  });
+  const mute = h(
+    "button.music-volume-mute",
+    {
+      type: "button",
+      "aria-label": "静音",
+      title: "静音",
+      "aria-pressed": "false",
+    },
+    h("span", { html: `${VOLUME_ICON}${MUTE_ICON}` }),
+  );
+  mute.addEventListener("click", () => toggleMusicMute());
+  volume.addEventListener("input", () => setMusicVolume(Number(volume.value)));
+  const volumeCard = h(
+    "div.music-volume-card",
+    null,
+    h("span.music-volume-label", { text: "音量" }),
+    mute,
+    volume,
+    volumeValue,
+  );
   const controls = h(
     "div.music-panel-controls",
     null,
     h("button", { type: "button", "aria-label": "上一首", title: "上一首", on: { click: () => void previous() } }, h("span", { html: PREV_ICON })),
+    play,
     h("button", { type: "button", "aria-label": "下一首", title: "下一首", on: { click: () => void next() } }, h("span", { html: NEXT_ICON })),
     mode,
     h("span.spacer"),
@@ -160,7 +219,7 @@ export function mountMusicPanel(): void {
     h("div.music-panel-head", null, cover, title, h("span.spacer"), close),
     tabs,
     body,
-    h("div.music-panel-foot", null, progress, controls),
+    h("div.music-panel-foot", null, progress, controls, volumeCard),
   );
   // 手机上的侧栏是底部抽屉：加一层可点击的暗幕，点它等于关掉，
   // 同时把背景页面的滚动锁住（样式在 theme.css 的窄屏段）。
@@ -183,6 +242,10 @@ export function mountMusicPanel(): void {
   panelProgress = progress;
   panelTime = time;
   panelMode = mode;
+  panelPlay = play;
+  panelVolume = volume;
+  panelVolumeValue = volumeValue;
+  panelMute = mute;
   panelCover = cover;
   panelClose = close;
   panelScrim = scrim;
@@ -292,6 +355,29 @@ function renderPanel(): void {
     panelTime.textContent = `${formatClock(state.currentTime)} / ${formatClock(duration)}`;
   }
   if (panelMode) panelMode.value = state.mode;
+  if (panelPlay) {
+    const action = state.playing ? "暂停" : "播放";
+    panelPlay.setAttribute("aria-label", action);
+    panelPlay.setAttribute("title", action);
+    panelPlay.setAttribute("aria-pressed", String(state.playing));
+  }
+  const muted = state.muted || state.volume === 0;
+  const volumeText = `${Math.round(state.volume * 100)}%`;
+  if (panelVolume) {
+    panelVolume.value = String(state.volume);
+    panelVolume.setAttribute(
+      "aria-valuetext",
+      muted ? `静音（${volumeText}）` : volumeText,
+    );
+  }
+  if (panelVolumeValue) panelVolumeValue.textContent = muted ? "静音" : volumeText;
+  if (panelMute) {
+    panelMute.classList.toggle("is-muted", muted);
+    const action = muted ? "取消静音" : "静音";
+    panelMute.setAttribute("aria-label", action);
+    panelMute.setAttribute("title", action);
+    panelMute.setAttribute("aria-pressed", String(muted));
+  }
 
   if (!panelBody) return;
   const key = [
@@ -386,7 +472,17 @@ function renderLyrics(body: HTMLElement): void {
       "div.music-lyrics",
       null,
       ...lines.map((line, index) =>
-        h("div.music-lyric", { "data-lyric-index": String(index), text: line.text }),
+        h(
+          "button.music-lyric",
+          {
+            type: "button",
+            "data-lyric-index": String(index),
+            title: `${formatClock(line.time)} · 从这里播放`,
+            "aria-label": `${line.text}，${formatClock(line.time)}，从这里播放`,
+            on: { click: () => void playFrom(line.time) },
+          },
+          line.text,
+        ),
       ),
     ),
   );
