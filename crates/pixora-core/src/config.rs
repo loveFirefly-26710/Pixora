@@ -95,6 +95,9 @@ pub struct Config {
     pub trust_proxy: usize,
     /// 前端产物目录：给了就读盘（前端联调方便），否则用嵌进二进制的版本
     pub web_dir: Option<PathBuf>,
+    /// 本地音乐目录（容器内路径）。设置后覆盖后台填的本地目录；
+    /// Docker 部署靠它把宿主机目录挂进容器后再交给应用。
+    pub music_dir: Option<PathBuf>,
     /// Caddy / Nginx 的 X-Accel-Redirect 前缀，配了就让内核直接发文件
     pub accel_prefix: Option<String>,
     /// Cookie 是否带 Secure。默认按 base_url 是否 https 决定。
@@ -181,6 +184,10 @@ impl Config {
             base_url,
             trust_proxy,
             web_dir: env("PIXORA_WEB_DIR").map(PathBuf::from),
+            music_dir: env("PIXORA_MUSIC_DIR")
+                .map(|raw| raw.trim().to_string())
+                .filter(|raw| !raw.is_empty())
+                .map(PathBuf::from),
             accel_prefix: env("PIXORA_ACCEL_PREFIX"),
             secure_cookies,
             dev_return_codes: matches!(

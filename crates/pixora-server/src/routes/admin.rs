@@ -1910,11 +1910,15 @@ pub async fn settings_get(
         "music": {
             "enabled": music.enabled,
             "source": music.source,
-            "api_url": music.api_url,
+            // api_url 保留给旧前端；新界面用有序的 api_urls 管理主备
+            "api_url": music.api_urls.first().cloned().unwrap_or_default(),
+            "api_urls": music.api_urls,
             "platform": music.platform,
             "playlist_id": music.playlist_id,
             "local_dir": music.local_dir,
+            "local_dir_env": state.config.music_dir.as_ref().map(|path| path.display().to_string()),
             "autoplay": music.autoplay,
+            "default_volume": music.default_volume,
         },
     })))
 }
@@ -2081,16 +2085,49 @@ pub async fn settings_put(
         if !pixora_core::music::PLATFORMS.contains(&platform.as_str()) {
             return bad_request("不支持的音乐平台");
         }
-        let api_url = field_opt_str(&music, "api_url")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if !api_url.is_empty() {
-            match reqwest::Url::parse(&api_url) {
-                Ok(url) if matches!(url.scheme(), "http" | "https") => {}
+        let api_urls: Vec<String> = match music.get("api_urls") {
+            Some(serde_json::Value::Array(items)) => {
+                let mut urls = Vec::with_capacity(items.len());
+                for item in items {
+                    let Some(text) = item.as_str() else {
+                        return bad_request("music.api_urls 必须是字符串数组");
+                    };
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        urls.push(text.to_string());
+                    }
+                }
+                urls
+            }
+            // 兼容旧客户端：仍可只传一个 api_url
+            Some(serde_json::Value::Null) | None => {
+                let legacy = field_opt_str(&music, "api_url")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if legacy.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![legacy]
+                }
+            }
+            Some(_) => return bad_request("music.api_urls 必须是字符串数组"),
+        };
+        if api_urls.len() > 10 {
+            return bad_request("音乐 API 最多 10 个");
+        }
+        for url in &api_urls {
+            if url.chars().count() > 1000 {
+                return bad_request("音乐 API 地址太长了");
+            }
+            match reqwest::Url::parse(url) {
+                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
                 _ => return bad_request("音乐 API 地址必须是以 http(s) 开头的完整地址"),
             }
         }
+        let api_url = api_urls.first().cloned().unwrap_or_default();
+        let api_urls_json =
+            serde_json::to_string(&api_urls).unwrap_or_else(|_| "[]".to_string());
         let playlist_id = field_opt_str(&music, "playlist_id")
             .unwrap_or_default()
             .trim()
@@ -2099,11 +2136,12 @@ pub async fn settings_put(
             .unwrap_or_default()
             .trim()
             .to_string();
-        if enabled && source == "api" && (api_url.is_empty() || playlist_id.is_empty()) {
-            return bad_request("启用 API 音乐时，API 地址与歌单 ID 都要填");
+        if enabled && source == "api" && (api_urls.is_empty() || playlist_id.is_empty()) {
+            return bad_request("启用 API 音乐时，至少填一个 API 地址和歌单 ID");
         }
-        if enabled && source == "local" && local_dir.is_empty() {
-            return bad_request("启用本地音乐时，要填音乐目录");
+        if enabled && source == "local" && local_dir.is_empty() && state.config.music_dir.is_none()
+        {
+            return bad_request("启用本地音乐时，要填音乐目录或设置 PIXORA_MUSIC_DIR");
         }
         if playlist_id.chars().count() > 200 {
             return bad_request("歌单 ID 太长了");
@@ -2111,7 +2149,17 @@ pub async fn settings_put(
         if local_dir.chars().count() > 1000 {
             return bad_request("音乐目录路径太长了");
         }
-        let writes: [(&str, Option<String>); 7] = [
+        let default_volume = match music.get("default_volume") {
+            Some(serde_json::Value::Number(value)) => {
+                let Some(parsed) = value.as_f64() else {
+                    return bad_request("music.default_volume 必须是 0 到 1 之间的数字");
+                };
+                Some(parsed.clamp(0.0, 1.0))
+            }
+            Some(serde_json::Value::Null) | None => None,
+            Some(_) => return bad_request("music.default_volume 必须是 0 到 1 之间的数字"),
+        };
+        let writes: [(&str, Option<String>); 9] = [
             (
                 keys::MUSIC_ENABLED,
                 field_opt_bool(&music, "enabled").map(|value| value.to_string()),
@@ -2120,7 +2168,12 @@ pub async fn settings_put(
                 keys::MUSIC_AUTOPLAY,
                 field_opt_bool(&music, "autoplay").map(|value| value.to_string()),
             ),
+            (
+                keys::MUSIC_DEFAULT_VOLUME,
+                default_volume.map(|value| format!("{value:.2}")),
+            ),
             (keys::MUSIC_SOURCE, Some(source.to_string())),
+            (keys::MUSIC_API_URLS, Some(api_urls_json)),
             (keys::MUSIC_API_URL, Some(api_url)),
             (keys::MUSIC_PLATFORM, Some(platform)),
             (keys::MUSIC_PLAYLIST_ID, Some(playlist_id)),

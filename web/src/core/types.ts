@@ -58,7 +58,13 @@ export interface SiteInfo {
   /** 广场自动漫游间隔（秒）。0 = 关闭 */
   plaza_auto_refresh_seconds: number;
   /** 背景音乐：只有管理员启用后前端才显示播放按钮 */
-  music?: { enabled: boolean; source: "api" | "local"; autoplay?: boolean } | null;
+  music?: {
+    enabled: boolean;
+    source: "api" | "local";
+    autoplay?: boolean;
+    /** 新访客默认音量，0～1；用户拖过音量后以本地记忆为准 */
+    default_volume?: number;
+  } | null;
   /** 回收站保留天数：0 = 关闭回收站（删除即彻底删除） */
   recycle_retention_days: number;
   /** 会话有效期：闲置多少分钟掉线、最长多少天 */
@@ -617,11 +623,18 @@ export interface AdminSettings {
   music?: {
     enabled: boolean;
     source: string;
+    /** 旧字段；新界面用 api_urls */
     api_url: string;
+    /** 有序列表：第一个是主 API */
+    api_urls: string[];
     platform: string;
     playlist_id: string;
     local_dir: string;
+    /** 环境变量 PIXORA_MUSIC_DIR 指定的容器内路径；有值时忽略 local_dir */
+    local_dir_env: string | null;
     autoplay: boolean;
+    /** 新访客默认音量，0～1 */
+    default_volume: number;
   };
 }
 

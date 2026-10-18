@@ -24,8 +24,11 @@ services:
       PIXORA_TRUST_PROXY: "1"
       PIXORA_WORKERS: "2"
       RUST_LOG: info
+      # 本地音乐库（可选）：宿主机目录挂到容器内，再把容器内路径交给应用
+      # PIXORA_MUSIC_DIR: /music
     volumes:
       - ./data:/data
+      # - ./music:/music:ro
     expose:
       - "8080"
     depends_on:

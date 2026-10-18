@@ -550,6 +550,7 @@ mod tests {
             // 测试里没有代理，直接信对端地址
             trust_proxy: 0,
             web_dir: None,
+            music_dir: None,
             accel_prefix: None,
             secure_cookies: false,
             samesite: pixora_core::config::SameSite::Lax,

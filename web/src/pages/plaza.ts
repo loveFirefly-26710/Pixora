@@ -25,7 +25,7 @@ import {
 import { navigate, type PageContext } from "../core/router";
 import { currentUser, getState } from "../core/state";
 import { toastError } from "../core/toast";
-import type { ImageDetail, ImageItem, MusicTrack } from "../core/types";
+import type { ImageItem, MusicTrack } from "../core/types";
 import { createUploadPanel } from "../upload/panel";
 import { FIREFLY_MARK } from "../ui/brand";
 import { openLightbox } from "../ui/lightbox";
@@ -204,6 +204,24 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
     autoButton.addEventListener("click", options.onToggleAuto);
   }
 
+  const visual = h(
+    "div.plaza-hero-visual",
+    null,
+    h("div.hero-halo", { "aria-hidden": "true" }),
+    h("div.hero-ring.r1", { "aria-hidden": "true" }),
+    h("div.hero-ring.r2", { "aria-hidden": "true" }),
+    h("div.hero-ring.r3", { "aria-hidden": "true" }),
+    h("div.hero-arc", { "aria-hidden": "true" }),
+    frame,
+    sourceChip,
+    h(
+      "div.hero-chip.two",
+      null,
+      h("div.hero-chip-label", { text: "Firefly signal 01" }),
+      trackTitle,
+      trackSub,
+    ),
+  );
   const hero = h(
     "section.plaza-hero",
     null,
@@ -224,24 +242,7 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
         h("span", { text: "每次刷新，都是新的轨迹" }),
       ),
     ),
-    h(
-      "div.plaza-hero-visual",
-      null,
-      h("div.hero-halo", { "aria-hidden": "true" }),
-      h("div.hero-ring.r1", { "aria-hidden": "true" }),
-      h("div.hero-ring.r2", { "aria-hidden": "true" }),
-      h("div.hero-ring.r3", { "aria-hidden": "true" }),
-      h("div.hero-arc", { "aria-hidden": "true" }),
-      frame,
-      sourceChip,
-      h(
-        "div.hero-chip.two",
-        null,
-        h("div.hero-chip-label", { text: "Firefly signal 01" }),
-        trackTitle,
-        trackSub,
-      ),
-    ),
+    visual,
   );
 
   function setTotal(total: number): void {
@@ -313,7 +314,9 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
 
   function setMusic(nextPlaying: boolean, nextTrack: MusicTrack | null): void {
     playing = nextPlaying;
-    frame.classList.toggle("is-playing", options.musicEnabled && playing);
+    const active = options.musicEnabled && playing;
+    frame.classList.toggle("is-playing", active);
+    visual.classList.toggle("is-playing", active);
     if (!options.musicEnabled) return;
     frame.setAttribute(
       "aria-label",
@@ -393,7 +396,6 @@ export async function render(ctx: PageContext): Promise<void> {
   let autoRemaining = autoSeconds;
   let autoTimer: number | null = null;
   let heroState: PlazaHeroHandle | null = null;
-  const viewedIds = new Set<number>();
   const musicEnabled = Boolean(site?.music?.enabled);
 
   function paintTileViews(item: ImageItem): void {
@@ -409,17 +411,19 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   async function recordView(item: ImageItem): Promise<void> {
-    // 同一次页面会话里同一张图只算一次；属主自己点开也算——
-    // 服务端按公开图计数，不再按「别人看」过滤（唯一用户往往就是站长）
-    if (viewedIds.has(item.id)) return;
-    viewedIds.add(item.id);
+    // 每次点击都记一次；属主自己看也计数（服务端只对公开图累加）。
+    // 并发点击时响应可能乱序回来，浏览量只增不减，别让先到的旧数字盖掉新数字。
     try {
-      const detail = await request<ImageDetail>(`/images/${item.id}`);
-      item.views = detail.views;
-      paintTileViews(item);
-      heroState?.setFeaturedViews(item);
+      const result = await request<{ views: number }>(`/images/${item.id}/view`, {
+        method: "POST",
+      });
+      if (result.views > item.views) {
+        item.views = result.views;
+        paintTileViews(item);
+        heroState?.setFeaturedViews(item);
+      }
     } catch {
-      viewedIds.delete(item.id);
+      // 计数失败不影响看图；网络恢复后下一次点击会继续累计
     }
   }
 

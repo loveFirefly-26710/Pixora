@@ -135,7 +135,7 @@ API 客户端：
   "thumb_client": true, "thumb_server_fallback": false,
   "appeal_email": "admin@example.com", "background": null,
   // 背景音乐是否启用；歌单内容走 /api/v1/music/playlist
-  "music": { "enabled": true, "source": "api" },
+  "music": { "enabled": true, "source": "api", "autoplay": true, "default_volume": 0.3 },
   // 会话有效期（分钟 / 天）
   "session": { "idle_minutes": 120, "absolute_days": 30 },
   // 站点默认头像：账号自己没设头像时用它（新注册的账号也走这条），没配过是 null
@@ -433,7 +433,17 @@ API 客户端：
   "album": { "id": 7, "name": "旅行" }, "siblings": [ { "id": 1, "thumb_url": "…" } ] } }
 ```
 
-访问非本人的公开图片会累加 `views`（同一会话 24 小时内只算一次）。
+读取公开图片详情时也会累加 `views`。广场的点击统计走下面这个更轻的端点，不再为了拿一个数字去组装详情与相邻缩略图。
+
+### `POST /api/v1/images/{id}/view` — read
+
+记录一次浏览并返回最新浏览量：
+
+```json
+{ "data": { "views": 42 } }
+```
+
+公开图每次调用都加一，属主自己看也算；私有图只有属主/管理员能调用，但不计数。浏览器会话要带 `X-CSRF-Token`（与其它写请求一致），匿名访客用 `GET /site` 下发的 CSRF Cookie。
 
 ### `PATCH /api/v1/images/{id}` — write
 
@@ -674,7 +684,7 @@ curl "https://img.example.com/api/v1/random?collection=壁纸&exclude_ids=1,2,3&
 
 ### 背景音乐（公开）
 
-管理员在「系统设置 → 背景音乐」里选择 Meting API 或服务器本地目录，并可以打开「首页自动播放」。播放器只认站内地址：第三方 API 的音频、封面和歌词都由服务端代理，既避开 CORS，也避免 HTTPS 页面加载 http 音频被浏览器拦截。歌单的播放模式（随机 / 列表循环 / 顺序）是前端用户偏好，默认随机。
+管理员在「系统设置 → 背景音乐」里选择 Meting API 或服务器本地目录，并可以打开「首页自动播放」。后台可以增删多条 Meting API，第一条是主 API，后面按顺序作为备用；地址支持带 `:server` / `:type` / `:id` 占位符的完整模板。Docker 部署的本地音乐路径用 `PIXORA_MUSIC_DIR` 指定容器内挂载点，后台目录输入会被覆盖。播放器只认站内地址：第三方 API 的音频、封面和歌词都由服务端代理，既避开 CORS，也避免 HTTPS 页面加载 http 音频被浏览器拦截。歌单的播放模式（随机 / 列表循环 / 顺序）是前端用户偏好，默认随机；音量默认由管理员设置（初始 30%），用户调过之后记在浏览器本地。浏览器拦截有声自动播放时，前端会在第一次点击、触摸或按键后开始播放；滚轮、滚动和鼠标移动也会尝试，但浏览器是否放行取决于它自己的自动播放策略。用户主动暂停后不会自行恢复。
 
 #### `GET /api/v1/music/playlist`
 
@@ -1059,16 +1069,19 @@ curl "https://img.example.com/api/v1/random?collection=壁纸&exclude_ids=1,2,3&
   "appearance": { "background": null, "default_avatar": null },
   "plaza_albums": [ { "id": 7, "name": "旅行", "slug": "travel",
                       "owner_uid": "1001", "owner_email": "user@example.com", "image_count": 236 } ],
-  "music": { "enabled": true, "source": "api", "autoplay": false,
+  "music": { "enabled": true, "source": "api", "autoplay": false, "default_volume": 0.3,
+             "api_urls": [ "https://api.i-meto.com/meting/api" ],
              "api_url": "https://api.i-meto.com/meting/api",
-             "platform": "netease", "playlist_id": "2884035", "local_dir": "" }
+             "platform": "netease", "playlist_id": "2884035",
+             "local_dir": "", "local_dir_env": null }
 } }
 ```
 
 - `plaza_albums` 是全站正常账号的公开相册，供「首页展示相册」勾选；`site.plaza_album_ids` 里的 id 若已不是公开相册，广场查询会自动忽略。
 - `plaza_collections` 是命名相册集合（最多 50 个、每个最多 200 个 id），供随机图 API 的 `collection=` 使用；它只取公开图片。
-- `music.source=api` 时用 `api_url + platform + playlist_id` 拉歌单；`source=local` 时扫描 `local_dir`。`local_dir` 只在管理端下发，不会出现在 `/site` 里。
-- `PUT` 的 `music` 子对象接受 `enabled` / `source` / `autoplay` / `api_url` / `platform` / `playlist_id` / `local_dir`。`autoplay` 只控制首页自动尝试播放，浏览器拦截时会等用户点一下主图。启用 API 时必须填 `api_url` 与 `playlist_id`；启用本地时必须填 `local_dir`。平台只接受 `netease` / `tencent` / `kugou` / `kuwo` / `migu` / `baidu` / `xiami` / `joox`。
+- `music.source=api` 时按 `api_urls` 的顺序拉歌单：第一个是主 API，失败或返回空歌单时继续试后面的备用 API；`api_url` 是旧版的单地址字段，仍兼容。`source=local` 时扫描 `local_dir`。
+- `local_dir_env` 不是空值时（服务端设置了 `PIXORA_MUSIC_DIR`），实际扫描环境变量指定目录，`local_dir` 被忽略；这两个字段只在管理端下发，不会出现在 `/site` 里。
+- `PUT` 的 `music` 子对象接受 `enabled` / `source` / `autoplay` / `default_volume` / `api_url` / `platform` / `playlist_id` / `local_dir`。`autoplay` 只控制首页自动尝试播放，浏览器拦截后会等第一次点击/触摸/按键，滚轮、滚动和光标移动也会尝试解锁。`default_volume` 是 0～1 的新访客默认音量，初始 0.3；用户拖过音量后以浏览器本地记忆为准。启用 API 时必须填 `api_url` 与 `playlist_id`；启用本地时必须填 `local_dir`。平台只接受 `netease` / `tencent` / `kugou` / `kuwo` / `migu` / `baidu` / `xiami` / `joox`。
 
 - `PUT /api/v1/admin/settings` ← 上述任意子对象（只写传入的键）
 

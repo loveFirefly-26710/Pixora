@@ -168,6 +168,7 @@ fn api_routes() -> Router<Arc<AppState>> {
             patch(r::catalog::album_update).delete(r::catalog::album_delete),
         )
         .route("/images", get(r::catalog::images_list))
+        .route("/images/{id}/view", post(r::catalog::image_view))
         .route(
             "/images/{id}",
             get(r::catalog::image_detail)
