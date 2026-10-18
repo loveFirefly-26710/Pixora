@@ -644,9 +644,10 @@ async fn verification_issue_consume_and_attempts() {
     let counted = repo.find_verification(latest.id).await.unwrap().unwrap();
     assert_eq!(counted.attempts, 2);
 
-    // 消费后不可再用
+    // 消费后不可再用；第二次消费必须明确返回 false
     let at = now();
-    repo.consume_verification(latest.id, at).await.unwrap();
+    assert!(repo.consume_verification(latest.id, at).await.unwrap());
+    assert!(!repo.consume_verification(latest.id, at).await.unwrap());
     let consumed = repo.find_verification(latest.id).await.unwrap().unwrap();
     assert!(consumed.consumed_at.is_some());
     assert!(!consumed.is_usable(at), "已消费的码立刻失效");

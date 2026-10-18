@@ -1179,6 +1179,28 @@ tr.pick td {
   background: var(--code-bg);
 }
 
+/* 二维码：白底与留白由 SVG 自己画，这里只负责居中、限宽 */
+.qr-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 100%;
+  margin-top: 12px;
+}
+
+.qr-box > div:first-child {
+  line-height: 0;
+}
+
+.qr-box svg {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
+}
+
 .secret-box code {
   color: var(--code-fg);
 }

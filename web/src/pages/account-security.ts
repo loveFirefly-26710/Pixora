@@ -479,10 +479,14 @@ async function openEnableTotp(hooks: VerifyHooks): Promise<void> {
     // 画不出来（链接过长之类）就退回手输密钥，功能不缺。
     let qrBlock: HTMLElement | null = null;
     try {
+      const matrix = encodeQr(setup.otpauth_url);
+      // 站点名长的时候二维码会落到高版本（模块更多）。按模块数放大，
+      // 否则 177×177 的码挤在 196px 里，手机很难扫出来。
+      const qrSize = Math.max(196, Math.min(480, matrix.length * 4));
       qrBlock = h(
         "div.qr-box",
         null,
-        h("div", { html: qrSvg(encodeQr(setup.otpauth_url), { size: 196 }) }),
+        h("div", { html: qrSvg(matrix, { size: qrSize }) }),
         h("div.tip", { style: { marginTop: "6px" }, text: "用验证器 App 扫码即可，不必手输" }),
       );
     } catch {
