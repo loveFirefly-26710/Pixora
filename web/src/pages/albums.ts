@@ -1135,6 +1135,13 @@ export async function render(ctx: PageContext): Promise<void> {
     const ids = new Set(state.selected);
     try {
       const affected = await runBatch("delete", {});
+      if (affected <= 0) {
+        // 服务端一张都没删时不能假装成功把本地列表清空：刷新后图又回来了
+        toastError(new Error("没有删除任何图片，请刷新列表后重试。"));
+        cancelSelection();
+        await loadImages(1);
+        return;
+      }
       toastOk(`已删除 ${affected} 张图片`);
       cancelSelection();
       if (all) {

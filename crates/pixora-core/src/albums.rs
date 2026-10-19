@@ -392,8 +392,13 @@ impl AppState {
     }
 
     /// 回收站里的相册列表（含各自带回来多少张图）。
-    pub async fn deleted_albums(&self, viewer: &Viewer) -> Result<Vec<AlbumPayload>> {
-        let owner = viewer.user().ok_or(AppError::Unauthorized)?;
+    pub async fn deleted_albums(
+        &self,
+        viewer: &Viewer,
+        target_uid: Option<&str>,
+    ) -> Result<Vec<AlbumPayload>> {
+        // 用户视图下看的是目标用户的回收站：albums_owner 负责 uid 校验与审计
+        let owner = self.albums_owner(viewer, target_uid).await?;
         let albums = self.repo.list_deleted_albums(owner.id).await?;
         let mut out = Vec::with_capacity(albums.len());
         for album in albums {

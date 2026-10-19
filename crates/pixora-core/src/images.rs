@@ -387,6 +387,7 @@ impl AppState {
         action: BatchAction,
         ids: &[i64],
         scope: Option<BatchScope>,
+        scope_uid: Option<&str>,
         album_id: Option<i64>,
         tags: Option<Vec<String>>,
         visibility: Option<String>,
@@ -396,10 +397,17 @@ impl AppState {
         // 也绕开了 id 列表的长度上限。
         let ids: Vec<i64> = match scope {
             Some(scope) => {
-                let owner = viewer.user().ok_or(AppError::Unauthorized)?;
+                // 范围查询必须按「正在查看的空间」取属主：管理员从用户列表点
+                // 「查看相册」进来时，前端会带 uid。以前这里直接用登录管理员
+                // 自己的 id，结果全选删除只删了管理员名下（通常没有）的图，
+                // 界面清空、刷新后目标用户的图又全回来了。
+                let owner_id = self
+                    .resolve_owner(viewer, scope_uid)
+                    .await?
+                    .ok_or(AppError::Unauthorized)?;
                 let resolved = self
                     .repo
-                    .image_ids_in_scope(owner.id, scope.album_id, BATCH_SCOPE_LIMIT)
+                    .image_ids_in_scope(owner_id, scope.album_id, BATCH_SCOPE_LIMIT)
                     .await?;
                 if resolved.is_empty() {
                     return Ok(0);
@@ -735,10 +743,16 @@ impl AppState {
     pub async fn deleted_images(
         &self,
         viewer: &Viewer,
+        target_uid: Option<&str>,
         page: PageRequest,
     ) -> Result<(Vec<ImageItemPayload>, i64, i64)> {
-        let owner = viewer.user().ok_or(AppError::Unauthorized)?;
-        let result = self.repo.list_deleted_images(owner.id, page).await?;
+        // 管理员从用户视图删图后，回收站也要能按目标 uid 查看；
+        // 范围（而不是登录者自己的 id）由 resolve_owner 统一校验。
+        let owner_id = self
+            .resolve_owner(viewer, target_uid)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let result = self.repo.list_deleted_images(owner_id, page).await?;
         let retention = self.settings.retention_days().await?;
         let items = self.shape_items(viewer, result.items).await?;
         Ok((items, result.total, retention))
@@ -958,18 +972,20 @@ impl AppState {
         Ok(purged)
     }
 
-    /// 清空当前账号的回收站。
-    pub async fn empty_bin(&self, viewer: &Viewer) -> Result<u64> {
-        let actor = viewer.user().ok_or(AppError::Unauthorized)?.clone();
+    /// 清空回收站（管理员可指定目标用户的 uid）。
+    pub async fn empty_bin(&self, viewer: &Viewer, target_uid: Option<&str>) -> Result<u64> {
+        let owner_id = self
+            .resolve_owner(viewer, target_uid)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
         // 逐张走彻底删除：镜像链接与审计都要留痕
         let page = PageRequest::new(Some(1), Some(500), 500, 500);
-        let listed = self.repo.list_deleted_images(actor.id, page).await?;
+        let listed = self.repo.list_deleted_images(owner_id, page).await?;
         let ids: Vec<i64> = listed.items.iter().map(|item| item.id).collect();
         let purged = self.purge_images(viewer, &ids).await?;
-        // 页面之外还有（超过 500 张）的时候再来一轮，直到清干净
+        // 页面之外还有（超过 500 张）的时候再来一批，直到清干净
         if listed.total > ids.len() as i64 {
-            let owner = viewer.user().ok_or(AppError::Unauthorized)?;
-            let more = self.repo.purge_deleted_images(owner.id, 20_000).await?;
+            let more = self.repo.purge_deleted_images(owner_id, 20_000).await?;
             if !more.is_empty() {
                 self.reclaim_purged(more.clone()).await;
             }

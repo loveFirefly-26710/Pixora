@@ -1579,6 +1579,10 @@ tr.pick td {
   object-fit: cover;
   display: block;
   transition: transform 1.1s cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* 动画一直挂着、靠 play-state 暂停/继续：暂停时停在当前角度，
+     恢复时从那里接着转；直接增删 animation 会让它瞬间回到 0°。 */
+  animation: music-spin 24s linear infinite;
+  animation-play-state: paused;
 }
 
 .hero-frame:hover .hero-frame-inner {
@@ -1587,7 +1591,7 @@ tr.pick td {
 
 /* 音乐播放时，圆片像唱片一样转；暂停就停在当前角度 */
 .hero-frame.is-playing .hero-frame-inner img {
-  animation: music-spin 24s linear infinite;
+  animation-play-state: running;
 }
 
 /* 播放时用 Web Audio 的频谱变量驱动光环与圆片的呼吸；
@@ -2045,6 +2049,16 @@ tr.pick td {
   min-height: 32px;
 }
 
+/* 单张大小上限：在「支持 JPG · …」这一行里单独提亮，扫一眼就能看到 */
+.upload-limit {
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .qitem {
   border-color: var(--border);
   border-radius: var(--r-sm);
@@ -2056,14 +2070,28 @@ tr.pick td {
 }
 
 .qitem .rm {
-  background: rgba(2, 10, 10, 0.68);
-  border: 1px solid var(--border);
+  /* 按钮压在图片上：用主题表面色而不是固定黑底，浅色主题下也看得清 × */
+  background: var(--surface-solid);
+  border: 1px solid var(--border2);
   color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
 }
 
 .qitem .rm:hover {
+  background: var(--danger-soft);
   color: var(--danger);
   border-color: var(--danger);
+}
+
+/* 手机上提一点触控面积，22px 的关闭钮不太好点 */
+@media (max-width: 767px) {
+  .qitem .rm {
+    top: 6px;
+    right: 6px;
+    width: 26px;
+    height: 26px;
+    font-size: 14px;
+  }
 }
 
 .upload-panel .card {
@@ -3347,6 +3375,9 @@ tr.pick td {
 }
 
 .music-panel-body {
+  /* 歌词用 offsetTop 换算滚动位置，需要一个定位上下文；
+     否则 offsetTop 会以整个面板（含头部/标签）为基准，高亮句总是偏上 */
+  position: relative;
   flex: 1;
   min-height: 120px;
   overflow-y: auto;
@@ -3455,7 +3486,9 @@ tr.pick td {
 }
 
 .music-lyrics {
-  padding: 10px 12px 42vh;
+  /* 上下留白由 JS 按滚动区高度补（约一半高度），
+     这样第一句和最后一句也能停在正中；固定 42vh 在不同面板高度下会偏 */
+  padding: 10px 12px;
   text-align: center;
 }
 
@@ -3490,6 +3523,45 @@ tr.pick td {
   color: var(--primary);
   font-weight: 600;
   transform: scale(1.035);
+}
+
+/* 用户翻出去看别的歌词时，进度条上方出现的小圆箭头；滚回当前句或点它之后隐藏。 */
+.music-lyric-back {
+  position: sticky;
+  bottom: 8px;
+  z-index: 3;
+  display: none;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  margin: 0 6px 0 auto;
+  padding: 0;
+  border: 1px solid var(--border2);
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--primary-fg);
+  cursor: pointer;
+  box-shadow: 0 6px 18px var(--glow);
+}
+
+.music-lyric-back.is-visible {
+  display: grid;
+}
+
+.music-lyric-back svg {
+  width: 16px;
+  height: 16px;
+  transition: transform .18s ease;
+}
+
+/* 当前句在下方时箭头朝下，提示用户往下滑回去 */
+.music-lyric-back.is-down svg {
+  transform: rotate(180deg);
+}
+
+.music-lyric-back:hover {
+  filter: brightness(1.06);
 }
 
 .music-panel-foot {
@@ -3859,7 +3931,7 @@ tr.pick td {
   .dropzone::after,
   .music-disc svg,
   .music-cover > svg,
-  .hero-frame.is-playing .hero-frame-inner img,
+  .hero-frame-inner img,
   .hero-frame.is-tapping {
     animation: none !important;
   }

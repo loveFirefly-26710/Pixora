@@ -25,6 +25,7 @@ import {
   toggleMusic,
   toggleMusicMute,
   togglePanel,
+  type LyricLine,
   type PlaybackMode,
 } from "../core/music";
 
@@ -81,10 +82,33 @@ let panelMute: HTMLButtonElement | null = null;
 let panelCover: HTMLElement | null = null;
 let panelClose: HTMLButtonElement | null = null;
 let panelScrim: HTMLElement | null = null;
+/** 当前封面地址：播放进度每 100ms 刷新一次，别每次都重建 <img>。 */
+let panelCoverKey: string | null | undefined;
 let lastBodyKey = "";
 /** 侧栏开关的焦点收尾：打开时记下来源，关闭时还回去。 */
 let panelReturnFocus: HTMLElement | null = null;
 let lastPanelOpen = false;
+/**
+ * 歌词是否跟着播放进度走。
+ *
+ * 用户滚去看前/后几句时置 false：新的一句到达也不抢滚动位置，界面上出现
+ * 「回到当前」按钮。点歌词跳转、切歌、重新打开歌词页都会恢复跟随。
+ */
+let lyricFollow = true;
+/** 拖动进度条时不回写 value，否则拇指会被 timeupdate 拽回旧位置。 */
+let scrubbingProgress = false;
+/** 切歌/切页后的第一次定位用瞬时滚动，别从上一首的句子里一路滑过去。 */
+let instantLyricScroll = false;
+/** 歌词解析结果按原文缓存：播放时每秒会读十几次，不必反复正则。 */
+let lyricCacheKey = "";
+let lyricCacheLines: LyricLine[] = [];
+
+function lyricLines(raw: string): LyricLine[] {
+  if (raw === lyricCacheKey) return lyricCacheLines;
+  lyricCacheKey = raw;
+  lyricCacheLines = parseLyrics(raw);
+  return lyricCacheLines;
+}
 
 /** 顶栏胶囊。站点没启用音乐时调用方不会创建它。 */
 export function musicControl(): HTMLElement {
@@ -231,9 +255,33 @@ export function mountMusicPanel(): void {
       setPanelTab(button.dataset.musicTab === "lyrics" ? "lyrics" : "playlist");
     });
   }
+  progress.addEventListener("pointerdown", () => {
+    scrubbingProgress = true;
+  });
+  const endScrub = (): void => {
+    scrubbingProgress = false;
+  };
+  progress.addEventListener("pointerup", endScrub);
+  progress.addEventListener("pointercancel", endScrub);
+  progress.addEventListener("change", endScrub);
+  progress.addEventListener("blur", endScrub);
+  // max 就是时长（秒），value 直接是秒；这里不能再按百分比换算一次。
   progress.addEventListener("input", () => {
     const duration = musicState().duration;
-    if (duration > 0) seekMusic((Number(progress.value) / 100) * duration);
+    if (duration > 0) seekMusic(Number(progress.value));
+  });
+  // 歌词区：用户自己滚动后先别抢位置，等下一句到达也不回跳。
+  body.addEventListener("wheel", () => markLyricBrowsing(body), { passive: true });
+  body.addEventListener("touchmove", () => markLyricBrowsing(body), { passive: true });
+  body.addEventListener("pointerdown", (event) => {
+    // 点在滚动条/空白处（target 是滚动容器本身）才算用户接管；
+    // 点歌词按钮是「跳到这句」，由按钮自己恢复跟随。
+    if (event.target === body) markLyricBrowsing(body);
+  });
+  body.addEventListener("keydown", (event) => {
+    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
+      markLyricBrowsing(body);
+    }
   });
   document.body.append(scrim, panel);
   panelBody = body;
@@ -257,6 +305,12 @@ export function mountMusicPanel(): void {
     if (document.querySelector(".modal, .lb")) return;
     event.preventDefault();
     closePanel();
+  });
+  // 窗口尺寸变了，滚动区高度和歌词留白要跟着重算，否则居中会偏
+  window.addEventListener("resize", () => {
+    if (!panelBody) return;
+    syncLyricPadding(panelBody);
+    updateActiveRows(panelBody);
   });
   renderPanel();
 }
@@ -285,6 +339,45 @@ function syncControl(root: HTMLElement): void {
 
 function renderControls(): void {
   for (const root of document.querySelectorAll<HTMLElement>(".music-control")) syncControl(root);
+}
+
+/** 回到按钮的箭头方向：当前句在视口上方就朝上，在下方就朝下。 */
+function syncLyricBackDirection(body: HTMLElement): void {
+  const back = body.querySelector<HTMLElement>(".music-lyric-back");
+  if (!back) return;
+  const node =
+    body.querySelector<HTMLElement>(".music-lyric.on") ??
+    body.querySelector<HTMLElement>(".music-lyric");
+  if (!node) {
+    back.classList.remove("is-down");
+    return;
+  }
+  const nodeCenter = node.getBoundingClientRect().top + node.clientHeight / 2;
+  const bodyCenter = body.getBoundingClientRect().top + body.clientHeight / 2;
+  back.classList.toggle("is-down", nodeCenter > bodyCenter);
+}
+
+/** 用户接管歌词滚动：停掉自动跟随，但不改变高亮。 */
+function markLyricBrowsing(body: HTMLElement): void {
+  const state = musicState();
+  if (!state.panelOpen || state.tab !== "lyrics" || !lyricFollow) return;
+  lyricFollow = false;
+  // 正在进行的平滑滚动会被这一下打断，否则它还会往中间滑一下
+  body.scrollTo({ top: body.scrollTop, behavior: "auto" });
+  const back = body.querySelector<HTMLElement>(".music-lyric-back");
+  back?.classList.add("is-visible");
+  syncLyricBackDirection(body);
+}
+
+/** 第一句/最后一句也要能居中：给歌词容器补上和滚动区一半等高的上下留白。 */
+function syncLyricPadding(body: HTMLElement): void {
+  const box = body.querySelector<HTMLElement>(".music-lyrics");
+  if (!box) return;
+  const pad = `${Math.max(0, Math.round(body.clientHeight / 2))}px`;
+  // 直接比对当前样式：歌词容器每次切页/切歌都会重建，用一个模块变量记
+  // 「上次设过多大」会在重建后误判成「已经设过」。
+  if (box.style.paddingTop !== pad) box.style.paddingTop = pad;
+  if (box.style.paddingBottom !== pad) box.style.paddingBottom = pad;
 }
 
 function focusPanel(): void {
@@ -316,8 +409,13 @@ function renderPanel(): void {
   panelScrim?.classList.toggle("is-open", open);
   if (open !== lastPanelOpen) {
     lastPanelOpen = open;
-    if (open) focusPanel();
-    else restorePanelFocus();
+    if (open) {
+      // 每次打开都回到当前句，而不是停在上次离开时翻到的位置
+      lyricFollow = true;
+      focusPanel();
+    } else {
+      restorePanelFocus();
+    }
   }
   if (panelTabs) {
     for (const button of panelTabs.querySelectorAll<HTMLButtonElement>("[data-music-tab]")) {
@@ -339,16 +437,22 @@ function renderPanel(): void {
     if (sub) sub.textContent = track?.artist || (state.loading ? "正在加载歌单…" : "背景音乐");
   }
   if (panelCover) {
-    panelCover.innerHTML = track?.cover_url
-      ? `<img src="${escapeAttr(track.cover_url)}" alt="">`
-      : DISC_ICON;
+    const coverKey = track?.cover_url ?? null;
+    if (coverKey !== panelCoverKey) {
+      panelCoverKey = coverKey;
+      panelCover.innerHTML = coverKey ? `<img src="${escapeAttr(coverKey)}" alt="">` : DISC_ICON;
+    }
   }
   const duration = state.duration || 0;
   if (panelProgress) {
     panelProgress.max = String(duration > 0 ? duration : 100);
-    panelProgress.value = String(
-      duration > 0 ? Math.min(state.currentTime, duration) : 0,
-    );
+    // 用户正在拖时不回写：否则播放中的 timeupdate 会把拇指拽回旧位置，
+    // 手指和光标看起来各在各的地方。
+    if (!scrubbingProgress) {
+      panelProgress.value = String(
+        duration > 0 ? Math.min(state.currentTime, duration) : 0,
+      );
+    }
     panelProgress.disabled = duration <= 0;
   }
   if (panelTime) {
@@ -391,6 +495,9 @@ function renderPanel(): void {
   ].join("|");
   if (key !== lastBodyKey) {
     lastBodyKey = key;
+    // 切歌/切页相当于重新开始看这段歌词，恢复自动跟随
+    lyricFollow = true;
+    instantLyricScroll = true;
     renderPanelBody(panelBody);
   }
   updateActiveRows(panelBody);
@@ -461,11 +568,28 @@ function renderLyrics(body: HTMLElement): void {
     );
     return;
   }
-  const lines = parseLyrics(state.lyrics);
+  const lines = lyricLines(state.lyrics);
   if (lines.length === 0) {
     mount(body, h("div.music-lyrics raw", { text: state.lyrics }));
     return;
   }
+  const back = h("button.music-lyric-back", {
+    type: "button",
+    "aria-label": "回到当前歌词",
+    title: "回到当前歌词",
+    html: `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>`,
+  });
+  back.addEventListener("click", () => {
+    lyricFollow = true;
+    const current =
+      body.querySelector<HTMLElement>(".music-lyric.on") ??
+      body.querySelector<HTMLElement>(".music-lyric");
+    if (current) body.scrollTo({ top: lyricTarget(body, current), behavior: "smooth" });
+    back.classList.remove("is-visible");
+  });
   mount(
     body,
     h(
@@ -479,12 +603,33 @@ function renderLyrics(body: HTMLElement): void {
             "data-lyric-index": String(index),
             title: `${formatClock(line.time)} · 从这里播放`,
             "aria-label": `${line.text}，${formatClock(line.time)}，从这里播放`,
-            on: { click: () => void playFrom(line.time) },
+            on: {
+              click: (event) => {
+                // 点某一句=主动跳到那里，恢复跟随
+                lyricFollow = true;
+                void playFrom(line.time);
+                const node = event.currentTarget as HTMLElement | null;
+                body.scrollTo({ top: lyricTarget(body, node), behavior: "smooth" });
+              },
+            },
           },
           line.text,
         ),
       ),
     ),
+  );
+  // 小圆钮放在滚动区底部右侧（进度条上方），随滚动吸附；不是正文的一部分
+  body.append(back);
+  // 挂载后立刻补上下留白；具体滚到哪句由紧随其后的 updateActiveRows 决定
+  syncLyricPadding(body);
+}
+
+/** 滚动区里的目标位置。offsetTop 以 .music-panel-body（position:relative）为基准。 */
+function lyricTarget(body: HTMLElement, node: HTMLElement | null): number {
+  if (!node) return body.scrollTop;
+  return Math.max(
+    0,
+    node.offsetTop - (body.clientHeight - node.clientHeight) / 2,
   );
 }
 
@@ -494,21 +639,28 @@ function updateActiveRows(body: HTMLElement): void {
     row.classList.toggle("on", Number(row.dataset.trackIndex) === state.index);
   }
   if (state.tab !== "lyrics") return;
-  const lines = parseLyrics(state.lyrics);
+  const lines = lyricLines(state.lyrics);
   if (lines.length === 0) return;
   let active = -1;
   for (let index = 0; index < lines.length; index += 1) {
-    if (lines[index]!.time <= state.currentTime + 0.15) active = index;
+    if (lines[index]!.time <= state.currentTime + 0.05) active = index;
     else break;
   }
   const nodes = body.querySelectorAll<HTMLElement>(".music-lyric");
   nodes.forEach((node, index) => node.classList.toggle("on", index === active));
-  const activeNode = nodes[active];
-  if (activeNode && state.panelOpen) {
-    const target = activeNode.offsetTop - body.clientHeight / 2 + activeNode.clientHeight / 2;
-    if (Math.abs(body.scrollTop - target) > 24) {
-      body.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
-    }
+  const back = body.querySelector<HTMLElement>(".music-lyric-back");
+  back?.classList.toggle("is-visible", !lyricFollow);
+  // 开场还没到第一句时也把第一句摆到中间，而不是贴在顶部
+  const activeNode = nodes[active] ?? nodes[0];
+  if (!activeNode) return;
+  syncLyricBackDirection(body);
+  // 先按滚动区高度补上下留白，第一句/最后一句才有空间滚到正中
+  syncLyricPadding(body);
+  if (!lyricFollow || !state.panelOpen) return;
+  const target = lyricTarget(body, activeNode);
+  if (instantLyricScroll || Math.abs(body.scrollTop - target) > 24) {
+    body.scrollTo({ top: target, behavior: instantLyricScroll ? "auto" : "smooth" });
+    instantLyricScroll = false;
   }
 }
 

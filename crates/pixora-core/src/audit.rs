@@ -37,6 +37,8 @@ pub mod actions {
     pub const ACCOUNT_DELETE: &str = "account_delete";
     /// 换绑邮箱：管理员代改与本人自助都记这一条，detail 里的 `via` 说明是谁改的
     pub const ACCOUNT_EMAIL_CHANGE: &str = "account_email_change";
+    /// 管理员修改账号资料：角色、密码等。以前混在 settings_change 里，日志会归错类
+    pub const ACCOUNT_UPDATE: &str = "account_update";
     pub const QUOTA_CHANGE: &str = "quota_change";
     pub const SETTINGS_CHANGE: &str = "settings_change";
     pub const STORAGE_CHANGE: &str = "storage_change";

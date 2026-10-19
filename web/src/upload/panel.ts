@@ -69,8 +69,8 @@ export interface UploadPanelHandle {
 }
 
 /** 支持哪些格式、单张上限多少——登录后按「我的生效策略」（管理员可能按用户覆盖过），
- *  未登录才回落到 /site 的全局值。 */
-function supportedHint(): string {
+ *  未登录才回落到 /site 的全局值。上限单独加粗标出来，扫一眼就能看到。 */
+function supportedHintNodes(): Node[] {
   const limits = getState().user?.limits;
   const formats = (limits?.formats ?? getState().site?.formats ?? []).map((ext) =>
     // 库里存的是 jpg（JPEG 归一后的名字），写 JPG 更贴近用户看到的扩展名
@@ -78,11 +78,15 @@ function supportedHint(): string {
   );
   const maxBytes = limits?.max_file_size ?? getState().site?.max_file_bytes;
   const size = maxBytes ? formatBytes(maxBytes) : "";
-  if (formats.length === 0) {
-    return size ? `单张最大 ${size}` : "";
+  const nodes: Node[] = [];
+  if (formats.length > 0) {
+    nodes.push(document.createTextNode(`支持 ${formats.join(" · ")}`));
   }
-  const list = formats.join(" · ");
-  return size ? `支持 ${list}；单张最大 ${size}` : `支持 ${list}`;
+  if (size) {
+    nodes.push(document.createTextNode(formats.length > 0 ? "；单张最大 " : "单张最大 "));
+    nodes.push(h("b.upload-limit", { text: size }));
+  }
+  return nodes;
 }
 
 /** 预览格最多渲染多少张：1000 张全铺出来会把首屏拖垮，剩下的靠汇总数字表达。 */
@@ -101,9 +105,8 @@ function statusBadge(item: QueueItem): HTMLElement {
     case "uploading":
       return badge(`上传中 ${item.progress}%`, "warn");
     case "done":
-      return badge("已完成", "ok");
     case "skipped":
-      return badge("已跳过", "info");
+      return badge("已完成", "ok");
     case "failed":
       return badge("失败", "err");
     case "needs-reselect":
@@ -200,8 +203,14 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   setUploadOwnerUid(options.ownerUid ?? null);
 
   let notices: Array<{ tone: "info" | "ok" | "warn" | "err"; text: string }> = [];
-  let lastToast = { message: "", at: 0 };
+  /** 面板内的提示（预检结果、队列完成等）几秒后自动收起，别一直占着位置。 */
+  let noticeTimer: number | undefined;
+  // 同一类错误（比如审核服务不可用）在 30 秒内只弹一次：一次上传风暴里
+  // 八张图同时失败，不该变成八条一模一样的提醒。消息本身不同仍会各弹一次。
+  let lastToast = { key: "", at: 0 };
   let destroyed = false;
+  /** 面板曾经挂载过：用来区分「还没挂上去」和「切页面后被摘掉」。 */
+  let wasConnected = false;
 
   // ---------- 入口区 ----------
 
@@ -225,21 +234,9 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     });
   }
 
-  const hintEl = h("div.tip", { style: { marginTop: "8px" }, text: supportedHint() });
-  if (options.compact) {
-    hintEl.append(
-      document.createTextNode(" · "),
-      h("a", { href: "#/upload", text: "并发与更多设置在完整上传页调整" }),
-    );
-  }
+  const hintEl = h("div.tip", { style: { marginTop: "8px" } }, ...supportedHintNodes());
   const refreshHint = (): void => {
-    hintEl.textContent = supportedHint();
-    if (options.compact) {
-      hintEl.append(
-        document.createTextNode(" · "),
-        h("a", { href: "#/upload", text: "并发与更多设置在完整上传页调整" }),
-      );
-    }
+    hintEl.replaceChildren(...supportedHintNodes());
     // 相册清单也可能刚变（新建/删除相册），下拉跟着重画
     if (albumSelect.options.length === 0) void fetchAlbums();
   };
@@ -616,6 +613,13 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   function pushNotice(tone: "info" | "ok" | "warn" | "err", text: string): void {
     notices = [...notices, { tone, text }].slice(-NOTICE_LIMIT);
     renderNotices();
+    // 新提示进来时重新计时；3 秒足够读完一行，也不会把页面长期顶下去
+    if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
+    noticeTimer = window.setTimeout(() => {
+      noticeTimer = undefined;
+      notices = [];
+      renderNotices();
+    }, 3000);
   }
 
   function renderPreview(): void {
@@ -630,7 +634,9 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
         "small",
         {
           text: `${stats.total} 张 · 合计 ${formatBytes(stats.bytesTotal)}${
-            stats.success > 0 ? ` · 已完成 ${stats.success} 张` : ""
+            stats.success + stats.skipped > 0
+              ? ` · 已完成 ${stats.success + stats.skipped} 张`
+              : ""
           }`,
         },
       ),
@@ -676,7 +682,8 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   }
 
   function rowNote(item: QueueItem): { text: string; mono: boolean; danger: boolean } {
-    if (item.status === "done" && item.result) {
+    if ((item.status === "done" || item.status === "skipped") && item.result) {
+      // 去重与正常完成显示同一种说明，不暴露服务端是否已有同一份文件
       return { text: shortHash(item.result.sha256, "webp"), mono: true, danger: false };
     }
     if (item.status === "failed") {
@@ -831,10 +838,11 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
         } · 并发 ${settings.concurrency}`;
 
     statHost.replaceChildren(
-      statCard("上传成功", formatNumber(stats.success), "ok"),
-      statCard("跳过（已存在）", formatNumber(stats.skipped)),
+      // 成功与去重都算「已完成」，不把服务端已有文件这件事暴露在统计里
+      statCard("已完成", formatNumber(stats.success + stats.skipped), "ok"),
       statCard("等待中", formatNumber(stats.waiting), "muted"),
       statCard("失败", formatNumber(stats.failed), stats.failed > 0 ? "err" : "muted"),
+      statCard("总计", formatNumber(stats.total), "muted"),
     );
 
     pauseBtn.textContent = paused ? "继续" : "暂停";
@@ -872,9 +880,25 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
 
   // 站点或用户设置变了（管理员改了格式白名单、配额调整）就刷新提示：
   // 这一页一直开着的时候，清单不该还停在进页面时那份
-  const stateUnsubscribe = subscribeState(() => refreshHint());
+  // 调用方在 createUploadPanel 返回后立刻挂载；microtask 里确认它确实上过页面。
+  // 不能只靠「收到过队列事件」判断，否则从头到尾没上传过的旧面板会漏掉 detach。
+  queueMicrotask(() => {
+    if (root.isConnected) wasConnected = true;
+  });
+  const stateUnsubscribe = subscribeState(() => {
+    if (destroyed) return;
+    if (wasConnected && !root.isConnected) return;
+    refreshHint();
+  });
   const unsubscribe = queue.subscribe((event) => {
     if (destroyed) return;
+    // 页面切走后旧面板还挂在队列上：必须在第一次事件时断开，
+    // 否则同一个失败事件会在隐藏面板上再弹一次 toast（用户会看到两遍）。
+    if (root.isConnected) wasConnected = true;
+    else if (wasConnected) {
+      detach();
+      return;
+    }
     switch (event.kind) {
       case "items":
         renderAll();
@@ -918,10 +942,12 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
       case "error": {
         const err = event.error;
         const message = err instanceof ApiError ? err.message : err instanceof Error ? err.message : String(err);
-        // 一次 1000 张的失败风暴不能变成 1000 个 toast：同样的消息 4 秒内只提示一次
+        // 失败风暴不能变成一屏 toast：按「错误码 + 文案」合并，30 秒内只提示一次。
+        // 同一批里多张图因同一个后端故障失败时，用户只需要知道一次。
+        const key = err instanceof ApiError ? `${err.code}:${message}` : message;
         const now = Date.now();
-        if (message !== lastToast.message || now - lastToast.at > 4000) {
-          lastToast = { message, at: now };
+        if (key !== lastToast.key || now - lastToast.at > 30_000) {
+          lastToast = { key, at: now };
           if (err instanceof ApiError && (err.code === "RATE_LIMITED" || err.code === "QUEUE_FULL")) {
             toastRateLimited(err);
           } else {
@@ -962,21 +988,26 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   });
   renderAll();
 
+  /** 拆掉面板的全部订阅与全局监听；重复调用无副作用。 */
+  function detach(): void {
+    if (destroyed) return;
+    destroyed = true;
+    if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
+    unsubscribe();
+    stateUnsubscribe();
+    uploadUnsubscribe();
+    document.removeEventListener("paste", onPaste);
+    document.removeEventListener("dragover", preventDrop);
+    document.removeEventListener("drop", preventDrop);
+    root.remove();
+  }
+
   return {
     root,
     refreshAlbums(albums, albumId) {
       setAlbumOptions(albums, albumId);
       updateProgress();
     },
-    destroy() {
-      destroyed = true;
-      unsubscribe();
-      stateUnsubscribe();
-      uploadUnsubscribe();
-      document.removeEventListener("paste", onPaste);
-      document.removeEventListener("dragover", preventDrop);
-      document.removeEventListener("drop", preventDrop);
-      root.remove();
-    },
+    destroy: detach,
   };
 }

@@ -406,9 +406,11 @@ impl AppState {
             detail_changes.insert("role".into(), serde_json::json!(role_value));
         }
 
-        if !detail_changes.is_empty() {
+        // 只改邮箱时 ACCOUNT_EMAIL_CHANGE 已经单独记过，不再重复一条；
+        // 角色/密码这类资料修改记 ACCOUNT_UPDATE，归到「账户信息」而不是系统设置。
+        if detail_changes.keys().any(|key| key != "email") {
             self.audit_detail(
-                actions::SETTINGS_CHANGE,
+                actions::ACCOUNT_UPDATE,
                 Some(admin.id),
                 &target.uid,
                 serde_json::Value::Object(detail_changes),
@@ -840,6 +842,7 @@ impl AppState {
             .await?
             .ok_or_else(|| AppError::not_found("用户"))?;
         self.ensure_not_install_admin(admin, &target).await?;
+        let custom = policy.is_some();
         match policy {
             Some(policy) => {
                 self.repo.upsert_user_policy(user_id, &policy).await?;
@@ -849,10 +852,10 @@ impl AppState {
             }
         }
         self.audit_detail(
-            actions::SETTINGS_CHANGE,
+            actions::ACCOUNT_UPDATE,
             Some(admin.id),
             &target.uid,
-            serde_json::json!({ "scope": "rate_limit" }),
+            serde_json::json!({ "scope": "rate_limit", "custom": custom }),
             ip,
         )
         .await;

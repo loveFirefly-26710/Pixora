@@ -126,6 +126,9 @@ const lyricCache = new Map<string, string>();
 let audio: HTMLAudioElement | null = null;
 let loadingPromise: Promise<void> | null = null;
 let lastPlayErrorAt = 0;
+/** 播放中按 ~10Hz 把 audio.currentTime 同步进状态：timeupdate 只有 4Hz，歌词和进度条会慢半拍。 */
+let progressFrame = 0;
+let lastProgressTick = 0;
 /** 用户主动暂停过：之后回到首页不再擅自恢复播放。 */
 let userPaused = false;
 /** 自动播放被浏览器拦下后，等第一次交互再开始。 */
@@ -226,6 +229,45 @@ function stopRhythm(): void {
   }
   rhythmLevel = 0;
   setBeat(0);
+}
+
+/** 播放时用 rAF 细粒度同步进度；暂停后停表，不让画面继续往前走。 */
+function startProgressTicker(): void {
+  if (progressFrame) return;
+  lastProgressTick = 0;
+  const tick = (now: number): void => {
+    progressFrame = 0;
+    if (!audio || !state.playing) return;
+    if (now - lastProgressTick >= 100) {
+      lastProgressTick = now;
+      let changed = false;
+      const time = audio.currentTime;
+      if (Number.isFinite(time) && Math.abs(time - state.currentTime) >= 0.02) {
+        state.currentTime = time;
+        changed = true;
+      }
+      // 兜底同步时长：极少数情况下 loadedmetadata 会被跳过（切歌太快、媒体缓存），
+      // 进度条的 max 会一直是 0，表现为「时间在走、滑块不动」。
+      const duration = audio.duration;
+      if (duration && Number.isFinite(duration) && Math.abs(duration - state.duration) > 0.01) {
+        state.duration = duration;
+        changed = true;
+      }
+      if (changed) notify();
+    }
+    progressFrame = requestAnimationFrame(tick);
+  };
+  progressFrame = requestAnimationFrame(tick);
+}
+
+function stopProgressTicker(): void {
+  if (progressFrame) {
+    cancelAnimationFrame(progressFrame);
+    progressFrame = 0;
+  }
+  if (!audio) return;
+  const time = audio.currentTime;
+  if (Number.isFinite(time)) state.currentTime = time;
 }
 
 function startRhythm(): void {
@@ -387,40 +429,67 @@ function ensureAudio(): HTMLAudioElement {
     // 自动播放可能没有手势：先尝试接管，失败就等第一次点击
     void setupRhythm(audio!);
     if (analyser) startRhythm();
+    startProgressTicker();
   });
   audio.addEventListener("pause", () => {
     state.playing = false;
     stopRhythm();
+    // 暂停瞬间把实际时间落下来：否则进度条/歌词停在最后一次 timeupdate（最多慢 250ms）
+    stopProgressTicker();
     notify();
   });
   audio.addEventListener("ended", () => {
     stopRhythm();
+    stopProgressTicker();
     // 单曲循环会显得像卡住；有下一首就下一首，没有就从头再来
     if (state.tracks.length > 1) void next();
     else {
       audio!.currentTime = 0;
+      state.currentTime = 0;
       void audio!.play().catch(() => {});
     }
   });
   audio.addEventListener("timeupdate", () => {
     state.currentTime = audio?.currentTime ?? 0;
+    // 时长没对上时顺手补一次，避免播放器一直停在「0:00 / 0:00」
+    const duration = audio?.duration;
+    if (duration && Number.isFinite(duration) && Math.abs(duration - state.duration) > 0.01) {
+      state.duration = duration;
+    }
     notify();
   });
-  audio.addEventListener("loadedmetadata", () => {
+  audio.addEventListener("seeked", () => {
+    state.currentTime = audio?.currentTime ?? state.currentTime;
+    notify();
+  });
+  const syncDuration = (): void => {
     const duration = audio?.duration;
     if (duration && Number.isFinite(duration)) {
       state.duration = duration;
       notify();
     }
-  });
+  };
+  audio.addEventListener("loadedmetadata", syncDuration);
+  audio.addEventListener("durationchange", syncDuration);
   audio.addEventListener("error", () => {
     if (!audio?.src) return;
     state.playing = false;
     stopRhythm();
+    stopProgressTicker();
     state.message = "这首音频加载失败，换一首试试";
     notify();
   });
   return audio;
+}
+
+/**
+ * 只同步后台配置的默认音量，不碰当前播放。
+ *
+ * 管理员保存设置后调用：歌单/API 没改时，音乐不该被打断；但「新访客默认音量」
+ * 可能刚改过，本地还没存过音量的会话要跟着新值走。
+ */
+export function syncMusicDefaults(): void {
+  syncDefaultVolume();
 }
 
 /** 首次点击前把歌单拉好，播放动作才不会被网络请求打断。 */
@@ -438,6 +507,7 @@ export async function preloadMusic(): Promise<void> {
 export async function reloadMusic(): Promise<void> {
   disarmAutoplayUnlock();
   stopRhythm();
+  stopProgressTicker();
   userPaused = false;
   if (audio) {
     audio.pause();
@@ -510,6 +580,13 @@ function prepareTrack(index: number): void {
   const player = ensureAudio();
   if (player.src !== new URL(track.audio_url, location.href).href) {
     player.src = track.audio_url;
+  }
+  // 重复点当前这首也要从头开始：只重置 state 而没动音频的话，
+  // 进度和歌词会被下一次 timeupdate 拉回旧位置，看起来像「点了没反应」。
+  try {
+    player.currentTime = 0;
+  } catch {
+    /* 元数据还没到时忽略，下一首歌本来也会从 0 开始 */
   }
   state.index = index;
   state.currentTime = 0;

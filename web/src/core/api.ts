@@ -24,6 +24,7 @@ export type ApiErrorCode =
   | "FILE_TOO_LARGE"
   | "UNSUPPORTED_FORMAT"
   | "INVALID_IMAGE"
+  | "CONTENT_REJECTED"
   | "RATE_LIMITED"
   | "QUEUE_FULL"
   | "TERMS_REQUIRED"
