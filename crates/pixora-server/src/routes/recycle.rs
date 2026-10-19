@@ -16,7 +16,9 @@ use axum::Json;
 use pixora_core::AppState;
 use pixora_repo::PageRequest;
 
-use crate::http::{cookie_value, finish, finish_page, parse_i64, request_context, CSRF_COOKIE};
+use crate::http::{
+    cookie_value, finish, finish_page, parse_i64, parse_str, request_context, CSRF_COOKIE,
+};
 
 use super::{bad_request, require_user, viewer_for, PeerAddr};
 
@@ -39,11 +41,17 @@ pub async fn images_list(
 
     let page = parse_i64(&query, "page").unwrap_or(1).max(1);
     let per_page = parse_i64(&query, "per_page").unwrap_or(24).clamp(1, 100);
-    let viewer = viewer_for(Some(&auth), false);
+    // 管理员从用户视图删图后，回收站也要按目标 uid 查（否则看到的是自己的空回收站）
+    let uid = parse_str(&query, "uid").map(str::to_string);
+    let viewer = viewer_for(Some(&auth), uid.is_some());
 
     finish_page(
         state
-            .deleted_images(&viewer, PageRequest::new(Some(page), Some(per_page), 24, 100))
+            .deleted_images(
+                &viewer,
+                uid.as_deref(),
+                PageRequest::new(Some(page), Some(per_page), 24, 100),
+            )
             .await
             .map(|(items, total, _retention)| pixora_repo::Page {
                 items,
@@ -60,6 +68,7 @@ pub async fn images_restore(
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let auth = match write_guard(&state, &headers, &method, peer.addr()).await {
@@ -70,10 +79,8 @@ pub async fn images_restore(
     if ids.is_empty() {
         return bad_request("没有选中任何图片");
     }
-    match state
-        .restore_images(&viewer_for(Some(&auth), false), &ids)
-        .await
-    {
+    let viewer = viewer_for(Some(&auth), query.contains_key("uid"));
+    match state.restore_images(&viewer, &ids).await {
         Ok(restored) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "restored": restored,
             "csrf_token": cookie_value(&headers, CSRF_COOKIE),
@@ -88,6 +95,7 @@ pub async fn images_purge(
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let auth = match write_guard(&state, &headers, &method, peer.addr()).await {
@@ -98,10 +106,8 @@ pub async fn images_purge(
     if ids.is_empty() {
         return bad_request("没有选中任何图片");
     }
-    match state
-        .purge_images(&viewer_for(Some(&auth), false), &ids)
-        .await
-    {
+    let viewer = viewer_for(Some(&auth), query.contains_key("uid"));
+    match state.purge_images(&viewer, &ids).await {
         Ok(purged) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "purged": purged,
             "csrf_token": cookie_value(&headers, CSRF_COOKIE),
@@ -116,12 +122,15 @@ pub async fn images_empty(
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let auth = match write_guard(&state, &headers, &method, peer.addr()).await {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
-    match state.empty_bin(&viewer_for(Some(&auth), false)).await {
+    let uid = parse_str(&query, "uid").map(str::to_string);
+    let viewer = viewer_for(Some(&auth), uid.is_some());
+    match state.empty_bin(&viewer, uid.as_deref()).await {
         Ok(purged) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "purged": purged,
             "csrf_token": cookie_value(&headers, CSRF_COOKIE),
@@ -136,6 +145,7 @@ pub async fn albums_list(
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
     let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
@@ -145,7 +155,9 @@ pub async fn albums_list(
     if let Err(resp) = super::ensure_scope(&auth, "read") {
         return resp;
     }
-    match state.deleted_albums(&viewer_for(Some(&auth), false)).await {
+    let uid = parse_str(&query, "uid").map(str::to_string);
+    let viewer = viewer_for(Some(&auth), uid.is_some());
+    match state.deleted_albums(&viewer, uid.as_deref()).await {
         Ok(albums) => finish::<serde_json::Value>(Ok(serde_json::json!({ "albums": albums }))),
         Err(err) => crate::http::error_response(err),
     }
@@ -158,15 +170,14 @@ pub async fn album_restore(
     method: Method,
     peer: PeerAddr,
     Path(album_id): Path<i64>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let auth = match write_guard(&state, &headers, &method, peer.addr()).await {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
-    match state
-        .restore_album(&viewer_for(Some(&auth), false), album_id)
-        .await
-    {
+    let viewer = viewer_for(Some(&auth), query.contains_key("uid"));
+    match state.restore_album(&viewer, album_id).await {
         Ok(restored) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "restored_images": restored,
             "csrf_token": cookie_value(&headers, CSRF_COOKIE),
@@ -182,15 +193,14 @@ pub async fn album_purge(
     method: Method,
     peer: PeerAddr,
     Path(album_id): Path<i64>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let auth = match write_guard(&state, &headers, &method, peer.addr()).await {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
-    match state
-        .purge_album(&viewer_for(Some(&auth), false), album_id)
-        .await
-    {
+    let viewer = viewer_for(Some(&auth), query.contains_key("uid"));
+    match state.purge_album(&viewer, album_id).await {
         Ok(purged) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "purged_images": purged,
             "csrf_token": cookie_value(&headers, CSRF_COOKIE),

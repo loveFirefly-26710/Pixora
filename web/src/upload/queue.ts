@@ -129,13 +129,11 @@ export interface IncomingFile {
 
 const MAX_RETRIES = 3;
 /**
- * 网络类失败给更多次机会。
- *
- * 「连接被中断」多半是服务端在重启（换构建、崩了重拉）：等十几秒就恢复了，
- * 按普通上限 3 次（累计不到 6 秒）会当场判死，用户回来看到的是一排失败。
- * 网络类失败按 8 次、退避到 8 秒封顶，总共能等半分钟左右。
+ * 网络类失败的次数。以前给到 8 次（服务端重启要等半分钟），但审核服务不可用
+ * 也会落进这一类：用户看着它重试八轮、弹一屏提醒，实际恢复不了。统一最多
+ * 3 次重试，失败后明确提示一次，把选择权交回给用户。
  */
-const MAX_NETWORK_RETRIES = 8;
+const MAX_NETWORK_RETRIES = 3;
 /** 预检一批最多发多少个哈希。契约上限 1000，留出余量防止哈希串太长；
  *  实际分块还受「单批次最大张数」约束，取两者的小值。 */
 const PREFLIGHT_BATCH = 400;
@@ -173,6 +171,7 @@ const PERMANENT_CODES = new Set<string>([
   "FILE_TOO_LARGE",
   "UNSUPPORTED_FORMAT",
   "INVALID_IMAGE",
+  "CONTENT_REJECTED",
   "TERMS_REQUIRED",
   "ACCOUNT_PENDING",
   "ACCOUNT_SUSPENDED",
@@ -185,6 +184,90 @@ export function isPermanentError(err: unknown): boolean {
     return !err.isTransient;
   }
   return false;
+}
+
+/**
+ * 给用户看的上传失败文案。
+ *
+ * 服务端的 detail/message 里可能带着审核服务地址、上游响应、请求路径之类的
+ * 排查信息，这些不该出现在提示里。这里按错误码换成一句能行动的话；只有
+ * 「文件太大」「格式不对」这类本来就是给用户看的业务错误才原样保留。
+ */
+export function friendlyUploadError(err: unknown): string {
+  if (!(err instanceof ApiError)) return "上传失败，请稍后重试。";
+  switch (err.code) {
+    case "CONTENT_REJECTED":
+      return "图片未通过内容审核，请更换图片后再试。";
+    case "FILE_TOO_LARGE":
+      // 服务端消息里带着实际大小与上限，本来就是给用户看的
+      return err.message;
+    case "UNSUPPORTED_FORMAT":
+      return err.message;
+    case "INVALID_IMAGE":
+      return invalidImageMessage(err.message);
+    case "BAD_REQUEST":
+      if (err.message.includes("读取上传内容失败")) {
+        return "图片上传中断，请重新选择文件后再试。";
+      }
+      return err.message || "这张图片无法上传，请调整后重试。";
+    case "STORAGE_UNAVAILABLE":
+      return "上传服务暂时不可用（内容审核或存储服务可能未就绪），请稍后重试。";
+    case "NETWORK":
+      return "网络连接中断，上传没有完成，请检查网络后重试。";
+    case "INTERNAL":
+      return "服务端暂时无法完成上传，请稍后重试。";
+    case "RATE_LIMITED":
+    case "QUEUE_FULL":
+      // 服务端已经给出了等待时长，照搬比笼统的「稍后重试」有用
+      return err.message;
+    default:
+      return err.message || "上传失败，请稍后重试。";
+  }
+}
+
+/** 像素数转成人能一眼读懂的量级（8000 万、1.2 亿）。 */
+function readablePixels(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(1).replace(/\.0$/, "")} 亿`;
+  if (value >= 10_000) return `${Math.round(value / 10_000)} 万`;
+  return String(value);
+}
+
+/**
+ * 尺寸类错误单独说清楚：像素上限、长宽上限是站点的明确规定，
+ * 重试不会变好，用户需要知道的是「图太大，缩一下再传」。
+ */
+function invalidImageMessage(message: string): string {
+  const text = message.replace(/^文件不是有效的图片[:：]\s*/, "");
+  const pixels = text.match(/像素数\s*(\d+)\s*超出上限\s*(\d+)(?:（(\d+)×(\d+)）)?/);
+  if (pixels) {
+    const actual = Number(pixels[1]);
+    const limit = Number(pixels[2]);
+    const dims = pixels[3] && pixels[4] ? `（${pixels[3]}×${pixels[4]}）` : "";
+    return `图片分辨率过大：${readablePixels(actual)}像素${dims}，超过本站上限 ${readablePixels(limit)}像素。请缩小图片后再试。`;
+  }
+  const width = text.match(/宽度\s*(\d+)\s*超出上限\s*(\d+)/);
+  if (width) {
+    return `图片宽度太大：${width[1]} 像素，本站上限 ${width[2]} 像素。请缩小图片后再试。`;
+  }
+  const height = text.match(/高度\s*(\d+)\s*超出上限\s*(\d+)/);
+  if (height) {
+    return `图片高度太大：${height[1]} 像素，本站上限 ${height[2]} 像素。请缩小图片后再试。`;
+  }
+  if (text.includes("文件为空")) return "文件是空的，请重新选择。";
+  if (text.includes("无法识别") || text.includes("格式异常") || text.includes("SVG")) {
+    return "无法识别这张图片的格式，请换一张图片。";
+  }
+  return "这张图片不符合本站要求，请换一张图片后再试。";
+}
+
+/** 面板只负责提示，不接触原始错误里的 detail；用于 toast 的副本去掉它们。 */
+function publicUploadError(err: unknown): unknown {
+  if (!(err instanceof ApiError)) return new Error(friendlyUploadError(err));
+  return new ApiError(err.status, {
+    code: err.code,
+    message: friendlyUploadError(err),
+  }, err.retryAfter);
 }
 
 /** 四类统计口径：成功 / 跳过 / 等待中 / 失败；跳过单独算一类，它没消耗带宽也没占盘。 */
@@ -918,7 +1001,7 @@ class UploadQueue {
         this.emit({
           kind: "notice",
           tone: "warn",
-          text: "本机无法在后台计算哈希，已跳过预检直接上传（服务器会自行判重）。",
+          text: "本机无法在后台计算哈希，将直接上传。",
         });
       }
     } finally {
@@ -950,24 +1033,20 @@ class UploadQueue {
         });
         for (const hash of result.exist ?? []) exist.add(hash);
       }
-      let skipped = 0;
       for (const item of candidates) {
         item.checked = true;
         if (item.sha256 && exist.has(item.sha256)) {
           item.status = "skipped";
           item.progress = 100;
-          item.note = "服务器已有相同文件，未消耗带宽";
-          skipped += 1;
+          // 不在界面上暴露「服务器已有相同文件」：那是服务端去重信息
+          item.note = "上传完成";
           this.emitItem(item.id);
         }
       }
       this.emit({
         kind: "notice",
         tone: "info",
-        text:
-          skipped > 0
-            ? `预检结果：${candidates.length} 张里有 ${skipped} 张服务器已存在，上传时自动跳过。`
-            : `预检结果：${candidates.length} 张都是新文件，将全部上传。`,
+        text: `预检完成：${candidates.length} 张图片已就绪。`,
       });
     } catch (err) {
       // 未登录却撞上 401：站点多半刚把游客上传关掉，重拉站点信息后停队，
@@ -975,8 +1054,8 @@ class UploadQueue {
       if (this.handleGuestRevoked(err)) return;
       // 预检失败不阻塞主流程：照常上传，服务端靠 dedup 自己判重
       for (const item of candidates) item.checked = true;
-      this.emit({ kind: "notice", tone: "warn", text: "预检失败，将逐张上传，由服务器判重。" });
-      this.emit({ kind: "error", error: err });
+      this.emit({ kind: "notice", tone: "warn", text: "预检失败，将逐张上传。" });
+      this.emit({ kind: "error", error: publicUploadError(err) });
     } finally {
       this.preflightBusy = false;
         this.pump();
@@ -1106,18 +1185,19 @@ class UploadQueue {
       item.durationMs = Date.now() - startedAt;
       this.durations.push(item.durationMs);
       if (result.dedup) {
+        // 去重是服务端内部行为；对用户统一显示「已完成」，不暴露库里已有这份文件
         item.status = "skipped";
-        item.note = "服务器已有相同文件，未消耗带宽";
+        item.note = "上传完成";
       } else {
         item.status = "done";
         item.note = item.thumb ? "客户端已转 WebP 缩略图" : item.thumbNote;
       }
       if (result.fallback_message) {
-        // 契约约定：fallback_message 非空 = 远端后端失败已回退本地，用户必须知道文件最后落在哪
+        // 远端后端失败时文件实际落在本地，用户需要知道；上游错误细节不往界面带
         this.emit({
           kind: "notice",
           tone: "warn",
-          text: `「${item.name}」远端后端失败已回退本地：${result.fallback_message}`,
+          text: `「${item.name}」远端存储暂时不可用，文件已保存到本地存储。`,
         });
       }
       for (const hook of [...this.uploadedHooks]) hook(result);
@@ -1148,15 +1228,8 @@ class UploadQueue {
     const apiError = err instanceof ApiError ? err : null;
     const permanent = isPermanentError(err);
 
-    if (apiError && (apiError.code === "RATE_LIMITED" || apiError.code === "QUEUE_FULL")) {
-      this.emit({
-        kind: "notice",
-        tone: "warn",
-        text: `触发服务端限流（${apiError.message}），按 Retry-After 等待后自动重试。`,
-      });
-    }
-
-    // 网络类失败（服务端不可达、连接被切）多给几次机会：多半是重启，等一会儿就好
+    // 只有网络抖动与服务端临时不可用才等一会儿再试；尺寸/格式/配额这类
+    // 明确规定导致的失败，重试多少次结果都一样，直接给出原因。
     const limit = apiError?.code === "NETWORK" ? MAX_NETWORK_RETRIES : MAX_RETRIES;
     if (!permanent && item.retries < limit) {
       item.retries += 1;
@@ -1164,47 +1237,44 @@ class UploadQueue {
       item.retryAt = Date.now() + delay;
       item.status = "ready";
       item.progress = 0;
-      item.note = `第 ${item.retries}/${limit} 次重试将在 ${Math.max(1, Math.round(delay / 1000))} 秒后开始`;
-      item.error = apiError?.message ?? (err instanceof Error ? err.message : "上传失败");
+      item.note = "正在重试…";
+      item.error = friendlyUploadError(err);
       return;
     }
 
     item.status = "failed";
     item.retryAt = null;
-    // detail 里带着请求路径与 readyState，是唯一能用来排查的部分，别丢
-    const describe = apiError
-      ? apiError.detail
-        ? `${apiError.message}（${apiError.detail}）`
-        : apiError.message
-      : err instanceof Error
-        ? err.message
-        : "上传失败";
-
-    item.error = describe;
+    // 行内只显示脱敏后的原因；detail 里有请求路径/上游响应，不往界面上放
+    item.error = friendlyUploadError(err);
     if (permanent && apiError) {
-      item.note = "该错误重试也一样，请先处理原因";
+      item.note =
+        apiError.code === "INVALID_IMAGE" ||
+        apiError.code === "FILE_TOO_LARGE" ||
+        apiError.code === "UNSUPPORTED_FORMAT"
+          ? "请调整这张图片后重新选择"
+          : "请先处理原因后再上传";
     } else if (item.retries > 0) {
       item.note = `已重试 ${item.retries} 次，可点击重试`;
     } else {
       item.note = "可点击重试";
     }
 
-    // 连续多张网络失败通常不是「这张图有问题」，而是服务端不在了。
-    // 十行一模一样的红字看不出这一点，所以在第 3 张失败时给一条明确的诊断。
+    // 连续多张网络失败通常不是「这张图有问题」，而是网络/服务端整体不可用。
     if (apiError?.code === "NETWORK") {
       this.networkFailures += 1;
       if (this.networkFailures === 3) {
         this.emit({
           kind: "notice",
           tone: "err",
-          text: `已连续 ${this.networkFailures} 张因网络失败：${apiError.message}。请确认服务端进程仍在运行（浏览器直接打开 /healthz 应当能看到 {"status":"ok"}），恢复后点「重试全部失败项」。`,
+          text: "网络连接异常，已停止重试。请检查网络后点击「重试全部失败项」。",
         });
       }
     } else {
       this.networkFailures = 0;
     }
 
-    this.emit({ kind: "error", error: err });
+    // 只把脱敏后的错误交给界面：原始 detail 里可能有上游地址与请求路径
+    this.emit({ kind: "error", error: publicUploadError(err) });
   }
 
   /**
@@ -1245,10 +1315,14 @@ class UploadQueue {
     const stats = this.stats();
     this.emit({ kind: "state" });
     this.emit({ kind: "finished", stats });
+    const completed = stats.success + stats.skipped;
     this.emit({
       kind: "notice",
       tone: stats.failed > 0 ? "warn" : "ok",
-      text: `队列完成：成功 ${stats.success} 张，跳过 ${stats.skipped} 张，失败 ${stats.failed} 张。`,
+      text:
+        stats.failed > 0
+          ? `队列完成：完成 ${completed} 张，失败 ${stats.failed} 张。`
+          : `队列完成：${completed} 张全部完成。`,
     });
   }
 

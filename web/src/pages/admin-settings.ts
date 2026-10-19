@@ -22,7 +22,7 @@ import { loginMethodsCard } from "./login-methods-card";
 import type { PageContext } from "../core/router";
 import { toastError, toastOk } from "../core/toast";
 import { currentUser, loadMe, loadSite } from "../core/state";
-import { reloadMusic } from "../core/music";
+import { reloadMusic, syncMusicDefaults } from "../core/music";
 import { BUILTIN_AVATAR } from "../ui/brand";
 import { refreshNav } from "../ui/shell";
 import type { AdminSettings, MusicPlaylist, RateLimitAdmin } from "../core/types";
@@ -1768,6 +1768,37 @@ async function refreshIdentity(): Promise<void> {
 }
 
 
+/**
+ * 音乐「歌单来源」动过没有。
+ *
+ * 只有这一组变了才需要停掉当前音频重新拉歌单；默认音量、自动播放这类
+ * 只影响下次进站，保存时不该把正在放的歌掐掉。停一下再放，体验比听起来更差。
+ */
+function musicSourceDirty(draft: SettingsDraft, loaded: AdminSettings): boolean {
+  const before = loaded.music;
+  if (!before) return true;
+  if (draft.musicEnabled !== before.enabled || draft.musicSource.value !== before.source) {
+    return true;
+  }
+  // 只比较当前来源真正会用到的字段：用本地目录时改 API 地址、
+  // 用 API 时改本地目录，都不会影响正在播放的歌单，不该打断播放。
+  if (draft.musicSource.value === "local") {
+    // PIXORA_MUSIC_DIR 优先，界面里的 local_dir 根本不生效
+    if (draft.musicLocalDirEnv) return false;
+    return draft.musicLocalDir.value.trim() !== (before.local_dir ?? "");
+  }
+  const beforeUrls = (before.api_urls?.length ? before.api_urls : [before.api_url ?? ""])
+    .map((url) => url.trim())
+    .filter(Boolean);
+  const nowUrls = draft.musicApiUrls.map((url) => url.trim()).filter(Boolean);
+  return (
+    draft.musicPlatform.value !== before.platform ||
+    draft.musicPlaylistId.value.trim() !== (before.playlist_id ?? "") ||
+    beforeUrls.length !== nowUrls.length ||
+    beforeUrls.some((url, index) => url !== nowUrls[index])
+  );
+}
+
 /// 邮件那一栏动过没有。邮箱/密码这类字段为空是常态（还没配邮件），
 /// 不能拿「填没填」当「改没改」——只有和加载时的值不一致才算动过。
 function mailDirty(draft: SettingsDraft, loaded: AdminSettings): boolean {
@@ -1888,6 +1919,8 @@ async function save(
     toastError("要启用邮件功能，SMTP 服务器与发信邮箱都要填。只想改其他设置的话，别动邮件这一栏。");
     return;
   }
+  // 只改站名、上传上限之类的设置时，正在播放的背景音乐不该被打断。
+  const musicChanged = musicSourceDirty(draft, loaded);
 
   const body: {
     site: Record<string, unknown>;
@@ -2006,11 +2039,14 @@ async function save(
     await saveRateLimit(rateDraft);
     toastOk("设置已保存");
     // 站点身份与歌单都在后台刷新，不让保存按钮等第三方音乐接口。
-    // 先刷新站点，再 reloadMusic，新的默认音量才能在本次会话里生效。
-    // 站名、背景图来自 /site，单文件上限与格式来自 /me；音乐配置可能刚改过。
+    // 站名、背景图来自 /site，单文件上限与格式来自 /me。
+    // 只有歌单/API 配置真的改了才重载播放器；其余设置保存时音乐继续放。
     void refreshIdentity()
       .catch(() => undefined)
-      .then(() => reloadMusic());
+      .then(() => {
+        if (musicChanged) void reloadMusic();
+        else syncMusicDefaults();
+      });
     reload();
   } catch (err) {
     if (controller.signal.aborted) {

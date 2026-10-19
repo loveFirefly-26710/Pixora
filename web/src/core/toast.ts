@@ -4,6 +4,8 @@ import { ApiError } from "./api";
 import { h } from "./dom";
 
 let host: HTMLElement | null = null;
+/** 全局去重：同一个提示在 1.2 秒内只出现一次（切页后旧面板可能还在订阅队列）。 */
+let lastPush = { key: "", at: 0 };
 
 function ensureHost(): HTMLElement {
   if (!host) {
@@ -23,6 +25,11 @@ export interface ToastOptions {
 }
 
 function push(content: Node | string, options: ToastOptions): void {
+  const key = (typeof content === "string" ? content : content.textContent ?? "").trim();
+  const now = Date.now();
+  // 只合并错误提示：同一故障可能被多个仍存活的面板各弹一次；成功/复制类提示不拦。
+  if (options.danger && key && key === lastPush.key && now - lastPush.at < 1200) return;
+  if (options.danger) lastPush = { key, at: now };
   const node = h("div.toast", { class: options.danger ? "err" : "ok" });
   node.append(content);
   const container = ensureHost();

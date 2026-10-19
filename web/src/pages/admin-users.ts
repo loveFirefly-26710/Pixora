@@ -450,6 +450,18 @@ export async function render(ctx: PageContext): Promise<void> {
       return box;
     }
 
+    // 删除账号：安装账号（上面已返回）、访客账号、自己都不能删，其余可以。
+    // 管理员账号也允许删（与「用户详情」页的危险操作一致），但要照着邮箱确认。
+    if (!row.guest && row.id !== getState().user?.id) {
+      const remove = h("button.btn.sm.dgr", {
+        type: "button",
+        text: "删除",
+        title: "删除该账号及其相册、图片与会话",
+      });
+      remove.addEventListener("click", () => void deleteUser(row, remove));
+      box.append(remove);
+    }
+
     if (row.role === "admin") {
       // 管理员不显示处置按钮：把自己关在门外是最难恢复的运维事故。
       // 不用 title 藏说明——触屏上悬停不出来，说明必须看得见。
@@ -537,6 +549,42 @@ export async function render(ctx: PageContext): Promise<void> {
           result.mail_sent ? " · 通知邮件已发送" : ""
         }`,
       );
+      await loadAll();
+    } catch (err) {
+      toastError(err);
+      button.disabled = false;
+    }
+  }
+
+  /**
+   * 删除账号（列表里的快捷入口）。
+   *
+   * 与详情页同一套口径：不可逆，所以要求照着邮箱确认；服务端还会再校验一次。
+   * 删完重新拉列表与统计，页码越界由 loadUsers 自己回退。
+   */
+  async function deleteUser(row: AdminUserRow, button: HTMLButtonElement): Promise<void> {
+    if (row.id === getState().user?.id) {
+      toastError(new Error("不能删除自己的账号"));
+      return;
+    }
+    const ok = await confirmDialog({
+      title: "删除账号",
+      message:
+        `删除后 ${row.email}（u_${row.uid}）的相册、图片、令牌与会话一起消失，` +
+        "不再被别人引用的文件当场从磁盘上删掉，且无法撤销。" +
+        "<br>照着输入邮箱确认。",
+      confirmText: "删除账号",
+      danger: true,
+      requireText: row.email,
+    });
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      await request(`/admin/users/${row.id}?confirm=${encodeURIComponent(row.email)}`, {
+        method: "DELETE",
+      });
+      toastOk(`${row.email} 及它的数据已删除`);
+      selected.delete(row.id);
       await loadAll();
     } catch (err) {
       toastError(err);

@@ -2114,4 +2114,100 @@ mod tests {
         );
         assert_eq!(row["email"], "gone@example.com", "记录里带着注销时的邮箱");
     }
+
+    /// 管理员在用户视图里「全选整个相册」删除时，范围必须按目标用户的 uid 解析。
+    ///
+    /// 以前 `batch_images` 的范围分支直接用登录管理员自己的 id：界面清空、
+    /// 刷新后目标用户的图又全回来了。这条用例锁住「范围删除真的落到目标空间」。
+    #[tokio::test]
+    async fn batch_scope_delete_uses_the_viewed_users_space() {
+        let (state, _dir) = test_state().await;
+        let admin = add_user(&state, "root@example.com", "1000", true).await;
+        let target = add_user(&state, "target@example.com", "9002", false).await;
+        let admin_cookie = login_cookie(&state, &admin).await;
+        let target_cookie = login_cookie(&state, &target).await;
+        let target_csrf = format!("csrf-{}", target.uid);
+
+        // 以目标用户身份上传一张图
+        let uploaded = app(state.clone())
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Session {
+                    cookie: &target_cookie,
+                    csrf: &target_csrf,
+                },
+                PNG_1X1,
+                "scope.png",
+                &[("visibility", "private")],
+                None,
+            ))
+            .await
+            .expect("发上传请求");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let body = body_json(uploaded).await;
+        let image_id = body["data"]["id"].as_i64().expect("上传返回 id");
+
+        // 管理员带 uid 选中「全部图片」并删除
+        let deleted = app(state.clone())
+            .oneshot(post_json(
+                &format!("/api/v1/images/batch?uid={}", target.uid),
+                Some(&admin_cookie),
+                Some("csrf-1000"),
+                serde_json::json!({ "action": "delete", "filter": {} }),
+            ))
+            .await
+            .expect("发批量删除请求");
+        assert_eq!(deleted.status(), StatusCode::OK);
+        let body = body_json(deleted).await;
+        assert_eq!(
+            body["data"]["affected"], 1,
+            "范围删除应命中目标用户的那一张：{body}"
+        );
+
+        // 目标用户的空间里确实空了
+        let listed = app(state.clone())
+            .oneshot(get(
+                &format!("/api/v1/images?uid={}", target.uid),
+                Some(&admin_cookie),
+            ))
+            .await
+            .expect("发列表请求");
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = body_json(listed).await;
+        assert_eq!(body["meta"]["total"], 0, "删除后目标空间应为空：{body}");
+        assert!(
+            body["data"].as_array().map(|items| items.is_empty()).unwrap_or(false),
+            "列表里不应再有这张图（id={image_id}）：{body}"
+        );
+
+        // 删除是软删：图片应出现在目标用户的回收站里，管理员在用户视图下要能看到
+        let recycled = app(state.clone())
+            .oneshot(get(
+                &format!("/api/v1/recycle/images?uid={}", target.uid),
+                Some(&admin_cookie),
+            ))
+            .await
+            .expect("发回收站请求");
+        assert_eq!(recycled.status(), StatusCode::OK);
+        let body = body_json(recycled).await;
+        assert_eq!(
+            body["meta"]["total"], 1,
+            "目标用户的回收站里应有刚删的那张：{body}"
+        );
+        assert_eq!(body["data"][0]["id"], image_id);
+
+        // 在用户视图里彻底删除，文件与记录才真正释放
+        let purged = app(state)
+            .oneshot(post_json(
+                &format!("/api/v1/recycle/images/purge?uid={}", target.uid),
+                Some(&admin_cookie),
+                Some("csrf-1000"),
+                serde_json::json!({ "ids": [image_id] }),
+            ))
+            .await
+            .expect("发彻底删除请求");
+        assert_eq!(purged.status(), StatusCode::OK);
+        let body = body_json(purged).await;
+        assert_eq!(body["data"]["purged"], 1, "应彻底删除那一张：{body}");
+    }
 }

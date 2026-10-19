@@ -20,12 +20,13 @@ import { formatBytes, formatDimensions, formatNumber, relativeTime } from "../co
 import { confirmDanger } from "../core/modal";
 import type { PageContext } from "../core/router";
 import { navigate } from "../core/router";
-import { getState } from "../core/state";
+import { getState, isAdmin, setViewingUid } from "../core/state";
 import { loadViewPreference, saveViewPreference } from "../core/store";
 import { toastError, toastOk } from "../core/toast";
-import type { Album, ImageItem } from "../core/types";
+import type { AdminUserRow, Album, ImageItem } from "../core/types";
 import { openLightbox } from "../ui/lightbox";
 import { applyMasonry } from "../ui/masonry";
+import { userViewBanner } from "../ui/shell";
 import {
   cardHead,
   cardNode,
@@ -42,6 +43,18 @@ export async function render(ctx: PageContext): Promise<void> {
   const root = h("div.pad");
   ctx.outlet.append(root);
 
+  // 用户视图：管理员从用户相册删图后，回收站要显示目标用户的文件，
+  // 否则看起来「相册、回收站都没有，文件却还占着盘」。
+  const requestedUid = (ctx.query.get("uid") ?? "").trim();
+  if (requestedUid && isAdmin()) setViewingUid(requestedUid);
+  const viewingUid = getState().viewingUid;
+  if (viewingUid && !requestedUid) {
+    // 把 uid 留在地址里：刷新后仍停在同一个用户的回收站
+    const url = new URL(window.location.href);
+    url.hash = `#/recycle?uid=${encodeURIComponent(viewingUid)}`;
+    window.history.replaceState(null, "", url);
+  }
+
   const retention = getState().site?.recycle_retention_days ?? 0;
 
   // 重画整页内容，而不是再套一层 .pad。
@@ -49,20 +62,26 @@ export async function render(ctx: PageContext): Promise<void> {
   // 同内容的 DOM 树——看起来像「没刷新」，其实是旧的还在上面
   const reload = (): void => {
     root.replaceChildren();
-    void paint(root, retention, reload);
+    void paint(root, retention, reload, viewingUid);
   };
 
-  await paint(root, retention, reload);
+  await paint(root, retention, reload, viewingUid);
 }
 
-async function paint(root: HTMLElement, retention: number, reload: () => void): Promise<void> {
+async function paint(
+  root: HTMLElement,
+  retention: number,
+  reload: () => void,
+  viewingUid: string | null,
+): Promise<void> {
+  root.append(pageHead("回收站", "删除的图片与相册先留在这里，可以恢复或彻底删除。"));
+  if (viewingUid) root.append(recycleViewBanner(viewingUid));
   root.append(
-    pageHead("回收站", "删除的图片与相册先留在这里，可以恢复或彻底删除。"),
     retention > 0
       ? qtip(
           "info",
           `保留 ${retention} 天`,
-          `回收站里的内容仍然算你的已用额度（文件还占着盘），彻底删除或清空之后才会释放。超过 ${retention} 天由后台自动彻底删除。`,
+          `回收站里的内容仍然算${viewingUid ? "对方" : "你"}的已用额度（文件还占着盘），彻底删除或清空之后才会释放。超过 ${retention} 天由后台自动彻底删除。`,
         )
       : qtip(
           "warn",
@@ -76,17 +95,54 @@ async function paint(root: HTMLElement, retention: number, reload: () => void): 
   const imagesHost = h("div");
   root.append(h("div", { style: { marginTop: "14px" } }), albumsHost, imagesHost);
 
-  await Promise.all([loadAlbums(albumsHost, reload), loadImages(imagesHost, reload)]);
+  await Promise.all([
+    loadAlbums(albumsHost, reload, viewingUid),
+    loadImages(imagesHost, reload, viewingUid),
+  ]);
+}
+
+/** 用户视图提示条：切回后台用户列表，或回到管理员自己的回收站。 */
+function recycleViewBanner(uid: string): HTMLElement {
+  const banner = userViewBanner(
+    uid,
+    `u_${uid}`,
+    () => {
+      setViewingUid(null);
+      navigate("/admin/users");
+    },
+    () => {
+      setViewingUid(null);
+      navigate("/recycle");
+    },
+  );
+  const label = banner.querySelector("b");
+  const sub = label?.nextElementSibling;
+  if (sub) sub.textContent = "管理员自己的回收站已隐藏 · 本次访问已记录审计日志";
+  void requestPage<AdminUserRow>("/admin/users", { query: { query: uid, per_page: 1 } })
+    .then((page) => {
+      const row = page.items.find((entry) => entry.uid === uid) ?? page.items[0];
+      if (row?.email && label) label.textContent = `正在查看用户 u_${uid}（${row.email}）的回收站`;
+    })
+    .catch(() => {
+      /* 邮箱拿不到就保留 uid */
+    });
+  return banner;
 }
 
 /* ------------------------------------------------------------------ */
 /* 相册                                                                */
 /* ------------------------------------------------------------------ */
 
-async function loadAlbums(host: HTMLElement, reload: () => void): Promise<void> {
+async function loadAlbums(
+  host: HTMLElement,
+  reload: () => void,
+  viewingUid: string | null,
+): Promise<void> {
   mount(host, skeletonGrid(2));
   try {
-    const data = await request<{ albums: Album[] }>("/recycle/albums");
+    const data = await request<{ albums: Album[] }>("/recycle/albums", {
+      query: { uid: viewingUid ?? undefined },
+    });
     if (data.albums.length === 0) {
       mount(host, h("div", { style: { marginBottom: "14px" } }));
       return;
@@ -95,7 +151,7 @@ async function loadAlbums(host: HTMLElement, reload: () => void): Promise<void> 
       host,
       cardNode(
         cardHead(`回收站里的相册（${data.albums.length}）`),
-        ...data.albums.map((album) => albumRow(album, reload)),
+        ...data.albums.map((album) => albumRow(album, reload, viewingUid)),
         h("div.tip", {
           text: "恢复会把相册连同「随它一起删掉」的图片一起带回来；彻底删除则一并清掉。",
         }),
@@ -106,21 +162,22 @@ async function loadAlbums(host: HTMLElement, reload: () => void): Promise<void> 
   }
 }
 
-function albumRow(album: Album, reload: () => void): HTMLElement {
+function albumRow(album: Album, reload: () => void, viewingUid: string | null): HTMLElement {
   const restore = h("button.btn.sm", { type: "button", text: "恢复" });
   restore.addEventListener("click", async () => {
     restore.disabled = true;
     try {
       const result = await request<{ restored_images: number }>(
         `/recycle/albums/${album.id}/restore`,
-        { method: "POST" },
+        { method: "POST", query: { uid: viewingUid ?? undefined } },
       );
       toastOk(
         result.restored_images > 0
           ? `已恢复「${album.name}」，带回来 ${result.restored_images} 张图片`
           : `已恢复「${album.name}」`,
       );
-      navigate("/albums");
+      // 用户视图下恢复完回到同一个用户的相册，不要顺手退出视图
+      navigate(viewingUid ? `/albums?uid=${encodeURIComponent(viewingUid)}` : "/albums");
     } catch (err) {
       toastError(err);
       restore.disabled = false;
@@ -137,7 +194,10 @@ function albumRow(album: Album, reload: () => void): HTMLElement {
     if (!ok) return;
     purge.disabled = true;
     try {
-      await request(`/recycle/albums/${album.id}`, { method: "DELETE" });
+      await request(`/recycle/albums/${album.id}`, {
+        method: "DELETE",
+        query: { uid: viewingUid ?? undefined },
+      });
       toastOk(`已彻底删除「${album.name}」`);
       reload();
     } catch (err) {
@@ -168,7 +228,11 @@ function albumRow(album: Album, reload: () => void): HTMLElement {
 /* 图片                                                                */
 /* ------------------------------------------------------------------ */
 
-async function loadImages(host: HTMLElement, reload: () => void): Promise<void> {
+async function loadImages(
+  host: HTMLElement,
+  reload: () => void,
+  viewingUid: string | null,
+): Promise<void> {
   const state = {
     view: loadViewPreference() as "grid" | "list",
     /** 已经取到的行（分页累加） */
@@ -185,7 +249,7 @@ async function loadImages(host: HTMLElement, reload: () => void): Promise<void> 
   mount(host, skeletonGrid(4));
   try {
     const first = await requestPage<ImageItem>("/recycle/images", {
-      query: { page: 1, per_page: PER_PAGE },
+      query: { page: 1, per_page: PER_PAGE, uid: viewingUid ?? undefined },
     });
     state.items = first.items;
     state.total = first.meta.total;
@@ -200,7 +264,7 @@ async function loadImages(host: HTMLElement, reload: () => void): Promise<void> 
         h("button.btn", {
           type: "button",
           text: "重试",
-          on: { click: () => void loadImages(host, reload) },
+          on: { click: () => void loadImages(host, reload, viewingUid) },
         }),
       ),
     );
@@ -213,7 +277,11 @@ async function loadImages(host: HTMLElement, reload: () => void): Promise<void> 
     button.textContent = "加载中…";
     try {
       const next = await requestPage<ImageItem>("/recycle/images", {
-        query: { page: state.page + 1, per_page: state.perPage },
+        query: {
+          page: state.page + 1,
+          per_page: state.perPage,
+          uid: viewingUid ?? undefined,
+        },
       });
       state.page += 1;
       state.items = [...state.items, ...next.items];
@@ -230,7 +298,11 @@ async function loadImages(host: HTMLElement, reload: () => void): Promise<void> 
   const afterAction = async (): Promise<void> => {
     try {
       const fresh = await requestPage<ImageItem>("/recycle/images", {
-        query: { page: 1, per_page: Math.max(state.perPage, state.items.length) },
+        query: {
+          page: 1,
+          per_page: Math.max(state.perPage, state.items.length),
+          uid: viewingUid ?? undefined,
+        },
       });
       state.items = fresh.items;
       state.total = fresh.meta.total;
@@ -282,6 +354,7 @@ async function loadImages(host: HTMLElement, reload: () => void): Promise<void> 
       const payload = await request<{ restored: number }>("/recycle/images/restore", {
         method: "POST",
         json: { ids },
+        query: { uid: viewingUid ?? undefined },
       });
       toastOk(`已恢复 ${payload.restored} 张`);
       await afterAction();
@@ -304,6 +377,7 @@ async function loadImages(host: HTMLElement, reload: () => void): Promise<void> 
       const payload = await request<{ purged: number }>("/recycle/images/purge", {
         method: "POST",
         json: { ids },
+        query: { uid: viewingUid ?? undefined },
       });
       toastOk(`已彻底删除 ${payload.purged} 张`);
       await afterAction();
@@ -324,6 +398,7 @@ async function loadImages(host: HTMLElement, reload: () => void): Promise<void> 
     try {
       const payload = await request<{ purged: number }>("/recycle/images/empty", {
         method: "POST",
+        query: { uid: viewingUid ?? undefined },
       });
       toastOk(`已清空回收站（${payload.purged} 张）`);
       await afterAction();

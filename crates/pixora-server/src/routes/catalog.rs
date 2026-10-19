@@ -347,6 +347,7 @@ pub async fn image_delete(
     method: Method,
     peer: PeerAddr,
     Path(image_id): Path<i64>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
     let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
@@ -357,7 +358,8 @@ pub async fn image_delete(
         return resp;
     }
 
-    let viewer = viewer_for(Some(&auth), false);
+    // 管理员从用户视图删除时要按「跨用户视角」记身份，权限判定仍由领域层做
+    let viewer = viewer_for(Some(&auth), query.contains_key("uid"));
     match state.delete_image(&viewer, image_id).await {
         Ok(()) => finish::<serde_json::Value>(Ok(serde_json::json!({
             "ok": true,
@@ -373,6 +375,7 @@ pub async fn images_batch(
     headers: HeaderMap,
     method: Method,
     peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let rectx = request_context(&state, &headers, peer.addr()).await;
@@ -405,10 +408,20 @@ pub async fn images_batch(
     let scope = body.get("filter").map(|value| pixora_core::images::BatchScope {
         album_id: value.get("album_id").and_then(|item| item.as_i64()),
     });
+    let uid = parse_str(&query, "uid").map(str::to_string);
 
-    let viewer = viewer_for(Some(&auth), false);
+    let viewer = viewer_for(Some(&auth), uid.is_some());
     match state
-        .batch_images(&viewer, action, &ids, scope, album_id, tags, visibility)
+        .batch_images(
+            &viewer,
+            action,
+            &ids,
+            scope,
+            uid.as_deref(),
+            album_id,
+            tags,
+            visibility,
+        )
         .await
     {
         Ok(affected) => finish::<serde_json::Value>(Ok(serde_json::json!({
