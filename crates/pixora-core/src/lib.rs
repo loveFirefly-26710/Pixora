@@ -23,6 +23,7 @@ pub mod mail_templates;
 pub mod media;
 pub mod moderation;
 pub mod music;
+pub mod proxy;
 pub mod quota;
 pub mod ratelimit;
 pub mod settings;
@@ -70,6 +71,8 @@ pub struct AppState {
     gc_notify: tokio::sync::Notify,
     /// 远端驱动与第三方校验共用的 HTTP 客户端（连接池共享）
     pub http: Arc<reqwest::Client>,
+    /// 出网代理解析结果：启动时读一次，后台自检按同一份结果解释链路
+    pub proxy: crate::proxy::ProxyInfo,
     /// 系统 DNS 解析器，惰性建一份全局共用（自带 TTL 缓存）。发信前查收件
     /// 域名的 MX 记录用它，见 `antispam`。
     resolver: tokio::sync::RwLock<Option<hickory_resolver::TokioResolver>>,
@@ -97,22 +100,30 @@ impl AppState {
         let settings = Settings::new(repo.clone(), config.master_key.clone());
 
         // 出网代理：服务器到 Google / GitHub / 存储后端的链路可能需要走代理。
-        // reqwest 本身会读系统代理环境变量；这里额外支持一个站点专用的
-        // `PIXORA_HTTP_PROXY`，避免和宿主机其它服务的代理设置混在一起。
+        // Windows 用户开的是「Internet 选项」里的系统代理，reqwest 不读那里，
+        // 所以先自己解析（环境变量 / 系统代理），再把结果显式交给客户端。
+        let proxy = proxy::detect();
         let mut http_builder = reqwest::Client::builder()
             .user_agent("Pixora")
             // 建连单独限制：DNS 卡住或对端不接时尽快失败，别等整个请求超时
             .connect_timeout(std::time::Duration::from_secs(8))
             .timeout(std::time::Duration::from_secs(60));
-        if let Some(proxy) = std::env::var("PIXORA_HTTP_PROXY")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            http_builder = http_builder.proxy(
-                reqwest::Proxy::all(&proxy)
-                    .map_err(|err| AppError::Config(format!("PIXORA_HTTP_PROXY 不是合法代理地址：{err}")))?,
-            );
+        if let Some(url) = proxy.url.as_deref() {
+            let mut rule = reqwest::Proxy::all(url).map_err(|err| {
+                AppError::Config(format!(
+                    "出网代理地址不合法（来源：{}）：{err}",
+                    proxy.source.as_deref().unwrap_or("未知")
+                ))
+            })?;
+            if let Some(no_proxy) = proxy.no_proxy.as_deref() {
+                rule = rule.no_proxy(reqwest::NoProxy::from_string(no_proxy));
+            }
+            http_builder = http_builder.proxy(rule);
+        }
+        if let (Some(url), Some(source)) = (proxy.display.as_deref(), proxy.source.as_deref()) {
+            tracing::info!(proxy = url, source, "出网代理已启用");
+        } else {
+            tracing::debug!("未检测到出网代理，按直连处理");
         }
         let http = Arc::new(
             http_builder
@@ -151,6 +162,7 @@ impl AppState {
             mailer_problem: RwLock::new(None),
             gc_notify: tokio::sync::Notify::new(),
             http,
+            proxy,
             resolver: tokio::sync::RwLock::new(None),
             password_slots: tokio::sync::Semaphore::new(2),
             blob_locks: (0..256).map(|_| tokio::sync::Mutex::new(())).collect(),

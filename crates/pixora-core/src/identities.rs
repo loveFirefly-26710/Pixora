@@ -39,6 +39,32 @@ const STATE_TTL_MINUTES: i64 = 15;
 /// 服务器所在网络到 Google / GitHub 的链路可能不稳：设一个明确的上限，
 /// 超时就带错误跳回登录页，而不是让浏览器对着 Cloudflare 等出 524。
 const OAUTH_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// 把 reqwest 的连接类错误翻成管理员能行动的一句话。
+///
+/// 原始错误里是 `error sending request for url (...)`，用户既看不懂，也不知道
+/// 该改 DNS 还是加代理。这里只保留「超时 / 连不上 / 请求没发出」三类。
+fn oauth_network_reason(err: &reqwest::Error) -> &'static str {
+    if err.is_timeout() {
+        "连接超时；请确认服务器能出网，或系统代理已开启且可用"
+    } else if err.is_connect() {
+        "无法建立连接；可能是 DNS 解析失败、端口不可达，或系统代理未生效"
+    } else if err.is_request() {
+        "请求没有发出去；请检查代理地址与 TLS 配置"
+    } else if err.is_decode() {
+        "对方返回的数据读不出来"
+    } else {
+        "网络请求失败"
+    }
+}
+
+fn oauth_network_error(provider: &str, err: reqwest::Error) -> AppError {
+    tracing::warn!(provider, error = %err, "OAuth 出网请求失败");
+    AppError::Config(format!(
+        "暂时连不上 {provider}：{}。请检查服务器出网，或确认系统代理（Windows「Internet 选项」/ HTTPS_PROXY 环境变量）已生效；调整后重启服务再试",
+        oauth_network_reason(&err)
+    ))
+}
 /// 短信验证码有效期与重发间隔。
 const PHONE_CODE_TTL_MINUTES: i64 = 10;
 const PHONE_CODE_COOLDOWN_SECONDS: i64 = 60;
@@ -141,8 +167,12 @@ pub struct OAuthEndpointHealth {
 /// OAuth 出网自检结果。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OAuthHealth {
-    /// 是否显式配置了 `PIXORA_HTTP_PROXY`
+    /// 是否检测到出网代理（环境变量或 Windows 系统代理）
     pub proxy_configured: bool,
+    /// 代理来源，例如「Windows 系统代理」
+    pub proxy_source: Option<String>,
+    /// 代理主机端口（已去掉凭据）
+    pub proxy_url: Option<String>,
     pub google: OAuthEndpointHealth,
     pub github: OAuthEndpointHealth,
 }
@@ -304,17 +334,18 @@ impl AppState {
     // ============================================================
 
     /// OAuth 出网自检：只探测固定端点，不接受管理员传 URL，避免变成 SSRF 探针。
+    ///
+    /// 探测走的是与真实登录同一个 `AppState::http`，所以这里显示的就是
+    /// 实际链路：系统代理生效时，探针也经同一代理出去。
     pub async fn oauth_health(&self) -> OAuthHealth {
-        let proxy_configured = std::env::var("PIXORA_HTTP_PROXY")
-            .ok()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
         let (google, github) = tokio::join!(
             self.probe_oauth_endpoint("https://oauth2.googleapis.com/token"),
             self.probe_oauth_endpoint("https://github.com/login/oauth/access_token"),
         );
         OAuthHealth {
-            proxy_configured,
+            proxy_configured: self.proxy.configured(),
+            proxy_source: self.proxy.source.clone(),
+            proxy_url: self.proxy.display.clone(),
             google,
             github,
         }
@@ -333,11 +364,14 @@ impl AppState {
                 status: Some(response.status().as_u16()),
                 error: None,
             },
-            Err(err) => OAuthEndpointHealth {
-                ok: false,
-                status: None,
-                error: Some(err.to_string()),
-            },
+            Err(err) => {
+                tracing::warn!(url, error = %err, "OAuth 出网探针失败");
+                OAuthEndpointHealth {
+                    ok: false,
+                    status: None,
+                    error: Some(oauth_network_reason(&err).to_string()),
+                }
+            }
         }
     }
 
@@ -362,7 +396,7 @@ impl AppState {
                     ])
                     .send()
                     .await
-                    .map_err(|err| AppError::internal(format!("请求 GitHub 失败：{err}")))?;
+                    .map_err(|err| oauth_network_error("GitHub", err))?;
                 let json: serde_json::Value = body
                     .json()
                     .await
@@ -387,7 +421,7 @@ impl AppState {
                     ])
                     .send()
                     .await
-                    .map_err(|err| AppError::internal(format!("请求 Google 失败：{err}")))?;
+                    .map_err(|err| oauth_network_error("Google", err))?;
                 let json: serde_json::Value = response
                     .json()
                     .await
@@ -416,7 +450,7 @@ impl AppState {
                     ])
                     .send()
                     .await
-                    .map_err(|err| AppError::internal(format!("请求 QQ 失败：{err}")))?;
+                    .map_err(|err| oauth_network_error("QQ", err))?;
                 let text = response
                     .text()
                     .await
@@ -449,7 +483,7 @@ impl AppState {
                     ])
                     .send()
                     .await
-                    .map_err(|err| AppError::internal(format!("请求微信失败：{err}")))?;
+                    .map_err(|err| oauth_network_error("微信", err))?;
                 let json: serde_json::Value = response
                     .json()
                     .await
@@ -487,7 +521,7 @@ impl AppState {
                     .header("accept", "application/vnd.github+json")
                     .send()
                     .await
-                    .map_err(|err| AppError::internal(format!("读取 GitHub 账号失败：{err}")))?
+                    .map_err(|err| oauth_network_error("GitHub", err))?
                     .json()
                     .await
                     .map_err(|err| {
@@ -562,7 +596,7 @@ impl AppState {
                     .timeout(OAUTH_HTTP_TIMEOUT)
                     .send()
                     .await
-                    .map_err(|err| AppError::internal(format!("读取 Google 账号失败：{err}")))?
+                    .map_err(|err| oauth_network_error("Google", err))?
                     .json()
                     .await
                     .map_err(|err| {
@@ -610,7 +644,7 @@ impl AppState {
                     ])
                     .send()
                     .await
-                    .map_err(|err| AppError::internal(format!("读取 QQ 账号失败：{err}")))?
+                    .map_err(|err| oauth_network_error("QQ", err))?
                     .json()
                     .await
                     .map_err(|err| AppError::internal(format!("QQ 账号信息不是 JSON：{err}")))?;
@@ -652,7 +686,7 @@ impl AppState {
                     ])
                     .send()
                     .await
-                    .map_err(|err| AppError::internal(format!("读取微信账号失败：{err}")))?
+                    .map_err(|err| oauth_network_error("微信", err))?
                     .json()
                     .await
                     .map_err(|err| AppError::internal(format!("微信账号信息不是 JSON：{err}")))?;
@@ -682,7 +716,7 @@ impl AppState {
             .query(&[("access_token", token), ("fmt", "json")])
             .send()
             .await
-            .map_err(|err| AppError::internal(format!("读取 QQ openid 失败：{err}")))?
+            .map_err(|err| oauth_network_error("QQ", err))?
             .text()
             .await
             .map_err(|err| AppError::internal(format!("QQ openid 读不出来：{err}")))?;
