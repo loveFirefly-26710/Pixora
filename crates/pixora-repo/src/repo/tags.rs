@@ -134,19 +134,35 @@ impl Repo {
     }
 
     /// 广场的标签云：跨用户的公开标签按出现次数排序。
-    pub async fn plaza_tags(&self, limit: i64) -> Result<Vec<Tag>> {
+    ///
+    /// `plaza_album_ids` 是管理员限制的首页展示相册；给了就只数这些相册里的图，
+    /// 否则标签云会出现「点了没结果」的标签——图不在广场范围内。
+    pub async fn plaza_tags(&self, limit: i64, plaza_album_ids: &[i64]) -> Result<Vec<Tag>> {
+        let mut args = Args::new();
+        let mut scope = String::new();
+        if !plaza_album_ids.is_empty() {
+            let placeholders = vec!["?"; plaza_album_ids.len()].join(", ");
+            scope = format!(
+                " AND i.album_id IN ({placeholders}) \
+                  AND EXISTS (SELECT 1 FROM albums pa WHERE pa.id = i.album_id \
+                              AND pa.visibility = 'public' AND pa.deleted_at IS NULL)"
+            );
+            for id in plaza_album_ids {
+                args = args.int(*id);
+            }
+        }
+        let sql = format!(
+            "SELECT 0 AS id, 0 AS owner_id, t.name AS name, t.created_at AS created_at, \
+                    COUNT(DISTINCT it.image_id) AS usage \
+               FROM tags t \
+               JOIN image_tags it ON it.tag_id = t.id \
+               JOIN images i ON i.id = it.image_id \
+              WHERE i.visibility = 'public' AND i.deleted_at IS NULL{scope} \
+              GROUP BY t.name ORDER BY usage DESC, t.name ASC LIMIT ?"
+        );
         let rows = self
             .db
-            .fetch_all(
-                "SELECT 0 AS id, 0 AS owner_id, t.name AS name, t.created_at AS created_at, \
-                        COUNT(DISTINCT it.image_id) AS usage \
-                   FROM tags t \
-                   JOIN image_tags it ON it.tag_id = t.id \
-                   JOIN images i ON i.id = it.image_id \
-                  WHERE i.visibility = 'public' AND i.deleted_at IS NULL \
-                  GROUP BY t.name ORDER BY usage DESC, t.name ASC LIMIT ?",
-                Args::new().int(limit.clamp(1, 100)),
-            )
+            .fetch_all(&sql, args.int(limit.clamp(1, 100)))
             .await?;
         rows.iter().map(Tag::from_row).collect()
     }

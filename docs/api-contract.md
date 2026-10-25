@@ -129,6 +129,9 @@ API 客户端：
   "guest_upload": { "enabled": true, "max_file_bytes": 20971520, "max_batch_size": 1000,
                     "max_concurrent_uploads": 5, "queue_depth": 500, "formats": ["jpg","png"] },
   "plaza_public": true, "plaza_grid_columns": 3, "plaza_auto_refresh_seconds": 5, "recycle_retention_days": 30,
+  // 首页公告：enabled 且有正文时前端自动弹窗；version 由标题与正文算出
+  "announcement": { "enabled": true, "title": "站点维护通知", "body": "今晚 23:00 …",
+                    "version": "a1b2c3d4e5f60708", "starts_at": null, "ends_at": null, "read": false },
   "formats": ["jpg","png","gif","webp","avif","heic","tiff","bmp","svg"],
   "max_file_bytes": 20971520, "max_batch_size": 1000, "max_pixels": 80000000,
   "max_width": 0, "max_height": 0,
@@ -149,6 +152,12 @@ API 客户端：
 `plaza_auto_refresh_seconds` 控制广场的自动漫游：`0` 关闭，正数表示每隔多少秒换一批公开图片；服务端把正数钳在 5–3600 秒，默认 5。
 
 管理员还可以在「系统设置 → 首页展示相册」里只选部分公开相册；选中后广场与自动漫游只取这些相册里的公开图片，空选择表示沿用全部公开图片。
+
+### `POST /api/v1/announcements/{version}/read` — write
+
+登录用户确认公告。按账号 + 版本记一次，换设备或清浏览器缓存后不会再弹；
+公告正文变化会生成新 version。响应 `{ "data": { "ok": true } }`。游客没有账号，
+前端用 sessionStorage / localStorage 兜底。
 
 ### `GET /api/v1/site/background` / `GET /api/v1/site/avatar` — 公开
 
@@ -312,14 +321,40 @@ API 客户端：
 
 ### `GET /api/v1/me/sessions`
 
+返回该账号的全部会话记录，包括已经下线、已经过期的历史行；前端按 `state` 分三块展示：
+
 ```json
-{ "data": [ { "id": 9, "device": "Chrome · Windows", "ip": "203.0.113.18",
-              "created_at": "…", "last_seen_at": "…", "current": true } ] }
+{ "data": [ { "id": 9, "device": "Chrome · Windows", "label": "书房的笔记本",
+              "ip": "203.0.113.18", "created_at": "…", "last_seen_at": "…",
+              "expires_at": "…", "revoked_at": null, "current": true,
+              "remember": true, "state": "active" } ] }
 ```
+
+`state` 取值：
+
+- `active`：仍在活动窗口内（当前会话恒为 `active`）；
+- `saved`：「保持登录」签发、仍能恢复登录但长期没有活动；
+- `expired` / `revoked`：已过期或已下线，只用于留痕。
+
+### `PATCH /api/v1/me/sessions/{id}` — write
+
+改这条会话记录的备注：`{ "label": "办公电脑" }`；传空串清除备注。响应
+`{ "data": { "updated": 1 } }`。
 
 ### `DELETE /api/v1/me/sessions/{id}` 与 `DELETE /api/v1/me/sessions?keep_current=true`
 
-后者吊销除当前会话外的全部会话，响应 `{ "data": { "revoked": 3 } }`。
+前者吊销某个会话（该浏览器立刻退出登录）；后者吊销除当前会话外的全部会话（含免登录记录），
+响应 `{ "data": { "revoked": 3 } }`。
+
+### `DELETE /api/v1/me/sessions/{id}/record`
+
+彻底删除一条会话记录（历史 / 免登录记录都能删）。当前正在使用的会话不允许这样删除。
+响应 `{ "data": { "deleted": 1 } }`。
+
+### `DELETE /api/v1/me/sessions/history`
+
+清空自己的登录历史：只删除已下线 / 已过期的记录，不影响当前会话与免登录记录。
+响应 `{ "data": { "deleted": 12 } }`。
 
 ### `GET /api/v1/me/recovery-codes` / `POST /api/v1/me/recovery-codes`
 
@@ -519,10 +554,18 @@ API 客户端：
   （相册与当初随它一起进回收站的那批图片整份回来）
 - `DELETE /api/v1/recycle/albums/{id}` → `{ "data": { "purged_images": 12 } }`（彻底删除相册与其中的图片）
 
+### `GET /api/v1/admin/settings/oauth-health` — admin
+
+第三方登录出网自检。返回 `proxy_configured` 与 Google / GitHub 两个固定端点的可达性：
+`{ "data": { "proxy_configured": false, "google": { "ok": false, "status": null, "error": "…" },
+"github": { "ok": true, "status": 405, "error": null } } }`。能收到 HTTP 响应（含 401/405）就算可达；
+不接受调用方传 URL，避免被当成 SSRF 探针。
+
 ### `GET /api/v1/tags` — read
 
 `?uid=&q=&limit=`，返回 `{ "data": [ { "name": "风景", "usage": 216 } ] }`。
-`GET /api/v1/tags?scope=plaza` 返回全站公开标签（广场 chips）。
+`GET /api/v1/tags?scope=plaza` 返回全站公开标签（广场 chips）。标签云与广场网格同口径：
+管理员在「首页展示相册」里限定范围时，只统计这些公开相册里的图片标签。
 
 ### `PATCH /api/v1/tags` — write
 
@@ -617,10 +660,13 @@ SVG 会先净化再入库：`<script>`、`on*` 事件属性、外部 `href/src`�
 
 ### `GET /api/v1/plaza` — 公开
 
-`q`、`tag`、`sort`、`seed`、`page`、`per_page`（默认 24，上限 100）。
+`q`、`tags`、`tag`、`sort`、`seed`、`page`、`per_page`（默认 24，上限 100）。
+`tags` 支持逗号分隔的多选（如 `tags=风景,旅行`）。`tag_mode=any`（默认）命中任一标签即入选，
+`tag_mode=all` 要求同时带有全部标签；旧的单标签 `tag` 仍然兼容。
 `sort` 认 `new` / `newest`、`old` / `oldest`、`largest` / `size`、`smallest`、`name_asc`、`name_desc`、`type_asc`、`hot` / `hottest`，以及默认的 `shuffle`；`shuffle` 用 `seed` 固定一次洗牌，翻页时带上同一个 seed 就不会重复或漏图。
 响应：分页信封，`data` 为 `[ImageItem]`（`original_name` 为 null）。
 若站点关闭广场公开浏览（`plaza_public=false`），未登录调用返回 `FORBIDDEN`。
+前端的自动漫游只在 `sort=shuffle` 时提供；其它排序下固定顺序刷新同一批图没有漫游意义。
 
 ### `GET /api/v1/random` — 公开
 
@@ -807,6 +853,21 @@ curl "https://img.example.com/api/v1/random?collection=壁纸&exclude_ids=1,2,3&
             "used_bytes": 138136862720, "image_total": 1548, "storage_bytes": 140788645888,
             "register_open": true } }
 ```
+
+### 8.1.1 会话记录（cookie）
+
+- `GET /api/v1/admin/sessions?query=&page=&per_page=` → 全站会话记录分页。`query` 同时匹配
+  邮箱、UID、IP、设备名与备注。每行带账号与状态：
+
+```json
+{ "data": [ { "id": 18, "user_id": 1, "uid": "1000", "email": "a@example.com",
+              "device": "Edge · Windows", "label": "办公电脑", "ip": "203.0.113.18",
+              "created_at": "…", "last_seen_at": "…", "expires_at": "…",
+              "revoked_at": null, "state": "active", "remember": true } ] }
+```
+
+- `DELETE /api/v1/admin/sessions/{id}` → 彻底删除一条记录（对方浏览器下一次请求即退出）。
+- `DELETE /api/v1/admin/sessions` → 清理全站已结束（已下线 / 已过期）的记录。
 
 ### 8.2 存储
 

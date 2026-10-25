@@ -455,7 +455,12 @@ pub async fn tags_list(
 
     let limit = parse_i64(&query, "limit").unwrap_or(100).clamp(1, 500);
     if parse_str(&query, "scope") == Some("plaza") {
-        return match state.repo.plaza_tags(limit).await {
+        // 标签云与广场网格同口径：管理员限制的展示相册也要算进去
+        let plaza_album_ids = match state.settings.site(state.config.base_url.as_deref()).await {
+            Ok(site) => site.plaza_album_ids,
+            Err(err) => return crate::http::error_response(err),
+        };
+        return match state.repo.plaza_tags(limit, &plaza_album_ids).await {
             Ok(tags) => finish::<Vec<serde_json::Value>>(Ok(tag_rows(tags))),
             Err(err) => crate::http::error_response(err.into()),
         };

@@ -394,6 +394,127 @@ pub async fn stats(
     finish(state.admin_overview().await)
 }
 
+/// `GET /api/v1/admin/sessions` — 所有账号的会话 / cookie 记录。
+pub async fn sessions_list(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let (_rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/sessions");
+    match state
+        .admin_session_list(
+            parse_str(&query, "query"),
+            parse_i64(&query, "page"),
+            parse_i64(&query, "per_page"),
+            auth.session_id,
+        )
+        .await
+    {
+        Ok(page) => finish_page(Ok(page)),
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
+/// `DELETE /api/v1/admin/sessions/{id}` — 删除一条会话记录。
+pub async fn session_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(session_id): Path<i64>,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/sessions/{id}");
+    if auth.session_id == Some(session_id) {
+        return bad_request("当前正在使用的会话不能从后台删除；如需退出，请使用页面右上角的退出登录");
+    }
+    let target = state
+        .repo
+        .find_session_by_id(session_id)
+        .await
+        .ok()
+        .flatten();
+    let target_user = match target.as_ref() {
+        Some(session) => state
+            .repo
+            .find_user_by_id(session.user_id)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    match state.admin_delete_session(session_id).await {
+        Ok(deleted) => {
+            if deleted > 0 {
+                let target_label = target_user
+                    .as_ref()
+                    .map(|user| user.uid.clone())
+                    .unwrap_or_else(|| format!("session:{session_id}"));
+                state
+                    .audit_detail(
+                        actions::LOGOUT,
+                        Some(auth.user.id),
+                        target_label,
+                        serde_json::json!({
+                            "via": "admin_delete_session",
+                            "session_id": session_id,
+                            "target_user_id": target.as_ref().map(|session| session.user_id),
+                        }),
+                        rectx.ip.as_deref(),
+                    )
+                    .await;
+            }
+            finish::<serde_json::Value>(Ok(serde_json::json!({
+                "deleted": deleted,
+                "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+            })))
+        }
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
+/// `DELETE /api/v1/admin/sessions` — 清理全站已结束的会话记录。
+pub async fn sessions_history_clear(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/sessions");
+    match state.admin_clear_session_history().await {
+        Ok(deleted) => {
+            if deleted > 0 {
+                state
+                    .audit_detail(
+                        actions::LOGOUT,
+                        Some(auth.user.id),
+                        "sessions:history",
+                        serde_json::json!({ "via": "admin_cleanup", "deleted": deleted }),
+                        rectx.ip.as_deref(),
+                    )
+                    .await;
+            }
+            finish::<serde_json::Value>(Ok(serde_json::json!({
+                "deleted": deleted,
+                "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+            })))
+        }
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
+/// `GET /api/v1/admin/settings/oauth-health` — 第三方登录出网自检。
+pub async fn oauth_health(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+) -> Response {
+    let (_rectx, _auth) = admin_guard!(state, headers, method, peer, "/admin/settings/oauth-health");
+    finish::<pixora_core::identities::OAuthHealth>(Ok(state.oauth_health().await))
+}
+
 // ============================================================
 // 8.2 存储
 // ============================================================
@@ -1798,6 +1919,12 @@ pub async fn settings_get(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    let announcement_version = site.announcement.version();
+    let announcement_reads = state
+        .announcement_read_count(&announcement_version)
+        .await
+        .unwrap_or(0);
+    let user_total = state.repo.count_users().await.unwrap_or(0);
 
     finish::<serde_json::Value>(Ok(serde_json::json!({
         "site": {
@@ -1832,6 +1959,16 @@ pub async fn settings_get(
             "email_domains": site.email_domains.to_value(),
             "plaza_grid_columns": site.plaza_grid_columns,
             "plaza_auto_refresh_seconds": site.plaza_auto_refresh_seconds,
+            "announcement": {
+                "enabled": site.announcement.enabled,
+                "title": site.announcement.title,
+                "body": site.announcement.body,
+                "starts_at": site.announcement.starts_at,
+                "ends_at": site.announcement.ends_at,
+                "active": site.announcement.is_active(chrono::Utc::now()),
+                "reads": announcement_reads,
+                "user_total": user_total,
+            },
             "recycle_retention_days": state
                 .settings
                 .retention_days()
@@ -1854,6 +1991,7 @@ pub async fn settings_get(
             "idle_minutes": session.idle_minutes,
             "absolute_days": session.absolute_days,
             "remember_days": session.remember_days,
+            "history_retention_days": session.history_retention_days,
         },
         "security": {
             "hotlink_enabled": hotlink.enabled,
@@ -1994,7 +2132,52 @@ pub async fn settings_put(
                 }
                 serde_json::Value::Object(clean).to_string()
             });
-        let writes: [(&str, Option<String>); 11] = [
+        let announcement = site
+            .get("announcement")
+            .and_then(|value| value.as_object())
+            .map(|object| serde_json::Value::Object(object.clone()));
+        // 时间字段要区分「没传」「传了空串（清除定时）」「传了时间」三种情况：
+        // 空串必须真的写回空，否则管理员清不掉旧的定时窗口。
+        let announcement_field = |key: &str| {
+            announcement.as_ref().and_then(|value| value.get(key)).map(|value| {
+                let raw = value.as_str().unwrap_or("").trim().to_string();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(raw)
+                }
+            })
+        };
+        let announcement_starts_field = announcement_field("starts_at");
+        let announcement_ends_field = announcement_field("ends_at");
+        let parse_field_time = |raw: Option<&str>, key: &str| {
+            raw.map(|value| {
+                chrono::DateTime::parse_from_rfc3339(value)
+                    .map(|at| at.with_timezone(&chrono::Utc))
+                    .map_err(|_| format!("公告的 {key} 不是合法时间"))
+            })
+            .transpose()
+        };
+        let announcement_starts = match parse_field_time(
+            announcement_starts_field.as_ref().and_then(|value| value.as_deref()),
+            "starts_at",
+        ) {
+            Ok(value) => value,
+            Err(message) => return bad_request(message),
+        };
+        let announcement_ends = match parse_field_time(
+            announcement_ends_field.as_ref().and_then(|value| value.as_deref()),
+            "ends_at",
+        ) {
+            Ok(value) => value,
+            Err(message) => return bad_request(message),
+        };
+        if let (Some(start), Some(end)) = (announcement_starts, announcement_ends) {
+            if end <= start {
+                return bad_request("公告结束时间必须晚于开始时间");
+            }
+        }
+        let writes: [(&str, Option<String>); 16] = [
             (keys::SITE_NAME, field_opt_str(&site, "name")),
             (keys::SITE_BASE_URL, field_opt_str(&site, "base_url")),
             (
@@ -2044,6 +2227,37 @@ pub async fn settings_put(
                         .clamp(0, settings_defaults::RECYCLE_RETENTION_MAX)
                         .to_string()
                 }),
+            ),
+            (
+                keys::ANNOUNCEMENT_ENABLED,
+                announcement
+                    .as_ref()
+                    .and_then(|value| field_opt_bool(value, "enabled"))
+                    .map(|value| value.to_string()),
+            ),
+            (
+                keys::ANNOUNCEMENT_TITLE,
+                announcement
+                    .as_ref()
+                    .and_then(|value| value.get("title"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.trim().chars().take(120).collect()),
+            ),
+            (
+                keys::ANNOUNCEMENT_BODY,
+                announcement
+                    .as_ref()
+                    .and_then(|value| value.get("body"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.chars().take(5000).collect()),
+            ),
+            (
+                keys::ANNOUNCEMENT_STARTS_AT,
+                announcement_starts_field.map(|value| value.unwrap_or_default()),
+            ),
+            (
+                keys::ANNOUNCEMENT_ENDS_AT,
+                announcement_ends_field.map(|value| value.unwrap_or_default()),
             ),
         ];
         if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
@@ -2219,7 +2433,7 @@ pub async fn settings_put(
 
     if let Some(session) = body.get("session").and_then(|value| value.as_object()) {
         let session = serde_json::Value::Object(session.clone());
-        let writes: [(&str, Option<String>); 3] = [
+        let writes: [(&str, Option<String>); 4] = [
             (
                 keys::SESSION_IDLE_MINUTES,
                 field_opt_i64(&session, "idle_minutes").map(|value| {
@@ -2241,6 +2455,14 @@ pub async fn settings_put(
                 field_opt_i64(&session, "remember_days").map(|value| {
                     value
                         .clamp(1, settings_defaults::SESSION_DAYS_MAX)
+                        .to_string()
+                }),
+            ),
+            (
+                keys::SESSION_HISTORY_RETENTION_DAYS,
+                field_opt_i64(&session, "history_retention_days").map(|value| {
+                    value
+                        .clamp(0, settings_defaults::SESSION_DAYS_MAX)
                         .to_string()
                 }),
             ),

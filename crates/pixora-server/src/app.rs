@@ -92,6 +92,11 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/site", get(r::public::site))
         .route("/site/background", get(r::public::site_background))
         .route("/site/avatar", get(r::public::site_avatar))
+        // 公告已读：登录用户按版本记录，游客由浏览器本地兜底
+        .route(
+            "/announcements/{version}/read",
+            post(r::public::announcement_read),
+        )
         .route("/plaza", get(r::public::plaza))
         .route("/random", get(r::public::random_image))
         .route("/music/playlist", get(r::music::playlist))
@@ -149,7 +154,19 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/me/sessions",
             get(r::account::sessions_list).delete(r::account::sessions_revoke),
         )
-        .route("/me/sessions/{id}", delete(r::account::session_revoke))
+        // 历史记录与单条记录操作要排在 {id} 之前：静态段优先匹配
+        .route(
+            "/me/sessions/history",
+            delete(r::account::session_history_clear),
+        )
+        .route(
+            "/me/sessions/{id}",
+            patch(r::account::session_rename).delete(r::account::session_revoke),
+        )
+        .route(
+            "/me/sessions/{id}/record",
+            delete(r::account::session_delete_record),
+        )
         .route(
             "/me/tokens",
             get(r::account::tokens_list).post(r::account::tokens_create),
@@ -211,6 +228,15 @@ fn api_routes() -> Router<Arc<AppState>> {
         )
         .route("/admin/users/{id}/quota", post(r::admin::user_quota))
         .route("/admin/users/{id}/status", post(r::admin::user_status))
+        // ---------- 会话记录（cookie） ----------
+        .route(
+            "/admin/sessions",
+            get(r::admin::sessions_list).delete(r::admin::sessions_history_clear),
+        )
+        .route(
+            "/admin/sessions/{id}",
+            delete(r::admin::session_delete),
+        )
         // 管理员代发重置邮件：与「直接设新密码」是两条路，这条让用户自己设
         .route(
             "/admin/users/{id}/password-reset-mail",
@@ -281,6 +307,11 @@ fn api_routes() -> Router<Arc<AppState>> {
         // 站点默认头像：没设过头像的账号（含新注册的）都用它
         .route("/admin/settings/avatar", post(r::admin::avatar_upload))
         .route("/admin/settings/mail/test", post(r::admin::mail_test))
+        // OAuth 出网自检：固定端点，管理员点一下就知道服务器能不能连上 Google / GitHub
+        .route(
+            "/admin/settings/oauth-health",
+            get(r::admin::oauth_health),
+        )
         .route(
             "/admin/login-methods",
             get(r::admin::admin_login_methods_get).put(r::admin::admin_login_methods_put),

@@ -17,7 +17,7 @@ import { navigate, type PageContext } from "../core/router";
 import { getState, loadMe } from "../core/state";
 import { toastError } from "../core/toast";
 import { brandLockup } from "../ui/brand";
-import { field, qtip, textInput } from "../ui/widgets";
+import { field, passwordControl, qtip, textInput } from "../ui/widgets";
 import { oauthButtons, oauthErrorTip, phoneForm, scanPanel } from "../ui/login-methods";
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -25,10 +25,11 @@ export async function render(ctx: PageContext): Promise<void> {
   const site = getState().site;
 
   const emailInput = textInput({ placeholder: "chenyu@example.com", type: "email" });
-  const passwordInput = textInput({ type: "password", placeholder: "至少 10 位" });
-  // 默认不勾：默认「记住」等于替用户延长会话寿命，而多数人用的是公共设备或
-  // 只是想进来传张图——想让浏览器记住的人自己会去勾
-  const remember = h("input", { type: "checkbox" });
+  const passwordField = passwordControl({ placeholder: "至少 10 位" });
+  const passwordInput = passwordField.input;
+  // 默认勾上：下一次打开还能保持登录。公共设备上用户可以取消勾选，
+  // 取消后就是会话 Cookie（关浏览器即失效）。
+  const remember = h("input", { type: "checkbox", checked: true });
 
   // 第二步：6 位动态码，或一枚恢复码
   const totpInput = textInput({ placeholder: "6 位动态码或恢复码", name: "totp" });
@@ -44,7 +45,7 @@ export async function render(ctx: PageContext): Promise<void> {
     null,
     step1Error,
     field("邮箱", emailInput),
-    field("密码", passwordInput),
+    field("密码", passwordField.node),
     h(
       "div.flexline",
       { style: { justifyContent: "space-between", marginBottom: "16px", fontSize: "12.5px" } },
@@ -52,7 +53,7 @@ export async function render(ctx: PageContext): Promise<void> {
         "label",
         { style: { display: "flex", alignItems: "center", gap: "6px", color: "var(--muted)" } },
         remember,
-        h("span", { text: "记住我" }),
+        h("span", { text: "保持登录（下次免登录）" }),
       ),
       h("a", {
         href: "#/reset-password",

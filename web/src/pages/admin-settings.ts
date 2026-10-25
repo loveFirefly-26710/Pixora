@@ -23,6 +23,7 @@ import type { PageContext } from "../core/router";
 import { toastError, toastOk } from "../core/toast";
 import { currentUser, loadMe, loadSite } from "../core/state";
 import { reloadMusic, syncMusicDefaults } from "../core/music";
+import { openAnnouncementModal } from "../ui/announcement";
 import { BUILTIN_AVATAR } from "../ui/brand";
 import { refreshNav } from "../ui/shell";
 import type { AdminSettings, MusicPlaylist, RateLimitAdmin } from "../core/types";
@@ -50,6 +51,7 @@ import {
   select,
   spinner,
   switchRow,
+  textarea,
   textInput,
 } from "../ui/widgets";
 
@@ -121,6 +123,12 @@ interface SettingsDraft {
   plazaPublic: boolean;
   plazaColumns: HTMLSelectElement;
   plazaAutoRefresh: HTMLInputElement;
+  /** 首页公告：打开广场后自动弹出 */
+  announcementEnabled: boolean;
+  announcementTitle: HTMLInputElement;
+  announcementBody: HTMLTextAreaElement;
+  announcementStarts: HTMLInputElement;
+  announcementEnds: HTMLInputElement;
   /** 首页只展示这些公开相册；空 = 全部公开图片 */
   plazaAlbumIds: Set<number>;
   /** 命名集合：每个集合从公开相册里勾选 */
@@ -151,6 +159,7 @@ interface SettingsDraft {
   sessionIdle: HTMLInputElement;
   sessionAbsolute: HTMLInputElement;
   sessionRemember: HTMLInputElement;
+  sessionHistoryDays: HTMLInputElement;
   hotlinkEnabled: boolean;
   hotlinkAllowEmpty: boolean;
   hotlinkDomains: HTMLInputElement;
@@ -222,6 +231,21 @@ function autoRefreshSeconds(input: HTMLInputElement): number {
   return value > 0 ? Math.max(5, value) : 0;
 }
 
+/** `<input type="datetime-local">` 与 RFC3339 互转。 */
+function toLocalDateTime(iso: string | null): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function fromLocalDateTime(value: string): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
 /** 容量输入：不带单位按默认单位解释。 */
 function sizeOf(input: HTMLInputElement, unit: string): number {
   const text = input.value.trim();
@@ -269,6 +293,26 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       mono: true,
       min: "0",
       max: "3600",
+    }),
+    announcementEnabled: data.site.announcement?.enabled ?? false,
+    announcementTitle: textInput({
+      value: data.site.announcement?.title ?? "",
+      placeholder: "例如：站点维护通知",
+    }),
+    announcementBody: textarea({
+      value: data.site.announcement?.body ?? "",
+      rows: 5,
+      placeholder: "公告正文。支持换行；留空时即使开启也不会弹出。",
+    }),
+    announcementStarts: h("input.f", {
+      type: "datetime-local",
+      value: toLocalDateTime(data.site.announcement?.starts_at ?? null),
+      "aria-label": "公告开始时间",
+    }),
+    announcementEnds: h("input.f", {
+      type: "datetime-local",
+      value: toLocalDateTime(data.site.announcement?.ends_at ?? null),
+      "aria-label": "公告结束时间",
     }),
     plazaAlbumIds: new Set(data.site.plaza_album_ids ?? []),
     plazaCollections: Object.entries(data.site.plaza_collections ?? {})
@@ -369,6 +413,12 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       type: "number",
       mono: true,
       min: "1",
+    }),
+    sessionHistoryDays: textInput({
+      value: String(data.session?.history_retention_days ?? 90),
+      type: "number",
+      mono: true,
+      min: "0",
     }),
     hotlinkEnabled: data.security?.hotlink_enabled ?? false,
     hotlinkAllowEmpty: data.security?.hotlink_allow_empty ?? true,
@@ -950,6 +1000,53 @@ function siteCard(draft: SettingsDraft, data: AdminSettings): HTMLElement {
       unitInput(draft.plazaAutoRefresh, "秒"),
       "自动漫游每隔多少秒换一批公开图片。填 0 关闭；最短 5 秒，最长 3600 秒。预览浮层打开或标签页隐藏时暂停。",
     ),
+    switchRow(
+      "首页公告",
+      "打开广场后自动弹出，用户点击「我知道了」才关闭",
+      draft.announcementEnabled,
+      (next) => {
+        draft.announcementEnabled = next;
+      },
+    ),
+    field("公告标题", draft.announcementTitle, "不填时显示「站点公告」"),
+    field("公告正文", draft.announcementBody, "支持换行。改了正文后，已经确认过旧公告的用户会重新看到一次。"),
+    h(
+      "div.row",
+      null,
+      field("开始展示", draft.announcementStarts, "留空 = 立即开始；按服务器时区写入"),
+      field("结束展示", draft.announcementEnds, "留空 = 不自动下线"),
+    ),
+    h(
+      "div.flexline",
+      { style: { marginTop: "6px" } },
+      h("button.btn.sm", {
+        type: "button",
+        text: "预览公告",
+        on: {
+          click: () => {
+            let handle: ReturnType<typeof openAnnouncementModal> | null = null;
+            handle = openAnnouncementModal({
+              title: draft.announcementTitle.value,
+              body: draft.announcementBody.value || "（公告正文为空）",
+              dismissable: true,
+              footer: [
+                h("button.btn.pri", {
+                  type: "button",
+                  text: "关闭预览",
+                  on: { click: () => handle?.close() },
+                }),
+              ],
+            });
+          },
+        },
+      }),
+      h("span.tip", {
+        style: { margin: "0" },
+        text: data.site.announcement
+          ? `当前版本已读 ${data.site.announcement.reads} / ${data.site.announcement.user_total} 个账号${data.site.announcement.active ? "" : "（当前不在展示窗口）"}`
+          : "",
+      }),
+    ),
     field(
       "回收站保留天数",
       draft.recycleRetention,
@@ -1157,6 +1254,11 @@ function sessionCard(draft: SettingsDraft): HTMLElement {
         "「记住我」有效期",
         unitInput(draft.sessionRemember, "天"),
         "登录时勾了「记住我」的会话活这么久，期间不看闲置时间",
+      ),
+      field(
+        "登录历史保留",
+        unitInput(draft.sessionHistoryDays, "天"),
+        "已下线/已过期的会话记录保留多久；0 表示永久保留，需要手动清理",
       ),
     ),
     h("div.tip", {
@@ -1939,6 +2041,13 @@ async function save(
       plaza_public: draft.plazaPublic,
       plaza_grid_columns: Number(draft.plazaColumns.value) || 3,
       plaza_auto_refresh_seconds: autoRefreshSeconds(draft.plazaAutoRefresh),
+      announcement: {
+        enabled: draft.announcementEnabled,
+        title: draft.announcementTitle.value.trim(),
+        body: draft.announcementBody.value.trim(),
+        starts_at: fromLocalDateTime(draft.announcementStarts.value),
+        ends_at: fromLocalDateTime(draft.announcementEnds.value),
+      },
       plaza_album_ids: [...draft.plazaAlbumIds],
       plaza_collections: Object.fromEntries(plazaCollections),
       recycle_retention_days: Math.min(365, Math.max(0, intOf(draft.recycleRetention))),
@@ -1958,6 +2067,7 @@ async function save(
       idle_minutes: Math.min(525600, intOf(draft.sessionIdle)),
       absolute_days: Math.min(365, intOf(draft.sessionAbsolute)),
       remember_days: Math.min(365, Math.max(1, intOf(draft.sessionRemember))),
+      history_retention_days: Math.min(365, Math.max(0, intOf(draft.sessionHistoryDays))),
     },
     security: {
       hotlink_enabled: draft.hotlinkEnabled,

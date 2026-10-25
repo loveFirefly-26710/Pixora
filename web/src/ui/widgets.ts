@@ -94,16 +94,22 @@ let fieldSeq = 0;
 export function field(label: string, control: Node, tip?: string): HTMLElement {
   const labelEl = h("label.f", { text: label });
   if (control instanceof HTMLElement) {
-    const id = control.id || `fld-${++fieldSeq}`;
-    control.id = id;
-    labelEl.setAttribute("for", id);
+    // 密码框的外面可能包着一层 .pw-wrap（显示/隐藏按钮），标签要绑到里面
+    // 真正那个 input 上，否则 for 指向一个 div，屏幕阅读器读不出名字。
     const named =
       control instanceof HTMLInputElement ||
       control instanceof HTMLSelectElement ||
-      control instanceof HTMLTextAreaElement;
-    // 按钮组之类的容器不适合直接用 aria-label，会被读成一整个控件
-    if (named && !control.getAttribute("aria-label")) {
-      control.setAttribute("aria-label", label);
+      control instanceof HTMLTextAreaElement
+        ? control
+        : control.querySelector<HTMLElement>("input, select, textarea");
+    if (named) {
+      const id = named.id || `fld-${++fieldSeq}`;
+      named.id = id;
+      labelEl.setAttribute("for", id);
+      // 按钮组之类的容器不适合直接用 aria-label，会被读成一整个控件
+      if (!named.getAttribute("aria-label")) {
+        named.setAttribute("aria-label", label);
+      }
     }
   }
   return h(
@@ -138,6 +144,45 @@ export function textInput(options: {
   if (options.value !== undefined) input.value = options.value;
   if (options.readonly) input.readOnly = true;
   return input;
+}
+
+/**
+ * 密码框 + 显示/隐藏按钮。
+ *
+ * 返回的 `input` 是真正的输入框（取值、聚焦都继续用它），`node` 是要放进
+ * 页面的那一层包装。包一层而不是往 input 里塞按钮，是因为 input 是空元素，
+ * 里面放不了任何东西；按钮绝对定位在右侧，窄屏也不会把输入区挤没。
+ */
+export interface PasswordControl {
+  input: HTMLInputElement;
+  node: HTMLElement;
+}
+
+export function passwordControl(options: {
+  value?: string;
+  placeholder?: string;
+  name?: string;
+  mono?: boolean;
+  readonly?: boolean;
+} = {}): PasswordControl {
+  const input = textInput({ ...options, type: "password" });
+  const toggle = h("button.pw-toggle", {
+    type: "button",
+    text: "显示",
+    "aria-label": "显示密码",
+    "aria-pressed": "false",
+    title: "显示密码",
+  });
+  toggle.addEventListener("click", () => {
+    const reveal = input.type === "password";
+    input.type = reveal ? "text" : "password";
+    toggle.textContent = reveal ? "隐藏" : "显示";
+    toggle.setAttribute("aria-label", reveal ? "隐藏密码" : "显示密码");
+    toggle.setAttribute("aria-pressed", String(reveal));
+    toggle.title = reveal ? "隐藏密码" : "显示密码";
+    input.focus();
+  });
+  return { input, node: h("div.pw-wrap", null, input, toggle) };
 }
 
 export function select(options: Array<{ value: string; label: string }>, current?: string): HTMLSelectElement {

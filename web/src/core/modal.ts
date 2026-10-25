@@ -91,8 +91,34 @@ export function openModal(options: ModalOptions): ModalHandle {
     previousFocus?.focus?.();
   }
 
+  function focusables(): HTMLElement[] {
+    return Array.from(
+      sheet.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((element) => element.offsetParent !== null);
+  }
+
   function onKey(event: KeyboardEvent): void {
     if (event.key === "Escape" && dismissable) close();
+    if (event.key !== "Tab") return;
+    // 弹窗内 Tab 循环：焦点不能跑到背后的页面上，读屏与键盘用户才不会迷路
+    const items = focusables();
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+    if (event.shiftKey) {
+      if (active === first || !sheet.contains(active)) {
+        event.preventDefault();
+        last.focus();
+      }
+      return;
+    }
+    if (active === last || !sheet.contains(active)) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   mask.addEventListener("click", () => {

@@ -995,6 +995,84 @@ pub struct AdminUserDetail {
     pub identities: Vec<crate::identities::IdentityView>,
 }
 
+/// 管理端的会话记录行（cookie 记录）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdminSessionRow {
+    pub id: i64,
+    pub user_id: i64,
+    pub uid: String,
+    pub email: String,
+    pub device: Option<String>,
+    pub label: Option<String>,
+    pub ip: Option<String>,
+    pub created_at: String,
+    pub last_seen_at: String,
+    pub expires_at: Option<String>,
+    pub revoked_at: Option<String>,
+    /// `active` / `saved` / `expired` / `revoked`
+    pub state: &'static str,
+    pub remember: bool,
+    /// 是不是管理员自己当前正在用的会话；后台不允许删它
+    pub current: bool,
+}
+
+impl AppState {
+    /// 管理端会话记录：所有账号的 cookie / 会话记录，可按邮箱、UID、IP、设备搜索。
+    pub async fn admin_session_list(
+        &self,
+        query: Option<&str>,
+        page: Option<i64>,
+        per_page: Option<i64>,
+        current_session_id: Option<i64>,
+    ) -> Result<Page<AdminSessionRow>> {
+        let request = PageRequest::new(page, per_page, 20, 100);
+        let policy = self.session_policy().await;
+        let now = Utc::now();
+        let page = self.repo.admin_list_sessions(query, request).await?;
+        Ok(page.map(|row| {
+            let state = row.state(policy, now);
+            let remember = row.expires_at.is_some();
+            let current = current_session_id == Some(row.id);
+            AdminSessionRow {
+                id: row.id,
+                user_id: row.user_id,
+                uid: row.uid,
+                email: row.email,
+                device: row.device,
+                label: row.label,
+                ip: row.ip,
+                created_at: row.created_at.to_rfc3339(),
+                last_seen_at: row.last_seen_at.to_rfc3339(),
+                expires_at: row.expires_at.map(|at| at.to_rfc3339()),
+                revoked_at: row.revoked_at.map(|at| at.to_rfc3339()),
+                state,
+                remember,
+                current,
+            }
+        }))
+    }
+
+    /// 删除一条会话记录。管理员可以删任何人的，包括正在使用的那条
+    /// （对方的浏览器下一次请求就会回到登录页）。
+    pub async fn admin_delete_session(&self, session_id: i64) -> Result<u64> {
+        Ok(self.repo.delete_session(session_id, None).await?)
+    }
+
+    /// 清理全站已经结束的会话记录（已吊销 / 已过期）。
+    pub async fn admin_clear_session_history(&self) -> Result<u64> {
+        let policy = self.session_policy().await;
+        let now = Utc::now();
+        let idle_before = (policy.idle_minutes > 0)
+            .then(|| now - chrono::Duration::minutes(policy.idle_minutes));
+        let created_before = (policy.absolute_days > 0)
+            .then(|| now - chrono::Duration::days(policy.absolute_days));
+        Ok(self
+            .repo
+            .delete_session_history(None, now, idle_before, created_before)
+            .await?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

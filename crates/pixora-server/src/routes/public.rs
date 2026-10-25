@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use pixora_core::AppError;
@@ -91,6 +91,15 @@ pub async fn site(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    let announcement_version = site.announcement.version();
+    let announcement_active = site.announcement.is_active(chrono::Utc::now());
+    let announcement_read = match auth.as_ref() {
+        Some(authenticated) => state
+            .announcement_read(authenticated.user.id, &announcement_version)
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
     let music = match state.settings.music().await {
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
@@ -120,6 +129,19 @@ pub async fn site(
         // 免得用户填完邮箱、点了发码才知道不行
         "register_email_domains": site.email_domains.domains(),
         "plaza_public": site.plaza_public,
+        // 首页公告：只要有正文就下发；enabled 关掉时前端不弹。
+        // version 由标题与正文算出，用户确认后前端按它记住，改了内容会重新弹
+        "announcement": {
+            // 定时窗口未到/已过时这里就是 false，前端不需要自己比较时间
+            "enabled": announcement_active,
+            "title": site.announcement.title,
+            "body": site.announcement.body,
+            "version": announcement_version,
+            "starts_at": site.announcement.starts_at,
+            "ends_at": site.announcement.ends_at,
+            // 登录用户的服务端已读状态：换设备/清缓存也不会重复弹
+            "read": announcement_read,
+        },
         "formats": upload.formats,
         "max_file_bytes": upload.max_file_bytes,
         "max_batch_size": upload.max_batch,
@@ -226,11 +248,28 @@ pub async fn plaza(
         ));
     }
 
+    // 标签多选：优先读 `tags=a,b`，也兼容旧的单标签 `tag=`
+    let mut tags: Vec<String> = Vec::new();
+    if let Some(list) = query.get("tags") {
+        for tag in list.split([',', '，']) {
+            let tag = tag.trim();
+            if !tag.is_empty() && !tags.iter().any(|item| item == tag) {
+                tags.push(tag.to_string());
+            }
+        }
+    }
+    if tags.is_empty() {
+        if let Some(tag) = parse_str(&query, "tag") {
+            tags.push(tag.to_string());
+        }
+    }
+
     finish_page(
         state
             .list_plaza(
                 parse_str(&query, "q"),
-                parse_str(&query, "tag"),
+                &tags,
+                parse_str(&query, "tag_mode"),
                 parse_str(&query, "sort"),
                 parse_i64(&query, "seed").unwrap_or(0).max(0) as u64,
                 parse_i64(&query, "page"),
@@ -239,6 +278,30 @@ pub async fn plaza(
             )
             .await,
     )
+}
+
+/// `POST /api/v1/announcements/{version}/read` — 登录用户确认公告。
+///
+/// 只有登录用户才有地方记；游客由前端 sessionStorage/localStorage 兜底。
+pub async fn announcement_read(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(version): Path<String>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match super::require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    match state.mark_announcement_read(auth.user.id, &version).await {
+        Ok(()) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "ok": true,
+            "csrf_token": crate::http::cookie_value(&headers, crate::http::CSRF_COOKIE),
+        }))),
+        Err(err) => crate::http::error_response(err),
+    }
 }
 
 /// `GET /api/v1/site/avatar` — 公开。站点默认头像本体（上传进库的那张）。

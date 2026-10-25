@@ -44,6 +44,13 @@ pub mod keys {
     pub const SITE_NAME: &str = "site.name";
     pub const SITE_BASE_URL: &str = "site.base_url";
     pub const UPLOAD_PREFIX: &str = "site.upload_prefix";
+    /// 首页公告：打开广场后自动弹出，用户确认后关闭。
+    pub const ANNOUNCEMENT_ENABLED: &str = "site.announcement_enabled";
+    pub const ANNOUNCEMENT_TITLE: &str = "site.announcement_title";
+    pub const ANNOUNCEMENT_BODY: &str = "site.announcement_body";
+    /// 公告定时：RFC3339 时间；空 = 立即/永久
+    pub const ANNOUNCEMENT_STARTS_AT: &str = "site.announcement_starts_at";
+    pub const ANNOUNCEMENT_ENDS_AT: &str = "site.announcement_ends_at";
     pub const REGISTER_ENABLED: &str = "register.enabled";
     /// 允许注册的邮箱域名白名单，逗号分隔；空 = 不限域名。子域自动算命中
     pub const REGISTER_EMAIL_DOMAINS: &str = "register.email_domains";
@@ -139,6 +146,8 @@ pub mod keys {
     pub const SESSION_ABSOLUTE_DAYS: &str = "session.absolute_days";
     /// 「记住我」签发的会话活多久（天）
     pub const SESSION_REMEMBER_DAYS: &str = "session.remember_days";
+    /// 已下线/已过期的会话记录保留多少天；0 = 永久保留
+    pub const SESSION_HISTORY_RETENTION_DAYS: &str = "session.history_retention_days";
     /// 防盗链：直链要不要校验来源
     pub const HOTLINK_ENABLED: &str = "security.hotlink_enabled";
     /// 防盗链：允许空 Referer（直接打开链接、部分客户端不带）
@@ -202,6 +211,8 @@ pub mod defaults {
     pub const SESSION_ABSOLUTE_DAYS: i64 = 30;
     /// 「记住我」的会话活 30 天
     pub const SESSION_REMEMBER_DAYS: i64 = 30;
+    /// 登录历史默认保留 90 天
+    pub const SESSION_HISTORY_RETENTION_DAYS: i64 = 90;
     /// 会话项的可配置范围。上限给一年，再长不如关掉这一项
     pub const SESSION_MINUTES_MAX: i64 = 525_600;
     pub const SESSION_DAYS_MAX: i64 = 365;
@@ -267,8 +278,58 @@ pub struct SiteSettings {
     pub plaza_auto_refresh_seconds: i64,
     /// 只在广场展示这些公开相册里的图片。空 = 不限制（沿用全部公开图片）
     pub plaza_album_ids: Vec<i64>,
+    /// 首页公告
+    pub announcement: AnnouncementSettings,
     /// 允许注册的邮箱域名（白名单，空 = 不限）
     pub email_domains: RegisterDomains,
+}
+
+/// 首页公告。打开广场时自动弹出，用户确认后关闭。
+#[derive(Debug, Clone, Default)]
+pub struct AnnouncementSettings {
+    pub enabled: bool,
+    pub title: String,
+    pub body: String,
+    /// 开始展示时间；空 = 立即
+    pub starts_at: Option<String>,
+    /// 结束展示时间；空 = 不自动下线
+    pub ends_at: Option<String>,
+}
+
+impl AnnouncementSettings {
+    /// 公告版本：由标题与正文算出。改了内容，浏览器里「已确认」的旧版本就失效，
+    /// 下次打开会重新弹——比让管理员再记一个版本号靠谱。
+    pub fn version(&self) -> String {
+        let raw = format!("{}\n{}", self.title, self.body);
+        pixora_crypto::hash::sha256_hex(raw.as_bytes())
+            .chars()
+            .take(16)
+            .collect()
+    }
+
+    /// 当前是否处于展示窗口。时间配错时按「没配」处理，不把公告永久藏起来。
+    pub fn is_active(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if !self.enabled || self.body.trim().is_empty() {
+            return false;
+        }
+        let parse = |value: &Option<String>| {
+            value
+                .as_deref()
+                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                .map(|at| at.with_timezone(&chrono::Utc))
+        };
+        if let Some(start) = parse(&self.starts_at) {
+            if now < start {
+                return false;
+            }
+        }
+        if let Some(end) = parse(&self.ends_at) {
+            if now >= end {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// 音乐播放配置。
@@ -384,6 +445,8 @@ pub struct SessionSettings {
     pub idle_minutes: i64,
     pub absolute_days: i64,
     pub remember_days: i64,
+    /// 已结束的会话记录保留天数；0 = 永久保留
+    pub history_retention_days: i64,
 }
 
 impl SessionSettings {
@@ -637,6 +700,13 @@ impl Settings {
                 .await?,
             ),
             plaza_album_ids: parse_id_list(self.raw(keys::PLAZA_ALBUM_IDS).await?.as_deref()),
+            announcement: AnnouncementSettings {
+                enabled: self.bool(keys::ANNOUNCEMENT_ENABLED, false).await?,
+                title: self.string(keys::ANNOUNCEMENT_TITLE, "").await?,
+                body: self.string(keys::ANNOUNCEMENT_BODY, "").await?,
+                starts_at: self.raw(keys::ANNOUNCEMENT_STARTS_AT).await?,
+                ends_at: self.raw(keys::ANNOUNCEMENT_ENDS_AT).await?,
+            },
             email_domains: RegisterDomains::parse(
                 self.raw(keys::REGISTER_EMAIL_DOMAINS).await?.as_deref(),
             ),
@@ -867,6 +937,11 @@ impl Settings {
                 .clamp(0, defaults::SESSION_DAYS_MAX),
             remember_days: read(keys::SESSION_REMEMBER_DAYS, defaults::SESSION_REMEMBER_DAYS)
                 .clamp(1, defaults::SESSION_DAYS_MAX),
+            history_retention_days: read(
+                keys::SESSION_HISTORY_RETENTION_DAYS,
+                defaults::SESSION_HISTORY_RETENTION_DAYS,
+            )
+            .clamp(0, defaults::SESSION_DAYS_MAX),
         })
     }
 
@@ -1116,6 +1191,32 @@ pub fn parse_id_list(raw: Option<&str>) -> Vec<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn announcement_respects_its_display_window() {
+        let base = AnnouncementSettings {
+            enabled: true,
+            title: "维护".into(),
+            body: "今晚维护".into(),
+            starts_at: Some("2026-10-26T20:00:00Z".into()),
+            ends_at: Some("2026-10-26T22:00:00Z".into()),
+        };
+        let at = |hour: u32| {
+            chrono::DateTime::parse_from_rfc3339(&format!("2026-10-26T{hour:02}:00:00Z"))
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        assert!(!base.is_active(at(19)), "开始前不展示");
+        assert!(base.is_active(at(21)), "窗口内展示");
+        assert!(!base.is_active(at(23)), "结束后不展示");
+
+        let mut disabled = base.clone();
+        disabled.enabled = false;
+        assert!(!disabled.is_active(at(21)), "关闭时窗口内也不展示");
+        let mut empty = base;
+        empty.body.clear();
+        assert!(!empty.is_active(at(21)), "空正文不展示");
+    }
 
     /// 注册域名白名单：空 = 不限，填了按域与子域命中。
     #[test]

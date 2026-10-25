@@ -248,6 +248,20 @@ pub fn session_cookie(headers: &HeaderMap) -> Option<String> {
     cookie_value(headers, SESSION_COOKIE)
 }
 
+/// 当前请求的粗粒度设备标签（`Chrome · Windows`）。
+///
+/// 只用于会话绑定：浏览器小版本升级不会改变这个标签，换浏览器/系统才会。
+pub fn device_label(headers: &HeaderMap) -> Option<String> {
+    DeviceInfo {
+        ip: None,
+        user_agent: headers
+            .get(header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+    }
+    .device_label()
+}
+
 /// 从请求里取 Bearer / X-API-Key。
 pub fn api_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers.get(header::AUTHORIZATION) {
@@ -303,7 +317,10 @@ pub async fn authenticate(
     }
 
     if let Some(token) = session_cookie(headers) {
-        let (user, session) = state.authenticate_session(&token, ip).await?;
+        let device = device_label(headers);
+        let (user, session) = state
+            .authenticate_session(&token, ip, device.as_deref())
+            .await?;
         return Ok(Authenticated {
             user,
             session_id: Some(session.id),

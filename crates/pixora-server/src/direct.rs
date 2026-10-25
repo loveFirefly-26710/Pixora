@@ -375,7 +375,11 @@ async fn is_publicly_referenced(state: &AppState, blob_id: i64) -> pixora_core::
 /// 图片走的是带鉴权的详情接口，不经过直链。会话无效、没登录都返回 `None`。
 async fn session_user(state: &AppState, headers: &HeaderMap) -> Option<pixora_repo::model::User> {
     let token = crate::http::session_cookie(headers)?;
-    match state.authenticate_session(&token, None).await {
+    let device = crate::http::device_label(headers);
+    match state
+        .authenticate_session(&token, None, device.as_deref())
+        .await
+    {
         Ok((user, _)) => Some(user),
         Err(_) => None,
     }

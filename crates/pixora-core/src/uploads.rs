@@ -327,6 +327,15 @@ impl AppState {
             }
         }
         let normalized: Vec<String> = hashes.iter().map(|hash| hash.to_lowercase()).collect();
+        // 访客上传共用同一个访客账号。若把访客库的哈希命中情况回给浏览器，
+        // 知道图片内容的人就能靠「开始上传」确认访客库里有没有这张图。
+        // 访客一律按「都缺」处理，真正的去重交给上传接口在收到文件后做。
+        if crate::guest::is_guest(user) {
+            return Ok(HashCheckOutcome {
+                exist: Vec::new(),
+                missing: normalized,
+            });
+        }
         let check = self.repo.existing_hashes(user.id, &normalized).await?;
         Ok(HashCheckOutcome {
             exist: check.exist,

@@ -24,9 +24,20 @@ import {
 } from "../core/music";
 import { navigate, type PageContext } from "../core/router";
 import { currentUser, getState } from "../core/state";
+import {
+  acknowledgeAnnouncement,
+  announcementAcknowledged,
+  announcementShownThisSession,
+  loadPlazaAuto,
+  loadPlazaColumns,
+  markAnnouncementShown,
+  savePlazaAuto,
+  savePlazaColumns,
+} from "../core/store";
 import { toastError } from "../core/toast";
-import type { ImageItem, MusicTrack } from "../core/types";
+import type { ImageItem, MusicTrack, TagRow } from "../core/types";
 import { createUploadPanel } from "../upload/panel";
+import { openAnnouncementModal } from "../ui/announcement";
 import { FIREFLY_MARK } from "../ui/brand";
 import { openLightbox } from "../ui/lightbox";
 import { applyMasonry } from "../ui/masonry";
@@ -35,6 +46,7 @@ import {
   imageTile,
   newShuffleSeed,
   qtip,
+  select,
   skeletonTiles,
   sortSelect,
   spinner,
@@ -47,7 +59,10 @@ const PER_PAGE = 24;
 
 interface PlazaQuery {
   q: string | null;
-  tag: string | null;
+  /** 多选标签；空数组表示不过滤 */
+  tags: string[];
+  /** 多选标签是「任一命中」还是「全部命中」 */
+  tagMode: "any" | "all";
   sort: string;
   /** 随机排序的种子：翻页要带同一个，否则每页各洗一次牌会重复与漏图 */
   seed: number;
@@ -65,23 +80,33 @@ const KNOWN_SORTS = [
   "hot",
 ];
 
+function readTags(ctx: PageContext): string[] {
+  const raw = ctx.query.get("tags") ?? ctx.query.get("tag") ?? "";
+  const tags: string[] = [];
+  for (const piece of raw.split(/[,，]/)) {
+    const tag = piece.trim();
+    if (tag && !tags.includes(tag)) tags.push(tag);
+  }
+  return tags;
+}
+
 function readQuery(ctx: PageContext): PlazaQuery {
   const sortParam = ctx.query.get("sort");
   const sort = sortParam && KNOWN_SORTS.includes(sortParam) ? sortParam : "shuffle";
   const seedParam = Number(ctx.query.get("seed"));
   return {
     q: ctx.query.get("q"),
-    tag: ctx.query.get("tag"),
+    tags: readTags(ctx),
+    tagMode: ctx.query.get("tag_mode") === "all" ? "all" : "any",
     sort,
     // 链接里带了种子就用它（翻页、后退时顺序不变），否则现取一个
     seed: Number.isInteger(seedParam) && seedParam > 0 ? seedParam : newShuffleSeed(),
   };
 }
 
-/** 广场的列数由后台配置（默认 3 列，比原来的 5 列大一圈）。 */
-function gridColumnsStyle(): string {
-  const columns = getState().site?.plaza_grid_columns ?? 3;
-  const clamped = Math.min(6, Math.max(2, columns));
+/** 广场的列数：用户可以在工具条里改，默认取后台配置（3 列）。 */
+function gridColumnsStyle(columns: number): string {
+  const clamped = Math.min(6, Math.max(2, Math.round(columns) || 3));
   return `--plaza-cols: ${clamped};`;
 }
 
@@ -93,8 +118,8 @@ function gridColumnsStyle(): string {
  */
 function emptyGridHint(query: PlazaQuery, loggedIn: boolean): HTMLElement {
   const node =
-    query.q || query.tag
-      ? emptyState("✦", "没有匹配的图片，请更换关键词。")
+    query.q || query.tags.length > 0
+      ? emptyState("✦", "没有匹配的图片，请更换关键词或标签。")
       : emptyState(
           "✦",
           "广场还没有公开图片",
@@ -113,6 +138,7 @@ interface PlazaHeroHandle {
   setTotal(total: number): void;
   setAutoState(enabled: boolean): void;
   setAutoCountdown(remaining: number): void;
+  setAutoVisible(visible: boolean): void;
   setMusic(playing: boolean, track: MusicTrack | null): void;
   setFeaturedViews(item: ImageItem): void;
   setPanelOpen(open: boolean): void;
@@ -125,6 +151,8 @@ interface PlazaHeroOptions {
   onToggleMusic: () => void;
   autoSeconds: number;
   autoEnabled: boolean;
+  /** 只有随机排序才显示自动漫游（其它排序下自动刷新没有意义） */
+  autoVisible: boolean;
   musicEnabled: boolean;
 }
 
@@ -149,6 +177,7 @@ function autoCountdownText(seconds: number): string {
 function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
   let featured: ImageItem | null = null;
   let playing = false;
+  let fadeTimer: number | null = null;
   const count = h("span", { text: "0 幅公开影像" });
   const chipTitle = h("div.hero-chip-title", { text: "等待第一束光" });
   const chipSub = h("div.hero-chip-sub", { text: "上传后出现在这里" });
@@ -190,6 +219,7 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
 
   let autoButton: HTMLButtonElement | null = null;
   let autoLabel: HTMLElement | null = null;
+  let autoVisible = options.autoVisible;
   if (options.autoSeconds > 0) {
     autoLabel = h("span.auto-label");
     autoButton = h(
@@ -197,11 +227,15 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
       {
         type: "button",
         "aria-pressed": String(options.autoEnabled),
+        "aria-hidden": String(!options.autoVisible),
       },
       h("span.auto-dot", { "aria-hidden": "true" }),
       autoLabel,
     );
     autoButton.addEventListener("click", options.onToggleAuto);
+    autoButton.addEventListener("animationend", () => {
+      autoButton?.classList.remove("is-revealing");
+    });
   }
 
   const visual = h(
@@ -258,6 +292,10 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
   function setFeatured(item: ImageItem | null): void {
     if (!item) {
       featured = null;
+      if (fadeTimer !== null) {
+        window.clearTimeout(fadeTimer);
+        fadeTimer = null;
+      }
       frameInner.replaceChildren(core);
       frame.setAttribute(
         "aria-label",
@@ -281,6 +319,12 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
     if (playing && featured) return;
 
     featured = item;
+    // 保留旧图做淡出垫底，但把「等待第一束光」的翼标拿掉；
+    // 不拿掉的话，新图没加载出来时会露出翼标，看着像图片没换成
+    for (const child of Array.from(frameInner.children)) {
+      if (!(child instanceof HTMLImageElement)) child.remove();
+    }
+    const previous = Array.from(frameInner.querySelectorAll("img"));
     const img = thumbImage({
       url: item.url,
       thumb_url: item.thumb_url,
@@ -291,7 +335,16 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
     img.loading = "eager";
     img.decoding = "async";
     img.alt = item.title ?? "广场图片";
-    frameInner.replaceChildren(img);
+    // 自动漫游换图时不要硬切：新图先从透明淡入，旧图垫在下面，
+    // 等淡入结束再摘掉。两张 img 都绝对定位，不会互相挤。
+    img.classList.add("hero-img-enter");
+    frameInner.append(img);
+    requestAnimationFrame(() => img.classList.remove("hero-img-enter"));
+    if (fadeTimer !== null) window.clearTimeout(fadeTimer);
+    fadeTimer = window.setTimeout(() => {
+      for (const old of previous) old.remove();
+      fadeTimer = null;
+    }, 900);
     frame.setAttribute(
       "aria-label",
       options.musicEnabled
@@ -347,20 +400,87 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
     autoLabel.textContent = `自动漫游 · ${autoCountdownText(Math.max(0, remaining))}`;
   }
 
+  /**
+   * 自动漫游按钮的出现/收起。
+   *
+   * 排序切到「最新」「最热」等非随机模式时，自动刷新换一批没有意义，
+   * 按钮会收起来，只留「投递影像」。出现时带一点萤火散开的动效，
+   * 收起时向左侧淡出并收窄，不硬切。
+   */
+  function setAutoVisible(visible: boolean): void {
+    if (!autoButton || visible === autoVisible) return;
+    autoVisible = visible;
+    autoButton.classList.remove("is-revealing");
+    autoButton.classList.toggle("is-hidden", !visible);
+    autoButton.setAttribute("aria-hidden", String(!visible));
+    autoButton.tabIndex = visible ? 0 : -1;
+    if (visible) {
+      // 先让浏览器认下「显示」这一帧，再触发动画；连点也有同样的节奏
+      void autoButton.offsetWidth;
+      autoButton.classList.add("is-revealing");
+    }
+  }
+
   setAutoState(options.autoEnabled);
   if (options.autoEnabled) setAutoCountdown(options.autoSeconds);
+  // 初始就是隐藏态时不要再播一遍「收起」动画，直接摆好位置
+  autoButton?.classList.toggle("is-hidden", !autoVisible);
+  autoButton?.classList.toggle("is-revealing", autoVisible);
   return {
     root: hero,
     setFeatured,
     setTotal,
     setAutoState,
     setAutoCountdown,
+    setAutoVisible,
     setMusic,
     setFeaturedViews,
     setPanelOpen,
   };
 }
 
+/**
+ * 首页公告：管理员开启后，进入广场自动弹出。
+ *
+ * 只在一个浏览器会话里第一次进首页时弹；用户点了「不再提示」才会跨会话
+ * 永久记住这个版本。公告更新后版本号变化，两条记忆同时失效，会再弹一次。
+ * 遮罩不可点穿、没有关闭按钮，只有「我知道了」——公告是站点要通知的事，
+ * 不该被顺手点掉。
+ */
+function maybeShowAnnouncement(): void {
+  const announcement = getState().site?.announcement;
+  if (!announcement?.enabled || !announcement.body.trim()) return;
+  // 登录用户的服务端已读优先：换设备、清缓存都不会重复弹
+  if (announcement.read) return;
+  if (announcementAcknowledged(announcement.version)) return;
+  if (announcementShownThisSession(announcement.version)) return;
+
+  const title = announcement.title.trim() || "站点公告";
+  const never = h("input", { type: "checkbox" });
+  const ack = h(
+    "label.announcement-ack",
+    null,
+    never,
+    h("span", { text: "不再提示（公告更新前）" }),
+  );
+  const confirm = h("button.btn.pri", { type: "button", text: "我知道了" });
+  const handle = openAnnouncementModal({
+    title,
+    body: announcement.body,
+    footer: [ack, confirm],
+  });
+  confirm.addEventListener("click", () => {
+    markAnnouncementShown(announcement.version);
+    if (never.checked) acknowledgeAnnouncement(announcement.version);
+    if (getState().user) {
+      // 服务端已读不阻塞关闭：失败也先让用户走，下一次会话本地状态仍能兜底
+      void request(`/announcements/${encodeURIComponent(announcement.version)}/read`, {
+        method: "POST",
+      }).catch(() => undefined);
+    }
+    handle.close();
+  });
+}
 export async function render(ctx: PageContext): Promise<void> {
   const query = readQuery(ctx);
   const user = currentUser();
@@ -387,16 +507,22 @@ export async function render(ctx: PageContext): Promise<void> {
 
   // 搜索/标签结果页不摆 hero：结果应该直接出现在第一屏。
   // 普通广场用 hero 带出品牌气质，并把第一张公开图当作「随机一帧」。
-  const isPlazaHome = !query.q && !query.tag;
+  const isPlazaHome = !query.q && query.tags.length === 0;
   const configuredAuto = Math.max(0, site?.plaza_auto_refresh_seconds ?? 0);
   // 后端已经钳过一次；前端再兜一层，避免旧数据或手工请求把间隔压到 1 秒
   const autoSeconds =
     isPlazaHome && configuredAuto > 0 ? Math.min(3600, Math.max(5, configuredAuto)) : 0;
-  let autoEnabled = autoSeconds > 0;
+  // 自动漫游只对「随机」有意义：其它排序下固定顺序刷新同一批图，没有漫游感
+  const autoVisible = query.sort === "shuffle";
+  // 记住用户上次的选择：默认开启，但关过一次就按关着的状态来
+  let autoUserEnabled = autoSeconds > 0 && (loadPlazaAuto() ?? true);
+  let autoEnabled = autoVisible && autoUserEnabled;
   let autoRemaining = autoSeconds;
   let autoTimer: number | null = null;
   let heroState: PlazaHeroHandle | null = null;
   const musicEnabled = Boolean(site?.music?.enabled);
+  // 列数：先取本机偏好，没有就用管理员配的默认值
+  let columns = loadPlazaColumns(site?.plaza_grid_columns ?? 3);
 
   function paintTileViews(item: ImageItem): void {
     const tile = grid.querySelector<HTMLElement>(`.tile[data-image-id="${item.id}"]`);
@@ -431,10 +557,20 @@ export async function render(ctx: PageContext): Promise<void> {
     void recordView(item);
     openLightbox(items, item);
   }
+
+  /** 预热下一张 hero 图：只取缩略图，弱网下换图不会先空一拍。 */
+  function preloadNextHero(list: ImageItem[]): void {
+    const next = list[1];
+    if (!next || typeof Image === "undefined") return;
+    const image = new Image();
+    image.decoding = "async";
+    image.src = next.has_thumb && next.thumb_url ? next.thumb_url : next.url;
+  }
   if (isPlazaHome) {
     heroState = buildPlazaHero({
       autoSeconds,
       autoEnabled,
+      autoVisible,
       musicEnabled,
       onUpload: () => jumpToUpload(),
       onToggleAuto: () => toggleAuto(),
@@ -485,7 +621,7 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   // 网格只建一次，往下追加节点：重建会把已经排好的瀑布流和滚动位置一起丢掉
-  const grid = h("div.grid.igrid", { style: gridColumnsStyle() });
+  const grid = h("div.grid.igrid", { style: gridColumnsStyle(columns) });
   const footer = h("div", {
     style: {
       display: "flex",
@@ -529,20 +665,143 @@ export async function render(ctx: PageContext): Promise<void> {
   // 搜索只在顶栏那一个输入框里（页面里不再重复），标签筛选也交给它——
   // 后端的关键词匹配本来就同时命中标题与标签
   const tagRow = h("div.flexline.plaza-toolbar");
-  root.append(tagRow, grid, footer);
+  // 已存在的公开标签：给搜索与筛选一个看得见的参考，不再让人凭记忆猜标签
+  const tagsRow = h("div.plaza-tags");
+  root.append(tagRow, tagsRow, grid, footer);
 
   // 排序下拉。默认「随机」；「最热」按浏览量，后端有 views 统计，所以保留。
   // 换排序时换一个种子：不然「随机」切回来还是同一份顺序，看着像没生效
-  const sortControl = sortSelect(query.sort, (value) => {
-    update({ sort: value, seed: value === "shuffle" ? String(newShuffleSeed()) : null });
-  }, [{ value: "hot", label: "最热（按浏览量）" }]);
+  const sortControl = sortSelect(query.sort, (value) => applySort(value), [
+    { value: "hot", label: "最热（按浏览量）" },
+  ]);
   sortControl.classList.add("f");
   sortControl.style.maxWidth = "190px";
   const reshuffle = h("button.btn.sm.gho", { type: "button", text: "换一批" });
   reshuffle.addEventListener("click", () => {
-    update({ sort: "shuffle", seed: String(newShuffleSeed()) });
+    reshuffleNow();
   });
-  tagRow.append(h("span.spacer"), reshuffle, sortControl);
+  // 列数：用户临时想看得更大/更密时不必去后台改设置
+  const columnControl = select(
+    [2, 3, 4, 5, 6].map((value) => ({ value: String(value), label: `${value} 列` })),
+    String(columns),
+  );
+  columnControl.classList.add("f");
+  columnControl.style.maxWidth = "104px";
+  columnControl.setAttribute("aria-label", "广场每行显示几列");
+  columnControl.title = "广场每行显示几列";
+  columnControl.addEventListener("change", () => {
+    columns = Math.min(6, Math.max(2, Number(columnControl.value) || 3));
+    grid.style.setProperty("--plaza-cols", String(columns));
+    savePlazaColumns(columns);
+    applyMasonry(grid);
+  });
+  tagRow.append(
+    h("span.spacer"),
+    h("span.plaza-toolbar-label", { text: "列数" }),
+    columnControl,
+    reshuffle,
+    sortControl,
+  );
+
+  let plazaTags: TagRow[] = [];
+  let tagQuery = "";
+  const tagsChips = h("div.plaza-tags-chips");
+  const tagSearch = h("input.plaza-tag-search", {
+    type: "search",
+    placeholder: "筛选标签…",
+    "aria-label": "筛选标签",
+  });
+  tagsRow.append(tagsChips, tagSearch);
+  tagsRow.hidden = true;
+  tagSearch.addEventListener("input", () => {
+    tagQuery = tagSearch.value.trim();
+    renderTags();
+  });
+
+  function renderTags(): void {
+    // URL 里带来的标签可能不在前 40 个热门标签里，也要摆出来，否则用户
+    // 看不到自己当前筛了什么，只能靠地址栏猜
+    const merged = [...plazaTags];
+    for (const name of query.tags) {
+      if (!merged.some((tag) => tag.name === name)) merged.push({ name, usage: 0 });
+    }
+    const needle = tagQuery.toLowerCase();
+    const filtered = needle
+      ? merged.filter((tag) => tag.name.toLowerCase().includes(needle))
+      : merged;
+    tagsRow.hidden = merged.length === 0;
+    tagSearch.hidden = merged.length === 0;
+
+    const chips: Node[] = [
+      h("span.plaza-tags-label", { text: "广场标签" }),
+      h("button.chip", {
+        type: "button",
+        class: query.tags.length === 0 ? "on" : "",
+        text: "全部",
+        title: "清除标签筛选",
+        on: { click: () => update({ tags: [] }) },
+      }),
+    ];
+    for (const tag of filtered) {
+      const active = query.tags.includes(tag.name);
+      const chip = h("button.chip", {
+        type: "button",
+        class: active ? "on" : "",
+        text: tag.usage > 0 ? `${tag.name} ${tag.usage}` : tag.name,
+        "aria-pressed": String(active),
+        title: active ? `取消标签「${tag.name}」` : `加上标签「${tag.name}」（可多选）`,
+      });
+      chip.addEventListener("click", () => {
+        const next = active
+          ? query.tags.filter((item) => item !== tag.name)
+          : [...query.tags, tag.name];
+        update({ tags: next });
+      });
+      chips.push(chip);
+    }
+    if (filtered.length === 0) {
+      chips.push(h("span.plaza-tags-empty", { text: "没有匹配的标签" }));
+    }
+    if (query.tags.length >= 2) {
+      const modeChip = (mode: "any" | "all", text: string, title: string) =>
+        h("button.chip", {
+          type: "button",
+          class: query.tagMode === mode ? "on" : "",
+          text,
+          title,
+          "aria-pressed": String(query.tagMode === mode),
+          on: { click: () => update({ tagMode: mode }) },
+        });
+      chips.push(
+        h("span.plaza-tags-mode-label", { text: "匹配" }),
+        modeChip("any", "任一", "图片带有其中任意一个标签"),
+        modeChip("all", "同时", "图片必须同时带有所有已选标签"),
+      );
+    }
+    if (query.tags.length > 0) {
+      chips.push(
+        h("span.plaza-tags-hint", {
+          text: `已选 ${query.tags.length} 个 · ${query.tagMode === "all" ? "全部命中" : "命中任一"}`,
+        }),
+      );
+    }
+    tagsChips.replaceChildren(...chips);
+  }
+
+  async function loadPlazaTags(): Promise<void> {
+    try {
+      plazaTags = await request<TagRow[]>("/tags", {
+        query: { scope: "plaza", limit: 40 },
+      });
+      if (!tagsRow.isConnected) return;
+      renderTags();
+    } catch {
+      // 标签云只是参考信息，拉不到就不摆，不影响主列表
+      tagsRow.hidden = true;
+    }
+  }
+
+  void loadPlazaTags();
 
   // 顶栏搜索框显示当前关键词（从别处带着 ?q= 进来时也对得上）
   const headerSearch = document.querySelector<HTMLInputElement>(".navbar .search input");
@@ -605,7 +864,8 @@ export async function render(ctx: PageContext): Promise<void> {
       const page = await requestPage<ImageItem>("/plaza", {
         query: {
           q: query.q ?? undefined,
-          tag: query.tag ?? undefined,
+          tags: query.tags.length > 0 ? query.tags.join(",") : undefined,
+          tag_mode: query.tags.length > 0 ? query.tagMode : undefined,
           sort: query.sort,
           seed: query.seed,
           page: currentPage + 1,
@@ -643,6 +903,7 @@ export async function render(ctx: PageContext): Promise<void> {
           );
         }
         items.push(...page.items);
+        if (currentPage === 1) preloadNextHero(items);
         // 新加的这段算跨行数；已有节点的跨行数不会因为追加而改变
         applyMasonry(grid);
       }
@@ -707,11 +968,28 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   function toggleAuto(): void {
-    if (autoSeconds <= 0) return;
-    autoEnabled = !autoEnabled;
+    if (autoSeconds <= 0 || !autoVisible) return;
+    autoUserEnabled = !autoEnabled;
+    autoEnabled = autoUserEnabled;
+    savePlazaAuto(autoUserEnabled);
     heroState?.setAutoState(autoEnabled);
     if (autoEnabled) startAutoTimer();
     else stopAutoTimer();
+  }
+
+  /** 排序变化后同步自动漫游的显示与定时器：非随机排序时整块收起。 */
+  function syncAutoToSort(): void {
+    const visible = autoSeconds > 0 && query.sort === "shuffle";
+    heroState?.setAutoVisible(visible);
+    if (visible) {
+      autoEnabled = autoUserEnabled;
+      heroState?.setAutoState(autoEnabled);
+      if (autoEnabled) startAutoTimer();
+      else stopAutoTimer();
+    } else {
+      autoEnabled = false;
+      stopAutoTimer();
+    }
   }
 
   /**
@@ -727,7 +1005,8 @@ export async function render(ctx: PageContext): Promise<void> {
       const page = await requestPage<ImageItem>("/plaza", {
         query: {
           q: query.q ?? undefined,
-          tag: query.tag ?? undefined,
+          tags: query.tags.length > 0 ? query.tags.join(",") : undefined,
+          tag_mode: query.tags.length > 0 ? query.tagMode : undefined,
           sort: query.sort,
           seed: query.seed,
           page: 1,
@@ -738,6 +1017,7 @@ export async function render(ctx: PageContext): Promise<void> {
       totalPages = Math.max(1, page.meta.total_pages);
       items.length = 0;
       items.push(...page.items);
+      preloadNextHero(items);
       heroState?.setTotal(page.meta.total);
       heroState?.setFeatured(page.items[0] ?? null);
 
@@ -783,27 +1063,58 @@ export async function render(ctx: PageContext): Promise<void> {
     observer.observe(sentinel);
   }
 
-  function update(
-    patch: Partial<Record<"q" | "tag" | "sort" | "seed", string | null>>,
-  ): void {
-    const next: Record<string, string | null> = {
-      q: query.q,
-      tag: query.tag,
-      sort: query.sort,
-      seed: String(query.seed),
-      ...patch,
-    };
+  /** 广场自己的查询串：默认值（shuffle、空标签）不进 URL，链接才干净。 */
+  function plazaUrl(): string {
     const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(next)) {
-      if (value === null || value === "") continue;
-      // 默认值不进 URL，链接才干净
-      if (key === "sort" && value === "shuffle") continue;
-      params.set(key, String(value));
-    }
+    if (query.q) params.set("q", query.q);
+    if (query.tags.length > 0) params.set("tags", query.tags.join(","));
+    if (query.tags.length > 0 && query.tagMode === "all") params.set("tag_mode", "all");
+    if (query.sort !== "shuffle") params.set("sort", query.sort);
+    if (query.sort === "shuffle") params.set("seed", String(query.seed));
     const encoded = params.toString();
-    navigate(encoded ? `/?${encoded}` : "/");
+    return encoded ? `/?${encoded}` : "/";
+  }
+
+  /**
+   * 排序是就地切换，不重新渲染整页。
+   *
+   * 重新渲染会把 hero 拆掉重来，自动漫游按钮的收起/展开动效根本看不见；
+   * 也让每次换排序都闪一次骨架屏。这里只换列表数据，地址栏用 replaceState
+   * 同步，搜索与标签条件原样保留。
+   */
+  function applySort(value: string): void {
+    if (value === query.sort) return;
+    query.sort = value;
+    if (value === "shuffle") query.seed = newShuffleSeed();
+    window.history.replaceState(null, "", `#${plazaUrl()}`);
+    syncAutoToSort();
+    void loadMore(true);
+  }
+
+  /** 「换一批」：无论当前排序是什么都回到随机并换一局，和按钮文案一致。 */
+  function reshuffleNow(): void {
+    const wasShuffle = query.sort === "shuffle";
+    query.sort = "shuffle";
+    query.seed = newShuffleSeed();
+    if (sortControl.value !== "shuffle") sortControl.value = "shuffle";
+    window.history.replaceState(null, "", `#${plazaUrl()}`);
+    if (!wasShuffle) syncAutoToSort();
+    void loadMore(true);
+  }
+
+  function update(patch: {
+    q?: string | null;
+    tags?: string[] | null;
+    tagMode?: "any" | "all";
+  }): void {
+    if (patch.q !== undefined) query.q = patch.q;
+    if (patch.tags !== undefined) query.tags = patch.tags ?? [];
+    if (patch.tagMode !== undefined) query.tagMode = patch.tagMode;
+    navigate(plazaUrl());
   }
 
   await loadMore(true);
   startAutoTimer();
+  // 等首屏与 hero 先出来，再把公告盖上来；不挡第一眼的加载过程
+  if (isPlazaHome) window.setTimeout(maybeShowAnnouncement, 350);
 }

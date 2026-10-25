@@ -381,6 +381,9 @@ pub struct Session {
     pub user_id: i64,
     pub token_hash: String,
     pub device: Option<String>,
+    /// 用户自己起的备注（「书房的笔记本」这类）。设备名来自 User-Agent，
+    /// 用户只能通过它认出设备；备注才是可改的那一栏。
+    pub label: Option<String>,
     pub ip: Option<String>,
     pub user_agent: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -411,7 +414,7 @@ impl SessionPolicy {
 
 impl Session {
     pub const COLUMNS: &'static str =
-        "id, user_id, token_hash, device, ip, user_agent, created_at, \
+        "id, user_id, token_hash, device, label, ip, user_agent, created_at, \
          last_seen_at, expires_at, revoked_at";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
@@ -420,6 +423,7 @@ impl Session {
             user_id: get_i64(row, "user_id")?,
             token_hash: get_str(row, "token_hash")?,
             device: get_opt_str(row, "device")?,
+            label: get_opt_str(row, "label")?,
             ip: get_opt_str(row, "ip")?,
             user_agent: get_opt_str(row, "user_agent")?,
             created_at: get_ts(row, "created_at")?,
@@ -463,6 +467,92 @@ impl Session {
     /// 可用 = 没被吊销 且 没过期。列表与鉴权共用这一个判断。
     pub fn is_usable(&self, policy: SessionPolicy, now: DateTime<Utc>) -> bool {
         self.is_live() && !self.is_expired(policy, now)
+    }
+
+    /// 会话状态：活跃 / 仍可恢复（「记住我」长期未活动）/ 已过期 / 已吊销。
+    ///
+    /// 「活跃」只看有没有在闲置窗口内动过：记住我签发的会话可能十天没打开，
+    /// 它仍然可用，但不该出现在「当前活动会话」里——那是登录历史。
+    pub fn state(&self, policy: SessionPolicy, now: DateTime<Utc>, current: bool) -> &'static str {
+        if self.revoked_at.is_some() {
+            return "revoked";
+        }
+        if self.is_expired(policy, now) {
+            return "expired";
+        }
+        if current {
+            return "active";
+        }
+        if policy.idle_minutes > 0
+            && now - self.last_seen_at > chrono::Duration::minutes(policy.idle_minutes)
+        {
+            return "saved";
+        }
+        "active"
+    }
+}
+
+/// 管理端会话记录：会话本身 + 归属账号。
+#[derive(Debug, Clone)]
+pub struct SessionRecord {
+    pub id: i64,
+    pub user_id: i64,
+    pub uid: String,
+    pub email: String,
+    pub device: Option<String>,
+    pub label: Option<String>,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+impl SessionRecord {
+    pub const COLUMNS: &'static str =
+        "s.id, s.user_id, u.uid, u.email, s.device, s.label, s.ip, s.user_agent, \
+         s.created_at, s.last_seen_at, s.expires_at, s.revoked_at";
+
+    pub fn from_row(row: &AnyRow) -> Result<Self> {
+        Ok(Self {
+            id: get_i64(row, "id")?,
+            user_id: get_i64(row, "user_id")?,
+            uid: get_str(row, "uid")?,
+            email: get_str(row, "email")?,
+            device: get_opt_str(row, "device")?,
+            label: get_opt_str(row, "label")?,
+            ip: get_opt_str(row, "ip")?,
+            user_agent: get_opt_str(row, "user_agent")?,
+            created_at: get_ts(row, "created_at")?,
+            last_seen_at: get_ts(row, "last_seen_at")?,
+            expires_at: get_opt_ts(row, "expires_at")?,
+            revoked_at: get_opt_ts(row, "revoked_at")?,
+        })
+    }
+
+    pub fn state(&self, policy: SessionPolicy, now: DateTime<Utc>) -> &'static str {
+        if self.revoked_at.is_some() {
+            return "revoked";
+        }
+        if self
+            .expires_at
+            .map(|at| at <= now)
+            .unwrap_or_else(|| {
+                (policy.idle_minutes > 0
+                    && now - self.last_seen_at > chrono::Duration::minutes(policy.idle_minutes))
+                    || (policy.absolute_days > 0
+                        && now - self.created_at > chrono::Duration::days(policy.absolute_days))
+            })
+        {
+            return "expired";
+        }
+        if policy.idle_minutes > 0
+            && now - self.last_seen_at > chrono::Duration::minutes(policy.idle_minutes)
+        {
+            return "saved";
+        }
+        "active"
     }
 }
 
@@ -1304,6 +1394,43 @@ pub struct AdminStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_state_separates_active_from_long_lived_cookie_records() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 25, 12, 0, 0).unwrap();
+        let policy = SessionPolicy {
+            idle_minutes: 120,
+            absolute_days: 30,
+        };
+        let base = Session {
+            id: 1,
+            user_id: 1,
+            token_hash: "hash".into(),
+            device: Some("Edge · Windows".into()),
+            label: None,
+            ip: None,
+            user_agent: None,
+            created_at: now - chrono::Duration::days(2),
+            last_seen_at: now - chrono::Duration::minutes(5),
+            expires_at: Some(now + chrono::Duration::days(28)),
+            revoked_at: None,
+        };
+        assert_eq!(base.state(policy, now, true), "active");
+
+        // 「保持登录」但六天没动：仍然可用，但不算当前活动会话
+        let mut saved = base.clone();
+        saved.last_seen_at = now - chrono::Duration::days(6);
+        assert_eq!(saved.state(policy, now, false), "saved");
+        assert!(!saved.is_expired(policy, now), "记住我的会话按 expires_at 到期");
+
+        let mut revoked = base.clone();
+        revoked.revoked_at = Some(now);
+        assert_eq!(revoked.state(policy, now, false), "revoked");
+
+        let mut expired = base.clone();
+        expired.expires_at = Some(now - chrono::Duration::minutes(1));
+        assert_eq!(expired.state(policy, now, false), "expired");
+    }
 
     #[test]
     fn timestamp_roundtrip_is_lexicographically_ordered() {

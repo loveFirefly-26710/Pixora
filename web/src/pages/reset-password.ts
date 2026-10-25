@@ -16,7 +16,7 @@ import { navigate, type PageContext } from "../core/router";
 import { getState } from "../core/state";
 import { toastError } from "../core/toast";
 import { brandLockup } from "../ui/brand";
-import { field, qtip, textInput } from "../ui/widgets";
+import { field, passwordControl, qtip, textInput } from "../ui/widgets";
 
 export async function render(ctx: PageContext): Promise<void> {
   const token = (ctx.query.get("token") ?? "").trim();
@@ -27,8 +27,8 @@ export async function render(ctx: PageContext): Promise<void> {
 
   const emailInput = textInput({ placeholder: "chenyu@example.com", type: "email" });
   const codeInput = textInput({ placeholder: "6 位数字", name: "code" });
-  const passwordInput = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
-  const confirmInput = textInput({ type: "password", placeholder: "再输入一次" });
+  const passwordInput = passwordControl({ placeholder: "至少 10 位，含大小写与数字" });
+  const confirmInput = passwordControl({ placeholder: "再输入一次" });
 
   const sendButton = h("button.btn", {
     type: "button",
@@ -117,8 +117,8 @@ export async function render(ctx: PageContext): Promise<void> {
     infoBox,
     field("邮箱", emailInput),
     field("邮箱验证码", h("div.row", null, codeInput, sendButton), "10 分钟内有效。"),
-    field("新密码", passwordInput, "至少 10 位，需同时包含大写字母、小写字母和数字。"),
-    field("确认新密码", confirmInput),
+    field("新密码", passwordInput.node, "至少 10 位，需同时包含大写字母、小写字母和数字。"),
+    field("确认新密码", confirmInput.node),
     submit,
     qtip(
       "warn",
@@ -136,7 +136,7 @@ export async function render(ctx: PageContext): Promise<void> {
     event.preventDefault();
     errorBox.style.display = "none";
 
-    if (passwordInput.value !== confirmInput.value) {
+    if (passwordInput.input.value !== confirmInput.input.value) {
       showError("两次输入的密码不一致");
       return;
     }
@@ -148,7 +148,7 @@ export async function render(ctx: PageContext): Promise<void> {
         json: {
           email: emailInput.value.trim(),
           code: codeInput.value.trim(),
-          password: passwordInput.value,
+          password: passwordInput.input.value,
         },
       });
       showInfo("密码已重置，所有设备已下线。正在跳转登录…");
@@ -226,8 +226,8 @@ async function renderFromLink(ctx: PageContext, token: string): Promise<void> {
     return;
   }
 
-  const passwordInput = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
-  const confirmInput = textInput({ type: "password", placeholder: "再输入一次" });
+  const passwordInput = passwordControl({ placeholder: "至少 10 位，含大小写与数字" });
+  const confirmInput = passwordControl({ placeholder: "再输入一次" });
   const errorBox = h("div", { style: { display: "none", marginBottom: "12px" } });
   const submit = h("button.btn.pri.blk", { type: "submit", text: "保存新密码" });
 
@@ -237,8 +237,8 @@ async function renderFromLink(ctx: PageContext, token: string): Promise<void> {
     errorBox,
     qtip("info", "链接已验证", `正在为 ${account} 设置新密码。设完会用新密码登录。`),
     h("div", { style: { marginTop: "12px" } }),
-    field("新密码", passwordInput, "至少 10 位，需同时包含大写字母、小写字母和数字。"),
-    field("确认新密码", confirmInput),
+    field("新密码", passwordInput.node, "至少 10 位，需同时包含大写字母、小写字母和数字。"),
+    field("确认新密码", confirmInput.node),
     submit,
     qtip(
       "warn",
@@ -251,7 +251,7 @@ async function renderFromLink(ctx: PageContext, token: string): Promise<void> {
     event.preventDefault();
     errorBox.style.display = "none";
 
-    if (passwordInput.value !== confirmInput.value) {
+    if (passwordInput.input.value !== confirmInput.input.value) {
       errorBox.replaceChildren(qtip("err", null, "两次输入的密码不一致"));
       errorBox.style.display = "";
       return;
@@ -262,7 +262,7 @@ async function renderFromLink(ctx: PageContext, token: string): Promise<void> {
     try {
       await request("/auth/password/link/reset", {
         method: "POST",
-        json: { token, password: passwordInput.value },
+        json: { token, password: passwordInput.input.value },
       });
       errorBox.replaceChildren(qtip("ok", null, "密码已重置，所有设备已下线。正在跳转登录…"));
       errorBox.style.display = "";
@@ -276,5 +276,5 @@ async function renderFromLink(ctx: PageContext, token: string): Promise<void> {
   });
 
   root.append(header, form);
-  passwordInput.focus();
+  passwordInput.input.focus();
 }

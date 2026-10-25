@@ -50,6 +50,7 @@ const ADMIN_NAV: NavItem[] = [
   { path: "/admin/quota", label: "配额与容量", icon: "📊", match: ["/admin/quota"] },
   { path: "/admin/ip", label: "IP 黑名单", icon: "🛡", match: ["/admin/ip"] },
   { path: "/admin/logs", label: "系统日志", icon: "📋", match: ["/admin/logs"] },
+  { path: "/admin/sessions", label: "会话记录", icon: "🔐", match: ["/admin/sessions"] },
   { path: "/admin/settings", label: "系统设置", icon: "⚙", match: ["/admin/settings"] },
   { path: "/admin/terms", label: "服务条款", icon: "📄", match: ["/admin/terms"] },
 ];

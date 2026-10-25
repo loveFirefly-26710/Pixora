@@ -34,6 +34,11 @@ use crate::AppState;
 /// OAuth 的 `state` 与「补邮箱」令牌的有效期。十几分钟够走完一次授权，
 /// 再长就只是把一张可以换账号的纸留在浏览器历史里。
 const STATE_TTL_MINUTES: i64 = 15;
+/// 单次 OAuth HTTP 请求（换令牌、读账号）的超时。
+///
+/// 服务器所在网络到 Google / GitHub 的链路可能不稳：设一个明确的上限，
+/// 超时就带错误跳回登录页，而不是让浏览器对着 Cloudflare 等出 524。
+const OAUTH_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// 短信验证码有效期与重发间隔。
 const PHONE_CODE_TTL_MINUTES: i64 = 10;
 const PHONE_CODE_COOLDOWN_SECONDS: i64 = 60;
@@ -71,6 +76,10 @@ pub struct TokenBundle {
     /// 微信与 QQ 的身份标识：两家都把它跟在授权结果里，取用户信息时要带上
     pub openid: Option<String>,
     pub union_id: Option<String>,
+    /// Google 的 ID Token。令牌端点是拿着 client_secret 直接回给我们的，
+    /// 里面的声明可以信任；用它读账号信息可以少一次对 userinfo 的请求，
+    /// 在服务器到 Google 的链路不稳时少一处会超时的地方。
+    pub id_token: Option<String>,
 }
 
 /// 提供方返回的账号信息。
@@ -118,6 +127,24 @@ pub struct OAuthClient {
     pub provider: String,
     pub client_id: String,
     pub client_secret: String,
+}
+
+/// 单个 OAuth 端点的出网探测结果。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OAuthEndpointHealth {
+    pub ok: bool,
+    /// 能收到 HTTP 响应就算通；这里只记录状态码，不把响应体带回给管理员
+    pub status: Option<u16>,
+    pub error: Option<String>,
+}
+
+/// OAuth 出网自检结果。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OAuthHealth {
+    /// 是否显式配置了 `PIXORA_HTTP_PROXY`
+    pub proxy_configured: bool,
+    pub google: OAuthEndpointHealth,
+    pub github: OAuthEndpointHealth,
 }
 
 impl AppState {
@@ -276,6 +303,44 @@ impl AppState {
     // 授权码 → 用户信息
     // ============================================================
 
+    /// OAuth 出网自检：只探测固定端点，不接受管理员传 URL，避免变成 SSRF 探针。
+    pub async fn oauth_health(&self) -> OAuthHealth {
+        let proxy_configured = std::env::var("PIXORA_HTTP_PROXY")
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        let (google, github) = tokio::join!(
+            self.probe_oauth_endpoint("https://oauth2.googleapis.com/token"),
+            self.probe_oauth_endpoint("https://github.com/login/oauth/access_token"),
+        );
+        OAuthHealth {
+            proxy_configured,
+            google,
+            github,
+        }
+    }
+
+    async fn probe_oauth_endpoint(&self, url: &str) -> OAuthEndpointHealth {
+        match self
+            .http
+            .get(url)
+            .timeout(std::time::Duration::from_secs(8))
+            .send()
+            .await
+        {
+            Ok(response) => OAuthEndpointHealth {
+                ok: true,
+                status: Some(response.status().as_u16()),
+                error: None,
+            },
+            Err(err) => OAuthEndpointHealth {
+                ok: false,
+                status: None,
+                error: Some(err.to_string()),
+            },
+        }
+    }
+
     /// 用授权码换 access_token（QQ/微信顺带换出 openid）。
     pub async fn oauth_token_bundle(
         &self,
@@ -306,6 +371,7 @@ impl AppState {
                     token: require_token(&json, "GitHub")?,
                     openid: None,
                     union_id: None,
+                    id_token: None,
                 })
             }
             provider::GOOGLE => {
@@ -330,6 +396,10 @@ impl AppState {
                     token: require_token(&json, "Google")?,
                     openid: None,
                     union_id: None,
+                    id_token: json
+                        .get("id_token")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
                 })
             }
             provider::QQ => {
@@ -364,6 +434,7 @@ impl AppState {
                     token,
                     openid: Some(openid),
                     union_id: None,
+                    id_token: None,
                 })
             }
             provider::WECHAT => {
@@ -394,6 +465,7 @@ impl AppState {
                         .get("unionid")
                         .and_then(|value| value.as_str())
                         .map(str::to_string),
+                    id_token: None,
                 })
             }
             other => Err(AppError::bad_request(format!("不支持的登录方式：{other}"))),
@@ -474,10 +546,20 @@ impl AppState {
                 Ok(profile)
             }
             provider::GOOGLE => {
+                // 优先用令牌端点一起返回的 id_token：一次请求就够，
+                // 少一次对 openidconnect.googleapis.com 的往返。
+                if let Some(profile) = bundle
+                    .id_token
+                    .as_deref()
+                    .and_then(|token| google_profile_from_id_token(&client.client_id, token))
+                {
+                    return Ok(profile);
+                }
                 let info: serde_json::Value = self
                     .http
                     .get("https://openidconnect.googleapis.com/v1/userinfo")
                     .bearer_auth(&bundle.token)
+                    .timeout(OAUTH_HTTP_TIMEOUT)
                     .send()
                     .await
                     .map_err(|err| AppError::internal(format!("读取 Google 账号失败：{err}")))?
@@ -1326,9 +1408,78 @@ impl SmsClient {
     }
 }
 
+/// 从 Google 的 ID Token 里读账号信息。
+///
+/// 令牌是 Google 的令牌端点直接在 TLS 连接里、用我们的 client_secret 换回来的，
+/// 所以不再验签；只核对 `aud` 是本应用，避免拿别的客户端的令牌混进来。
+/// 解不出来或字段不全时返回 `None`，调用方回落到 userinfo 接口。
+fn google_profile_from_id_token(client_id: &str, id_token: &str) -> Option<IdentityProfile> {
+    let payload = id_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let info: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if let Some(aud) = info.get("aud").and_then(|value| value.as_str()) {
+        if !aud.is_empty() && aud != client_id {
+            return None;
+        }
+    }
+    let subject = info.get("sub")?.as_str()?.to_string();
+    let email = info
+        .get("email")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let verified = match info.get("email_verified") {
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(serde_json::Value::String(value)) => value.eq_ignore_ascii_case("true"),
+        _ => false,
+    };
+    Some(IdentityProfile {
+        subject,
+        display: info
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        email_verified: verified && email.is_some(),
+        email,
+        avatar: info
+            .get("picture")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        union_id: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn google_id_token_avoids_the_userinfo_request() {
+        let payload = serde_json::json!({
+            "aud": "client-1",
+            "sub": "google-subject",
+            "name": "萤火",
+            "email": "firefly@example.com",
+            "email_verified": true,
+            "picture": "https://example.com/avatar.png"
+        });
+        let token = format!(
+            "header.{}.signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+        );
+        let profile = google_profile_from_id_token("client-1", &token).expect("能读出账号信息");
+        assert_eq!(profile.subject, "google-subject");
+        assert_eq!(profile.display.as_deref(), Some("萤火"));
+        assert_eq!(profile.email.as_deref(), Some("firefly@example.com"));
+        assert!(profile.email_verified);
+        assert_eq!(
+            profile.avatar.as_deref(),
+            Some("https://example.com/avatar.png")
+        );
+        // 别的客户端的令牌不能拿来当我们的账号
+        assert!(google_profile_from_id_token("client-2", &token).is_none());
+    }
 
     #[test]
     fn next_keeps_site_relative_paths() {

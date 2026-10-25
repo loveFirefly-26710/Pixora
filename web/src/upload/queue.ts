@@ -960,7 +960,12 @@ class UploadQueue {
 
   private pump(): void {
     void this.pumpHash();
-    void this.pumpPreflight();
+    // 预检要等用户点「开始上传」之后再发。
+    //
+    // 预检会告诉服务端「这些哈希已经有了」，界面随即把命中的项标成「已完成」。
+    // 如果选完文件就预检，用户还没上传就能从徽标推断出图库里有什么。
+    // 算哈希、做缩略图都在本机，不泄露任何信息，可以提前跑；只有这一步要等。
+    if (this.running) void this.pumpPreflight();
     void this.pumpThumbs();
     this.pumpUpload();
   }
@@ -1064,8 +1069,14 @@ class UploadQueue {
 
   private async pumpThumbs(): Promise<void> {
     if (this.thumbBusy) return;
+    // 缩略图只在本机生成，选完文件就可以做：等开始上传时才做会让首张图
+    // 多等一轮编码。预检还没跑的项也一并处理，服务端判重不影响这份本地工作。
     const next = this.items.find(
-      (item) => item.status === "ready" && item.checked && !item.thumbTried && item.file,
+      (item) =>
+        item.status === "ready" &&
+        (item.checked || !this.running) &&
+        !item.thumbTried &&
+        item.file,
     );
     if (!next || !next.file) return;
     this.thumbBusy = true;

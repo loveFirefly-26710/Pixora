@@ -17,6 +17,11 @@ const SETTINGS_KEY = "upload";
 /** localStorage 里的镜像键：IndexedDB 是异步的，首屏要立刻拿到并发数，就用一份同步镜像兜底。 */
 const LS_SETTINGS_KEY = "pixora.upload.settings";
 const LS_VIEW_KEY = "pixora.albums.view";
+const LS_PLAZA_COLUMNS = "pixora.plaza.columns";
+const LS_PLAZA_AUTO = "pixora.plaza.auto";
+const LS_ANNOUNCEMENT_ACK = "pixora.announcement.acked";
+/** 本次浏览器会话里已经弹过的公告版本；存 sessionStorage，关标签页即清。 */
+const SS_ANNOUNCEMENT_SHOWN = "pixora.announcement.shown";
 
 export interface StoredUploadSettings {
   albumId: number | null;
@@ -148,5 +153,87 @@ export function saveViewPreference(view: "grid" | "list"): void {
     localStorage.setItem(LS_VIEW_KEY, view);
   } catch {
     /* 同上，偏好丢了大不了回到默认值 */
+  }
+}
+
+// ---------- 广场列数 ----------
+
+/** 广场列数偏好。没设过时用管理员配置的默认值。 */
+export function loadPlazaColumns(fallback: number): number {
+  try {
+    const raw = Number(localStorage.getItem(LS_PLAZA_COLUMNS));
+    if (Number.isInteger(raw) && raw >= 2 && raw <= 6) return raw;
+  } catch {
+    /* 隐私模式下读不到就用默认值 */
+  }
+  return Math.min(6, Math.max(2, Math.round(fallback) || 3));
+}
+
+export function savePlazaColumns(columns: number): void {
+  try {
+    localStorage.setItem(LS_PLAZA_COLUMNS, String(columns));
+  } catch {
+    /* 偏好丢了大不了下一刷新回到后台默认值 */
+  }
+}
+
+/** 自动漫游开关偏好；null 表示用户还没选过。 */
+export function loadPlazaAuto(): boolean | null {
+  try {
+    const raw = localStorage.getItem(LS_PLAZA_AUTO);
+    if (raw === "0") return false;
+    if (raw === "1") return true;
+  } catch {
+    /* 读不到就按默认开启 */
+  }
+  return null;
+}
+
+export function savePlazaAuto(enabled: boolean): void {
+  try {
+    localStorage.setItem(LS_PLAZA_AUTO, enabled ? "1" : "0");
+  } catch {
+    /* 偏好丢了大不了下次回到默认开启 */
+  }
+}
+
+// ---------- 首页公告 ----------
+
+/** 用户确认过的公告版本。内容变了版本就变，会重新弹一次。 */
+export function announcementAcknowledged(version: string): boolean {
+  try {
+    return localStorage.getItem(LS_ANNOUNCEMENT_ACK) === version;
+  } catch {
+    return false;
+  }
+}
+
+export function acknowledgeAnnouncement(version: string): void {
+  try {
+    localStorage.setItem(LS_ANNOUNCEMENT_ACK, version);
+  } catch {
+    /* 存不进去也不影响看公告，只是下次还会弹 */
+  }
+}
+
+/**
+ * 本次会话是否已经弹过这个版本的公告。
+ *
+ * 用户会话期间只在第一次进首页时弹；关掉标签页（或换新会话）后，
+ * 同一个版本会再提示一次，除非上次勾了「不再提示」。
+ */
+export function announcementShownThisSession(version: string): boolean {
+  try {
+    return sessionStorage.getItem(SS_ANNOUNCEMENT_SHOWN) === version;
+  } catch {
+    return false;
+  }
+}
+
+export function markAnnouncementShown(version: string): void {
+  try {
+    sessionStorage.setItem(SS_ANNOUNCEMENT_SHOWN, version);
+  } catch {
+    /* sessionStorage 被禁用时退化为每次进入都提示，不影响阅读 */
   }
 }
