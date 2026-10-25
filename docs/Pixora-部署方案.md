@@ -1,6 +1,6 @@
 # Pixora 部署方案
 
-当前版本 0.1.7。本文按部署方式分三条主线：纯 Docker、Linux 单二进制、Windows 单二进制。前端嵌在后端二进制里，前后端同源。每条线都从准备工作写到验收，命令可以直接复制。
+当前版本 0.1.8。本文按部署方式分三条主线：纯 Docker、Linux 单二进制、Windows 单二进制。前端嵌在后端二进制里，前后端同源。每条线都从准备工作写到验收，命令可以直接复制。
 
 第一次部署建议先走 Docker + SQLite（§4.2），跑通后再换数据库。遇到报错先看 §10 的对照表。
 
@@ -96,7 +96,8 @@ openssl rand -hex 32
 
 ```dotenv
 PIXORA_BASE_URL=https://img.example.com
-# 服务器访问 Google/GitHub 需要代理时再填，例如 http://10.0.0.2:7890
+# 服务器访问 Google/GitHub 需要代理时：Linux 设 HTTPS_PROXY/ALL_PROXY，
+# 或用下面的 PIXORA_HTTP_PROXY 覆盖；Windows 会自动读取系统代理。
 # PIXORA_HTTP_PROXY=http://10.0.0.2:7890
 ```
 
@@ -903,7 +904,8 @@ PIXORA_DATA_DIR=/srv/pixora/data
 PIXORA_DB_DRIVER=sqlite
 PIXORA_DB_DSN=/srv/pixora/data/pixora.db
 PIXORA_BASE_URL=https://img.example.com
-# 服务器访问 Google/GitHub 需要代理时再填，例如 http://10.0.0.2:7890
+# 服务器访问 Google/GitHub 需要代理时：Linux 设 HTTPS_PROXY/ALL_PROXY，
+# 或用下面的 PIXORA_HTTP_PROXY 覆盖；Windows 会自动读取系统代理。
 # PIXORA_HTTP_PROXY=http://10.0.0.2:7890
 PIXORA_MASTER_KEY=<主密钥>
 # 前面有 Nginx/Caddy 时填 1；直接暴露到公网填 0

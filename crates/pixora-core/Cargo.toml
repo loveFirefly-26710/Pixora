@@ -31,6 +31,11 @@ hex.workspace = true
 hmac.workspace = true
 sha1.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# 读取 Windows「Internet 选项」里的用户级系统代理。reqwest 只认环境变量，
+# 不读这里；不补这一步，「本机开了代理」对服务进程等于没开。
+windows-registry = "0.6"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile.workspace = true

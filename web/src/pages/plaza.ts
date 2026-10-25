@@ -999,6 +999,9 @@ export async function render(ctx: PageContext): Promise<void> {
   async function quietRefresh(): Promise<void> {
     if (loading) return;
     loading = true;
+    // 自动刷新发生在用户正在看图的时候：换一批不能把人送回页面顶部。
+    // 先把当前滚动位置记下来，替换完再兜底恢复一次。
+    const scrollY = window.scrollY;
     try {
       // 随机排序换一个种子，非随机排序保持当前口径
       if (query.sort === "shuffle") query.seed = newShuffleSeed();
@@ -1021,14 +1024,17 @@ export async function render(ctx: PageContext): Promise<void> {
       heroState?.setTotal(page.meta.total);
       heroState?.setFeatured(page.items[0] ?? null);
 
-      grid.replaceChildren();
       if (page.items.length === 0) {
         grid.replaceChildren(emptyGridHint(query, Boolean(user)));
         currentPage = 1;
         totalPages = 1;
       } else {
+        // 先在一个 DocumentFragment 里把新卡片全部建好，再一次性替换。
+        // 逐张 append 会先经历一帧「网格为空」的布局，页面高度瞬间塌陷，
+        // 浏览器就会把滚动位置夹回顶部——这正是自动漫游跳顶的原因。
+        const fragment = document.createDocumentFragment();
         for (const item of page.items) {
-          grid.append(
+          fragment.append(
             imageTile(item, {
               title: item.title,
               subtitle: relativeTime(item.upload_time),
@@ -1037,7 +1043,12 @@ export async function render(ctx: PageContext): Promise<void> {
             }),
           );
         }
+        grid.replaceChildren(fragment);
         applyMasonry(grid);
+        // Fragment 已经避免塌陷；这里再兜一次，防止瀑布流高度重算时抖动
+        if (Math.abs(window.scrollY - scrollY) > 1) {
+          window.scrollTo({ top: scrollY, behavior: "auto" });
+        }
       }
       failed = false;
     } catch {

@@ -556,9 +556,11 @@ API 客户端：
 
 ### `GET /api/v1/admin/settings/oauth-health` — admin
 
-第三方登录出网自检。返回 `proxy_configured` 与 Google / GitHub 两个固定端点的可达性：
-`{ "data": { "proxy_configured": false, "google": { "ok": false, "status": null, "error": "…" },
-"github": { "ok": true, "status": 405, "error": null } } }`。能收到 HTTP 响应（含 401/405）就算可达；
+第三方登录出网自检。返回检测到的代理与 Google / GitHub 两个固定端点的可达性：
+`{ "data": { "proxy_configured": true, "proxy_source": "Windows 系统代理", "proxy_url": "127.0.0.1:7899",
+"google": { "ok": true, "status": 400, "error": null }, "github": { "ok": true, "status": 405, "error": null } } }`。
+代理按启动时的顺序解析：`PIXORA_HTTP_PROXY` → `HTTPS_PROXY` → `ALL_PROXY` → Windows
+「Internet 选项」里的系统代理；`proxy_url` 已去掉凭据。能收到 HTTP 响应（含 401/405）就算可达；
 不接受调用方传 URL，避免被当成 SSRF 探针。
 
 ### `GET /api/v1/tags` — read

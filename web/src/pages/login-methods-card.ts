@@ -41,6 +41,8 @@ interface OAuthEndpointHealth {
 
 interface OAuthHealth {
   proxy_configured: boolean;
+  proxy_source: string | null;
+  proxy_url: string | null;
   google: OAuthEndpointHealth;
   github: OAuthEndpointHealth;
 }
@@ -118,13 +120,16 @@ export async function loginMethodsCard(): Promise<HTMLElement> {
             text: item.ok ? `可达（HTTP ${item.status ?? "?"}）` : `不可达（${item.error ?? "未知错误"}）`,
           }),
         );
+      const proxyLine = result.proxy_configured
+        ? `代理：${result.proxy_source ?? "已检测到"}${result.proxy_url ? `（${result.proxy_url}）` : ""}`
+        : "代理：未检测到系统代理或代理环境变量，将直连";
       status.replaceChildren(
-        h("div", { text: `代理配置：${result.proxy_configured ? "已配置 PIXORA_HTTP_PROXY" : "未显式配置（走系统环境）"}` }),
+        h("div", { text: proxyLine }),
         line("Google", result.google),
         line("GitHub", result.github),
         h("div", {
           style: { marginTop: "6px", color: "var(--muted)" },
-          text: "只要收到 HTTP 响应就算网络可达；401/405 也正常。全部不可达时先检查服务器出网或代理。",
+          text: "只要收到 HTTP 响应就算网络可达，401/405 也正常。不可达时先在浏览器确认同一个代理能打开 Google，再确认服务进程与当前 Windows 用户一致（系统代理按用户保存）。",
         }),
       );
     } catch (err) {
