@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use crate::args::Args;
 use crate::error::Result;
 use crate::model::*;
-use crate::repo::Repo;
+use crate::repo::{like_pattern, Page, PageRequest, Repo};
 
 impl Repo {
     /// 建会话行。`expires_at` 只有「记住我」会给：给了就写死绝对时间，
@@ -94,6 +94,160 @@ impl Repo {
         );
         let rows = self.db.fetch_all(&sql, Args::new().int(user_id)).await?;
         rows.iter().map(Session::from_row).collect()
+    }
+
+    /// 全部会话记录，含已吊销与已过期的行。
+    ///
+    /// 安全页把「当前活动」「免登录记录」「登录历史」分开摆，所以这里连同
+    /// 历史一起取回来；`limit` 兜住那些长期不清理的账号。
+    pub async fn list_all_sessions(&self, user_id: i64, limit: i64) -> Result<Vec<Session>> {
+        let sql = format!(
+            "SELECT {} FROM sessions WHERE user_id = ? \
+             ORDER BY last_seen_at DESC, id DESC LIMIT ?",
+            Session::COLUMNS
+        );
+        let rows = self
+            .db
+            .fetch_all(&sql, Args::new().int(user_id).int(limit.clamp(1, 1000)))
+            .await?;
+        rows.iter().map(Session::from_row).collect()
+    }
+
+    /// 改会话备注。`label` 为 `None` 表示清掉备注。
+    pub async fn rename_session(
+        &self,
+        id: i64,
+        user_id: i64,
+        label: Option<&str>,
+    ) -> Result<u64> {
+        self.db
+            .execute(
+                "UPDATE sessions SET label = ? WHERE id = ? AND user_id = ?",
+                Args::new()
+                    .opt_text(label.map(str::to_string))
+                    .int(id)
+                    .int(user_id),
+            )
+            .await
+    }
+
+    /// 彻底删除一条会话记录（用户清历史 / 管理员清理）。
+    ///
+    /// 与「下线」不同：下线只写 `revoked_at`，记录还在；这里是删行。
+    pub async fn delete_session(&self, id: i64, user_id: Option<i64>) -> Result<u64> {
+        match user_id {
+            Some(user_id) => {
+                self.db
+                    .execute(
+                        "DELETE FROM sessions WHERE id = ? AND user_id = ?",
+                        Args::new().int(id).int(user_id),
+                    )
+                    .await
+            }
+            None => {
+                self.db
+                    .execute("DELETE FROM sessions WHERE id = ?", Args::new().int(id))
+                    .await
+            }
+        }
+    }
+
+    /// 删除已经结束的会话记录（已吊销 / 已过期）。
+    ///
+    /// `user_id` 为 `None` 时清全站，管理端「清理历史记录」走这条路。
+    pub async fn delete_session_history(
+        &self,
+        user_id: Option<i64>,
+        now: DateTime<Utc>,
+        idle_before: Option<DateTime<Utc>>,
+        created_before: Option<DateTime<Utc>>,
+    ) -> Result<u64> {
+        // 参数顺序跟 SQL 里的问号走：有 user_id 时它在最前面
+        let mut args = match user_id {
+            Some(user_id) => Args::new().int(user_id),
+            None => Args::new(),
+        };
+        let mut conditions = vec!["revoked_at IS NOT NULL".to_string()];
+        if let Some(at) = idle_before {
+            conditions.push(
+                "(revoked_at IS NULL AND expires_at IS NULL AND last_seen_at < ?)".to_string(),
+            );
+            args = args.text(ts(at));
+        }
+        if let Some(at) = created_before {
+            conditions.push(
+                "(revoked_at IS NULL AND expires_at IS NULL AND created_at < ?)".to_string(),
+            );
+            args = args.text(ts(at));
+        }
+        conditions.push(
+            "(revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?)".to_string(),
+        );
+        args = args.text(ts(now));
+        let where_sql = conditions.join(" OR ");
+        match user_id {
+            Some(_) => {
+                self.db
+                    .execute(
+                        &format!("DELETE FROM sessions WHERE user_id = ? AND ({where_sql})"),
+                        args,
+                    )
+                    .await
+            }
+            None => {
+                self.db
+                    .execute(&format!("DELETE FROM sessions WHERE ({where_sql})"), args)
+                    .await
+            }
+        }
+    }
+
+    /// 管理端会话记录列表：按账号、IP、设备或备注搜索。
+    pub async fn admin_list_sessions(
+        &self,
+        query: Option<&str>,
+        page: PageRequest,
+    ) -> Result<Page<SessionRecord>> {
+        let mut where_sql = String::new();
+        let mut args = Args::new();
+        if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+            let pattern = like_pattern(query);
+            where_sql = " WHERE (u.email LIKE ? ESCAPE '\\' OR u.uid LIKE ? ESCAPE '\\' \
+                          OR s.ip LIKE ? ESCAPE '\\' OR s.device LIKE ? ESCAPE '\\' \
+                          OR s.label LIKE ? ESCAPE '\\')"
+                .to_string();
+            args = args
+                .text(pattern.clone())
+                .text(pattern.clone())
+                .text(pattern.clone())
+                .text(pattern.clone())
+                .text(pattern);
+        }
+
+        let total = self
+            .db
+            .count(
+                &format!(
+                    "SELECT COUNT(*) AS total FROM sessions s JOIN users u ON u.id = s.user_id{where_sql}"
+                ),
+                args.clone(),
+            )
+            .await?;
+
+        let sql = format!(
+            "SELECT {} FROM sessions s JOIN users u ON u.id = s.user_id{where_sql} \
+             ORDER BY s.last_seen_at DESC, s.id DESC LIMIT ? OFFSET ?",
+            SessionRecord::COLUMNS
+        );
+        let rows = self
+            .db
+            .fetch_all(&sql, args.int(page.per_page).int(page.offset()))
+            .await?;
+        let items = rows
+            .iter()
+            .map(SessionRecord::from_row)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Page::new(items, total, page))
     }
 
     /// 吊销一批已经过期的会话：记住我的按 `expires_at`，普通的按闲置与寿命两个切点。
@@ -192,12 +346,15 @@ impl Repo {
             .await
     }
 
-    /// 清理过期会话：已吊销或长期未活动的行。
+    /// 清理过期会话：已结束且超过保留期的行，或长期未活动的行。
+    ///
+    /// 以前只要 `revoked_at IS NOT NULL` 就删，登录历史实际上活不过一次 GC；
+    /// 现在已下线的记录也按保留期留一阵，用户能在「登录历史」里看到。
     pub async fn purge_stale_sessions(&self, older_than: DateTime<Utc>) -> Result<u64> {
         self.db
             .execute(
-                "DELETE FROM sessions WHERE revoked_at IS NOT NULL OR last_seen_at < ?",
-                Args::new().text(ts(older_than)),
+                "DELETE FROM sessions                   WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR last_seen_at < ?",
+                Args::new().text(ts(older_than)).text(ts(older_than)),
             )
             .await
     }

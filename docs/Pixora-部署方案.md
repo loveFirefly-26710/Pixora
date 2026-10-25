@@ -96,6 +96,8 @@ openssl rand -hex 32
 
 ```dotenv
 PIXORA_BASE_URL=https://img.example.com
+# 服务器访问 Google/GitHub 需要代理时再填，例如 http://10.0.0.2:7890
+# PIXORA_HTTP_PROXY=http://10.0.0.2:7890
 ```
 
 只有 IP、没有域名就写 `http://203.0.113.10:8080`。直链、邮件里的链接、OAuth 回跳都按它拼。忘了设置时，反向代理后面会推出来容器内网地址（`http://172.x.x.x/...`），现象是“页面能开，图片全裂”。
@@ -901,6 +903,8 @@ PIXORA_DATA_DIR=/srv/pixora/data
 PIXORA_DB_DRIVER=sqlite
 PIXORA_DB_DSN=/srv/pixora/data/pixora.db
 PIXORA_BASE_URL=https://img.example.com
+# 服务器访问 Google/GitHub 需要代理时再填，例如 http://10.0.0.2:7890
+# PIXORA_HTTP_PROXY=http://10.0.0.2:7890
 PIXORA_MASTER_KEY=<主密钥>
 # 前面有 Nginx/Caddy 时填 1；直接暴露到公网填 0
 PIXORA_TRUST_PROXY=1

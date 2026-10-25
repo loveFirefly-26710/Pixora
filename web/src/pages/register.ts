@@ -15,7 +15,7 @@ import { navigate, type PageContext } from "../core/router";
 import { getState, loadMe } from "../core/state";
 import { toastError } from "../core/toast";
 import { brandLockup } from "../ui/brand";
-import { field, qtip, textInput } from "../ui/widgets";
+import { field, passwordControl, qtip, textInput } from "../ui/widgets";
 import { oauthButtons } from "../ui/login-methods";
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -54,8 +54,8 @@ export async function render(ctx: PageContext): Promise<void> {
     emailInput.placeholder = `you@${domains[0]}`;
   }
   const codeInput = textInput({ placeholder: "6 位数字", name: "code" });
-  const passwordInput = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
-  const confirmInput = textInput({ type: "password", placeholder: "再输入一次" });
+  const passwordInput = passwordControl({ placeholder: "至少 10 位，含大小写与数字" });
+  const confirmInput = passwordControl({ placeholder: "再输入一次" });
 
   const sendButton = h("button.btn", {
     type: "button",
@@ -152,8 +152,8 @@ export async function render(ctx: PageContext): Promise<void> {
     errorBox,
     field("邮箱", emailInput),
     field("邮箱验证码", h("div.row", null, codeInput, sendButton), "10 分钟内有效，同一邮箱每小时最多 5 次。"),
-    field("密码", passwordInput, "至少 10 位，需同时包含大写字母、小写字母和数字。"),
-    field("确认密码", confirmInput),
+    field("密码", passwordInput.node, "至少 10 位，需同时包含大写字母、小写字母和数字。"),
+    field("确认密码", confirmInput.node),
     h("div.qtip.ok", null, h("span.ic", { text: "✓" }), h("div", null, h("b", { text: "注册后即可开始上传" }), quotaHint)),
     submit,
     h(
@@ -168,11 +168,11 @@ export async function render(ctx: PageContext): Promise<void> {
     event.preventDefault();
     errorBox.style.display = "none";
 
-    if (passwordInput.value !== confirmInput.value) {
+    if (passwordInput.input.value !== confirmInput.input.value) {
       showError("两次输入的密码不一致");
       return;
     }
-    if (passwordInput.value.length < 10) {
+    if (passwordInput.input.value.length < 10) {
       showError("密码至少 10 位");
       return;
     }
@@ -184,7 +184,7 @@ export async function render(ctx: PageContext): Promise<void> {
         json: {
           email: emailInput.value.trim(),
           code: codeInput.value.trim(),
-          password: passwordInput.value,
+          password: passwordInput.input.value,
         },
       });
       void payload;

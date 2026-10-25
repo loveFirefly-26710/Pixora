@@ -726,6 +726,29 @@ mod tests {
         assert_error(&body, "RATE_LIMITED");
     }
 
+    /// 会话绑定在设备上：换一种浏览器用同一份 cookie，会被直接吊销。
+    #[tokio::test]
+    async fn session_cookie_is_bound_to_the_device_label() {
+        let (state, _dir) = test_state().await;
+        let user = add_user(&state, "bound@example.com", "6699", false).await;
+        let cookie = login_cookie(&state, &user).await;
+
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/me")
+                    .header("cookie", &cookie)
+                    .header("user-agent", "Mozilla/5.0 Firefox/120")
+                    .body(Body::empty())
+                    .expect("构造请求"),
+            )
+            .await
+            .expect("发请求");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let sessions = state.repo.list_sessions(user.id).await.expect("读会话");
+        assert!(sessions.is_empty(), "设备不匹配的会话应被吊销");
+    }
+
     #[tokio::test]
     async fn write_without_csrf_header_is_rejected() {
         let (state, _dir) = test_state().await;
@@ -1712,6 +1735,72 @@ mod tests {
             pixora_repo::model::get_str(&row, "visibility").unwrap(),
             "public",
             "访客上传必须落在公开上"
+        );
+    }
+
+    /// 访客预检不能暴露访客库里已有什么：所有哈希一律按 missing 返回。
+    #[tokio::test]
+    async fn guest_preflight_does_not_reveal_existing_hashes() {
+        let (state, _dir) = test_state().await;
+        state
+            .settings
+            .set(pixora_core::settings::keys::UPLOAD_REQUIRE_LOGIN, "false")
+            .await
+            .expect("打开游客上传");
+
+        let site = app(state.clone())
+            .oneshot(get("/api/v1/site", None))
+            .await
+            .expect("发请求");
+        let set_cookie = site
+            .headers()
+            .get("set-cookie")
+            .and_then(|value| value.to_str().ok())
+            .expect("访客该拿到 CSRF Cookie")
+            .to_string();
+        let csrf = set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches("pixora_csrf=")
+            .to_string();
+        let guest_cookie = format!("pixora_csrf={csrf}");
+
+        let uploaded = app(state.clone())
+            .oneshot(multipart_form(
+                "/api/v1/upload",
+                MultipartAuth::Session {
+                    cookie: &guest_cookie,
+                    csrf: &csrf,
+                },
+                PNG_1X1,
+                "guest.png",
+                &[],
+                None,
+            ))
+            .await
+            .expect("发请求");
+        assert_eq!(uploaded.status(), StatusCode::OK);
+
+        let hash = pixora_crypto::hash::sha256_hex(PNG_1X1);
+        let checked = app(state.clone())
+            .oneshot(post_json(
+                "/api/v1/blobs/exists",
+                Some(&guest_cookie),
+                Some(&csrf),
+                serde_json::json!({ "hashes": [hash] }),
+            ))
+            .await
+            .expect("发请求");
+        let body = body_json(checked).await;
+        assert!(
+            body["data"]["exist"].as_array().is_some_and(|items| items.is_empty()),
+            "访客预检不能返回命中的哈希：{body}"
+        );
+        assert_eq!(
+            body["data"]["missing"][0].as_str(),
+            Some(hash.as_str()),
+            "访客预检要把所有哈希都当成缺失"
         );
     }
 

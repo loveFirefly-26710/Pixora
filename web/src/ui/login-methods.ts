@@ -135,7 +135,8 @@ export function phoneForm(
         await request("/me/identities", { method: "POST", json: { provider: "phone", phone, code } });
       } else {
         await request("/auth/phone/login", {
-          json: { phone, code, remember: false },
+          // 与登录页默认的「保持登录」一致：下次打开还是登录状态
+          json: { phone, code, remember: true },
         });
       }
       await hooks.onDone();

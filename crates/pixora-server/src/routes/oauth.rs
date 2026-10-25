@@ -224,17 +224,34 @@ pub async fn oauth_callback(
         Ok(None) => return with_state_cleared(&state, fail_redirect("这个登录方式没有配置好")),
         Err(err) => return with_state_cleared(&state, fail_redirect(err.message().as_str())),
     };
-    let bundle = match state
-        .oauth_token_bundle(&client, &code, &redirect_uri(&state, &provider_name).await)
-        .await
-    {
-        Ok(bundle) => bundle,
-        Err(err) => return with_state_cleared(&state, fail_redirect(err.message().as_str())),
+
+    // 换令牌 + 读账号整段包一个硬超时。
+    //
+    // 服务器到 Google 的链路可能被墙、被 DNS 黑洞或代理拖住：不设上限时
+    // 浏览器会一直等，Cloudflare 到 100 秒直接给用户一个 524 页面。25 秒
+    // 足够正常的两次往返；超时就跳回登录页说清楚，用户还能换邮箱登录。
+    let exchange = async {
+        let uri = redirect_uri(&state, &provider_name).await;
+        let bundle = state.oauth_token_bundle(&client, &code, &uri).await?;
+        let profile = state.oauth_profile(&client, &bundle).await?;
+        Ok::<_, AppError>((bundle, profile))
     };
-    let profile = match state.oauth_profile(&client, &bundle).await {
-        Ok(profile) => profile,
-        Err(err) => return with_state_cleared(&state, fail_redirect(err.message().as_str())),
-    };
+    let (_bundle, profile) =
+        match tokio::time::timeout(std::time::Duration::from_secs(25), exchange).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(err)) => {
+                return with_state_cleared(&state, fail_redirect(err.message().as_str()))
+            }
+            Err(_) => {
+                return with_state_cleared(
+                    &state,
+                    fail_redirect(&format!(
+                        "连接{}超时：服务器暂时访问不了对方站点，请稍后重试，或改用邮箱密码登录",
+                        provider::label(&provider_name)
+                    )),
+                )
+            }
+        };
 
     // 绑定：把身份挂到发起时那个账号上（会话可能已经过期，所以再核一次身份）
     if oauth_state.mode == "bind" {
@@ -268,12 +285,12 @@ pub async fn oauth_callback(
     }
 
     match state
-        .oauth_login(&provider_name, profile, &device, false)
+        .oauth_login(&provider_name, profile, &device, true)
         .await
     {
         Ok(OAuthOutcome::LoggedIn(issued)) => {
             let cookies = merge_cookies(
-                session_cookies(&state, &issued.session_token, &issued.csrf_token, false).await,
+                session_cookies(&state, &issued.session_token, &issued.csrf_token, true).await,
                 clear_state_cookie(&state),
             );
             let target = if oauth_state.next.is_empty() {

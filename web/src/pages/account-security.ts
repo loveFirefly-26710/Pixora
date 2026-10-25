@@ -10,7 +10,7 @@
 import { ApiError, request } from "../core/api";
 import { copyText, h } from "../core/dom";
 import { formatDateTime, relativeTime } from "../core/format";
-import { confirmDialog, openModal } from "../core/modal";
+import { confirmDialog, openModal, promptDialog } from "../core/modal";
 import { encodeQr, qrSvg } from "../core/qrcode";
 import type { PageContext } from "../core/router";
 import { getState, updateUser } from "../core/state";
@@ -22,6 +22,7 @@ import {
   card,
   emptyState,
   pageHead,
+  passwordControl,
   qtip,
   responsiveTable,
   switchRow,
@@ -135,18 +136,18 @@ export async function render(ctx: PageContext): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 function passwordCard(): HTMLElement {
-  const current = textInput({ type: "password", placeholder: "当前密码" });
-  const next = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
-  const repeat = textInput({ type: "password", placeholder: "再输一次" });
+  const current = passwordControl({ placeholder: "当前密码" });
+  const next = passwordControl({ placeholder: "至少 10 位，含大小写与数字" });
+  const repeat = passwordControl({ placeholder: "再输一次" });
   const submit = h("button.btn", { type: "button", text: "修改密码" });
 
   submit.addEventListener("click", async () => {
     // 先做本地检查：明显不合规的输入没必要占一次服务端往返，也别让用户等往返才发现打错了
-    if (next.value !== repeat.value) {
+    if (next.input.value !== repeat.input.value) {
       toastError(new Error("两次输入的新密码不一致"));
       return;
     }
-    if (next.value.length < 10 || !/[a-z]/.test(next.value) || !/[A-Z]/.test(next.value) || !/\d/.test(next.value)) {
+    if (next.input.value.length < 10 || !/[a-z]/.test(next.input.value) || !/[A-Z]/.test(next.input.value) || !/\d/.test(next.input.value)) {
       toastError(new Error("新密码至少 10 位，且需包含大小写字母与数字"));
       return;
     }
@@ -155,13 +156,13 @@ function passwordCard(): HTMLElement {
     try {
       await request("/me/password", {
         method: "POST",
-        json: { current: current.value, password: next.value },
+        json: { current: current.input.value, password: next.input.value },
       });
       // 契约：改密成功会吊销其他设备会话（保留当前会话），所以顺手刷新会话表
       toastOk("密码已修改，其他设备已被踢下线");
-      current.value = "";
-      next.value = "";
-      repeat.value = "";
+      current.input.value = "";
+      next.input.value = "";
+      repeat.input.value = "";
     } catch (err) {
       toastError(err);
     } finally {
@@ -172,12 +173,12 @@ function passwordCard(): HTMLElement {
 
   return card(
     "密码",
-    h("div.fld", null, h("label.f", { text: "当前密码" }), current),
+    h("div.fld", null, h("label.f", { text: "当前密码" }), current.node),
     h(
       "div.row",
       null,
-      h("div.fld", null, h("label.f", { text: "新密码" }), next),
-      h("div.fld", null, h("label.f", { text: "确认新密码" }), repeat),
+      h("div.fld", null, h("label.f", { text: "新密码" }), next.node),
+      h("div.fld", null, h("label.f", { text: "确认新密码" }), repeat.node),
     ),
     submit,
     // 「上次修改时间」接口没给，不编造；能确定的行为是改完踢其他设备
@@ -198,7 +199,7 @@ function passwordCard(): HTMLElement {
  */
 function emailCard(profile: UserProfile, reload: () => void): HTMLElement {
   const emailInput = textInput({ placeholder: "新的邮箱地址", mono: true, name: "new-email" });
-  const passwordInput = textInput({ type: "password", placeholder: "当前密码", name: "new-email-password" });
+  const passwordInput = passwordControl({ placeholder: "当前密码", name: "new-email-password" });
   const codeInput = textInput({ placeholder: "6 位验证码", mono: true, name: "new-email-code" });
   const errorLine = h("div.tip", { style: { color: "var(--danger)" } });
 
@@ -245,9 +246,9 @@ function emailCard(profile: UserProfile, reload: () => void): HTMLElement {
       emailInput.focus();
       return;
     }
-    if (!passwordInput.value) {
+    if (!passwordInput.input.value) {
       errorLine.textContent = "请先填写当前密码。";
-      passwordInput.focus();
+      passwordInput.input.focus();
       return;
     }
     sendBtn.disabled = true;
@@ -255,7 +256,7 @@ function emailCard(profile: UserProfile, reload: () => void): HTMLElement {
     try {
       const result = await request<{ delivered: boolean; message: string }>("/me/email/code", {
         method: "POST",
-        json: { email, password: passwordInput.value },
+        json: { email, password: passwordInput.input.value },
       });
       // 发信结果如实说：没投出去就不能让用户对着收件箱等
       if (!result.delivered) {
@@ -320,7 +321,7 @@ function emailCard(profile: UserProfile, reload: () => void): HTMLElement {
       h("div.fld", null, h("label.f", { text: "当前邮箱" }), badge(profile.email, "mute")),
       h("div.fld", null, h("label.f", { text: "新邮箱" }), emailInput),
     ),
-    h("div.fld", null, h("label.f", { text: "当前密码" }), passwordInput),
+    h("div.fld", null, h("label.f", { text: "当前密码" }), passwordInput.node),
     h("div.flexline", { style: { gap: "8px" } }, sendBtn),
     codeRow,
     pendingLine,
@@ -731,44 +732,246 @@ interface SessionHooks {
   onChanged: () => void;
 }
 
+type SessionState = "active" | "saved" | "expired" | "revoked";
+
+function sessionState(item: SessionRow): SessionState {
+  if (item.state) return item.state;
+  // 旧服务端没有 state 字段：保持原来的展示口径，不把记录藏起来
+  return "active";
+}
+
+/**
+ * 会话记录分三块摆：
+ *
+ *   - 当前活动会话：只放仍在活动窗口内的。以前把所有能用的会话都塞进来，
+ *     六天没动过的「保持登录」记录也被当成活跃设备，看起来像登录历史；
+ *   - 免登录记录：仍能恢复登录、但长期没有活动的 cookie；
+ *   - 登录历史：已下线 / 已过期的记录，可逐条或一次清空。
+ */
 function sessionsCard(list: SessionRow[], hooks: SessionHooks): HTMLElement {
-  const others = list.filter((item) => !item.current).length;
-  const rows = list.map((item) => [
-    h(
-      "span",
-      { style: { display: "inline-flex", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
-      h("span", { text: item.device ?? "未知设备" }),
-      item.current ? badge("当前", "ok") : null,
-    ),
+  const active = list
+    .filter((item) => sessionState(item) === "active")
+    .sort((a, b) => Number(b.current) - Number(a.current));
+  const saved = list.filter((item) => sessionState(item) === "saved");
+  const history = list.filter((item) => {
+    const state = sessionState(item);
+    return state === "expired" || state === "revoked";
+  });
+
+  // 「下线所有其他设备」会连免登录记录一起吊销，所以计数按「还能用的」算，
+  // 不能只数活动会话——否则按钮说 1 个、实际踢了 3 个。
+  const others = active.filter((item) => !item.current).length + saved.length;
+  const otherUsable = others;
+
+  const activeRows = active.map((item) => [
+    deviceCell(item),
     h("span.mono", { text: item.ip ?? "—" }),
     h("span", { text: relativeTime(item.last_seen_at) }),
     h("span", { text: formatDateTime(item.created_at) }),
-    item.current
-      ? // 当前会话不给下线的入口：把正在用的设备踢掉，页面立刻失效，这不是用户想要的
-        h("span", { style: { color: "var(--faint)", fontSize: "12px" }, text: "—" })
-      : revokeButton(item, hooks),
+    actionCell(item, "active", hooks),
   ]);
 
-  return card(
-    "活跃会话",
-    responsiveTable(["设备", "IP", "最近活动", "登录时间", "操作"], rows),
+  const activeCard = card(
+    "当前活动会话",
+    active.length > 0
+      ? responsiveTable(["设备", "IP", "最近活动", "登录时间", "操作"], activeRows)
+      : emptyState("🖥", "当前没有活动会话"),
     h(
       "div.flexline",
       { style: { marginTop: "10px" } },
       h("button.btn.sm.dgr", {
         type: "button",
         text: "下线所有其他设备",
-        disabled: others === 0,
-        title: others === 0 ? "没有其他需要下线的设备" : `将下线 ${others} 个会话`,
+        disabled: otherUsable === 0,
+        title: otherUsable === 0 ? "没有其他需要下线的设备" : `将下线 ${otherUsable} 个可用会话`,
         on: { click: (event) => void revokeOthers(event.currentTarget as HTMLButtonElement, hooks) },
       }),
       h("span.tip", {
         style: { margin: "0" },
-        text: others === 0 ? "当前只有这一台设备在线。" : `除当前设备外还有 ${others} 个会话。`,
+        text:
+          otherUsable === 0
+            ? "当前只有这一台设备在线。"
+            : `除当前设备外还有 ${others} 个可用会话（含免登录记录）。`,
       }),
     ),
-    sessionPolicyTip(),
+    h("div.tip", {
+      text: "这里只显示仍在活动窗口内的会话。长期未活动的「保持登录」记录与登录历史分别列在下面。",
+    }),
   );
+
+  const savedCard =
+    saved.length === 0
+      ? null
+      : card(
+          "免登录记录（长期未活动）",
+          h("div.tip", {
+            text:
+              "这些是「保持登录」留下的 cookie 记录：仍能恢复登录，但已经超过活动窗口。" +
+              "如果某个浏览器你已经不用了，删除它，那个浏览器下次就得重新登录。",
+          }),
+          responsiveTable(
+            ["设备", "IP", "最近活动", "签发时间", "操作"],
+            saved.map((item) => [
+              deviceCell(item),
+              h("span.mono", { text: item.ip ?? "—" }),
+              h("span", { text: relativeTime(item.last_seen_at) }),
+              h("span", { text: formatDateTime(item.created_at) }),
+              actionCell(item, "saved", hooks),
+            ]),
+          ),
+        );
+
+  const historyCard =
+    history.length === 0
+      ? null
+      : card(
+          "登录历史",
+          h("div.tip", {
+            text: "已下线或已过期的会话记录。它们只用于留痕，不再能用来登录；不需要时可以直接删掉。",
+          }),
+          responsiveTable(
+            ["设备", "IP", "最近活动", "登录时间", "状态", "操作"],
+            history.map((item) => [
+              deviceCell(item),
+              h("span.mono", { text: item.ip ?? "—" }),
+              h("span", { text: relativeTime(item.last_seen_at) }),
+              h("span", { text: formatDateTime(item.created_at) }),
+              badge(
+                sessionState(item) === "revoked" ? "已下线" : "已过期",
+                sessionState(item) === "revoked" ? "mute" : "warn",
+              ),
+              actionCell(item, sessionState(item), hooks),
+            ]),
+          ),
+          h(
+            "div.flexline",
+            { style: { marginTop: "10px" } },
+            h("button.btn.sm", {
+              type: "button",
+              text: "清空登录历史",
+              on: { click: (event) => void clearHistory(event.currentTarget as HTMLButtonElement, hooks) },
+            }),
+          ),
+        );
+
+  return h("div", null, activeCard, savedCard, historyCard, sessionPolicyTip());
+}
+
+/** 设备那一格：备注/设备名 + 状态徽标。 */
+function deviceCell(item: SessionRow): HTMLElement {
+  const label = item.label?.trim() ?? "";
+  const primary = label || item.device || "未知设备";
+  const secondary = label && item.device ? item.device : null;
+  return h(
+    "div",
+    { style: { display: "flex", flexDirection: "column", gap: "3px" } },
+    h(
+      "span",
+      { style: { display: "inline-flex", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
+      h("span", { text: primary }),
+      item.current ? badge("当前", "ok") : null,
+      item.remember ? badge("免登录", "info") : null,
+    ),
+    secondary
+      ? h("span", { style: { color: "var(--muted)", fontSize: "11.5px" }, text: secondary })
+      : null,
+  );
+}
+
+function actionCell(item: SessionRow, state: SessionState, hooks: SessionHooks): HTMLElement {
+  const actions: Node[] = [];
+  // 备注对任何记录都可改，包括当前这台设备；名字是用户自己认设备的唯一线索
+  actions.push(renameButton(item, hooks));
+  if (state === "active" && !item.current) {
+    actions.push(revokeButton(item, hooks));
+  }
+  if (state === "saved" || state === "expired" || state === "revoked") {
+    actions.push(deleteRecordButton(item, hooks));
+  }
+  return h(
+    "span",
+    { style: { display: "inline-flex", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
+    ...actions,
+  );
+}
+
+function renameButton(item: SessionRow, hooks: SessionHooks): HTMLElement {
+  return h("button.btn.sm.gho", {
+    type: "button",
+    text: "备注",
+    title: "给这台设备起个名字",
+    on: {
+      click: async () => {
+        const value = await promptDialog({
+          title: "备注登录设备",
+          label: "备注名",
+          value: item.label ?? "",
+          placeholder: "例如：书房的笔记本",
+          confirmText: "保存",
+          hint: "留空并保存会清除备注。设备名来自浏览器，备注只用于你自己辨认。",
+        });
+        if (value === null) return;
+        try {
+          await request(`/me/sessions/${item.id}`, {
+            method: "PATCH",
+            json: { label: value },
+          });
+          toastOk(value.trim() ? "备注已保存" : "备注已清除");
+          hooks.onChanged();
+        } catch (err) {
+          toastError(err);
+        }
+      },
+    },
+  });
+}
+
+function deleteRecordButton(item: SessionRow, hooks: SessionHooks): HTMLElement {
+  const button = h("button.btn.sm.dgr", {
+    type: "button",
+    text: "删除记录",
+    title: "删除这条 cookie / 会话记录",
+  });
+  button.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "删除登录记录",
+      message:
+        `「${item.label?.trim() || item.device || "未知设备"}」（${item.ip ?? "未知 IP"}）的这条会话记录会被彻底删除；` +
+        "如果它还能恢复登录，删除后那个浏览器需要重新输入密码。",
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      await request(`/me/sessions/${item.id}/record`, { method: "DELETE" });
+      toastOk("登录记录已删除");
+      hooks.onChanged();
+    } catch (err) {
+      toastError(err);
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+async function clearHistory(button: HTMLButtonElement, hooks: SessionHooks): Promise<void> {
+  const ok = await confirmDialog({
+    title: "清空登录历史",
+    message: "已下线和已过期的会话记录会被全部删除。这不影响当前正在使用的会话，也不影响免登录记录。",
+    confirmText: "清空",
+    danger: true,
+  });
+  if (!ok) return;
+  button.disabled = true;
+  try {
+    const result = await request<{ deleted: number }>("/me/sessions/history", { method: "DELETE" });
+    toastOk(`已清空 ${result.deleted ?? 0} 条登录历史`);
+    hooks.onChanged();
+  } catch (err) {
+    toastError(err);
+    button.disabled = false;
+  }
 }
 
 /**
@@ -801,7 +1004,7 @@ function revokeButton(item: SessionRow, hooks: SessionHooks): HTMLElement {
   button.addEventListener("click", async () => {
     const ok = await confirmDialog({
       title: "下线该会话",
-      message: `「${item.device ?? "未知设备"}」（${item.ip ?? "未知 IP"}）会立即退出登录，需要重新输入密码。`,
+      message: `「${item.label?.trim() || item.device || "未知设备"}」（${item.ip ?? "未知 IP"}）会立即退出登录，需要重新输入密码。`,
       confirmText: "下线",
       danger: true,
     });
@@ -822,7 +1025,7 @@ function revokeButton(item: SessionRow, hooks: SessionHooks): HTMLElement {
 async function revokeOthers(button: HTMLButtonElement, hooks: SessionHooks): Promise<void> {
   const ok = await confirmDialog({
     title: "下线所有其他设备",
-    message: "除当前设备外的全部会话会立即失效，其他设备需要重新登录。",
+    message: "除当前设备外的全部会话（含免登录记录）会立即失效，其他设备需要重新登录。",
     confirmText: "全部下线",
     danger: true,
   });

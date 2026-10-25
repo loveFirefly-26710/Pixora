@@ -264,6 +264,46 @@ async fn same_repository_code_runs_on_every_configured_dialect() {
             .unwrap();
         assert_eq!(by_tag.total, 1, "{driver:?}：按标签筛选");
 
+        // 多选标签按「任一命中」：广场标签云允许勾多个，不该要求全命中
+        let by_tags = repo
+            .list_images(
+                &pixora_repo::repo::images::ImageFilter {
+                    tags_any: vec!["不存在的标签".to_string(), "风景".to_string()],
+                    public_only: true,
+                    ..Default::default()
+                },
+                PageRequest::new(Some(1), Some(10), 10, 50),
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_tags.total, 1, "{driver:?}：多选标签任一命中");
+
+        // 全部命中：这张图只有「风景」，加上另一个标签就不该命中
+        let by_all_tags = repo
+            .list_images(
+                &pixora_repo::repo::images::ImageFilter {
+                    tags_all: vec!["风景".to_string()],
+                    public_only: true,
+                    ..Default::default()
+                },
+                PageRequest::new(Some(1), Some(10), 10, 50),
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_all_tags.total, 1, "{driver:?}：多选标签全部命中");
+        let by_all_missing = repo
+            .list_images(
+                &pixora_repo::repo::images::ImageFilter {
+                    tags_all: vec!["风景".to_string(), "旅行".to_string()],
+                    public_only: true,
+                    ..Default::default()
+                },
+                PageRequest::new(Some(1), Some(10), 10, 50),
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_all_missing.total, 0, "{driver:?}：缺失任一标签应过滤掉");
+
         let by_query = repo
             .list_images(
                 &pixora_repo::repo::images::ImageFilter {

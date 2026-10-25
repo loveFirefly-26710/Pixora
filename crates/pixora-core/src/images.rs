@@ -173,6 +173,8 @@ impl AppState {
             public_only: viewer.is_anonymous(),
             query: q.query.clone(),
             tag: q.tag.clone(),
+            tags_any: Vec::new(),
+            tags_all: Vec::new(),
             ids: q.ids.clone(),
             include_deleted: false,
             // 排序交给仓储层解析：默认是打乱，客户端给了 sort 就按它来
@@ -191,7 +193,8 @@ impl AppState {
     pub async fn list_plaza(
         &self,
         query: Option<&str>,
-        tag: Option<&str>,
+        tags: &[String],
+        tag_mode: Option<&str>,
         sort: Option<&str>,
         seed: u64,
         page: Option<i64>,
@@ -209,7 +212,17 @@ impl AppState {
                 Some(album_ids.to_vec())
             },
             query: query.map(str::to_string),
-            tag: tag.map(str::to_string),
+            // 多选标签默认「命中任一」；管理员/用户切到全部命中时走 tags_all
+            tags_any: if tag_mode == Some("all") {
+                Vec::new()
+            } else {
+                tags.to_vec()
+            },
+            tags_all: if tag_mode == Some("all") {
+                tags.to_vec()
+            } else {
+                Vec::new()
+            },
             // 广场默认是随机顺序：每次进来看到的都该是新的组合
             sort: ImageSort::parse(sort.unwrap_or("shuffle")),
             seed,

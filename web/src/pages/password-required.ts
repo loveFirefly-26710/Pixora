@@ -14,13 +14,13 @@ import { h, mount } from "../core/dom";
 import { navigate, type PageContext } from "../core/router";
 import { getState, loadMe } from "../core/state";
 import { toastError } from "../core/toast";
-import { field, qtip, textInput } from "../ui/widgets";
+import { field, passwordControl, qtip } from "../ui/widgets";
 
 export async function render(ctx: PageContext): Promise<void> {
   const user = getState().user;
-  const currentInput = textInput({ type: "password", placeholder: "邮件里那个密码" });
-  const nextInput = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
-  const repeatInput = textInput({ type: "password", placeholder: "再输入一次" });
+  const currentInput = passwordControl({ placeholder: "邮件里那个密码" });
+  const nextInput = passwordControl({ placeholder: "至少 10 位，含大小写与数字" });
+  const repeatInput = passwordControl({ placeholder: "再输入一次" });
   const errorBox = h("div", { style: { display: "none", marginBottom: "12px" } });
   const submit = h("button.btn.pri.blk", { type: "submit", text: "保存新密码" });
   const stateLine = h("div.tip", { style: { textAlign: "center" } });
@@ -41,9 +41,9 @@ export async function render(ctx: PageContext): Promise<void> {
       `${user?.email ?? "这个账号"} 的密码由管理员直接设置过，那份密码是经邮件送达的：` +
         "请设置一个仅你本人知晓的新密码；完成之前，账号仅可访问本页。",
     ),
-    field("当前密码", currentInput, "即邮件中收到的那一个"),
-    field("新密码", nextInput, "至少 10 位，需同时包含大写字母、小写字母和数字。"),
-    field("确认新密码", repeatInput),
+    field("当前密码", currentInput.node, "即邮件中收到的那一个"),
+    field("新密码", nextInput.node, "至少 10 位，需同时包含大写字母、小写字母和数字。"),
+    field("确认新密码", repeatInput.node),
     submit,
     stateLine,
     h(
@@ -61,19 +61,19 @@ export async function render(ctx: PageContext): Promise<void> {
     event.preventDefault();
     errorBox.style.display = "none";
 
-    if (!currentInput.value) {
+    if (!currentInput.input.value) {
       showError("请填写当前密码（邮件中收到的那一个）");
-      currentInput.focus();
+      currentInput.input.focus();
       return;
     }
-    if (nextInput.value !== repeatInput.value) {
+    if (nextInput.input.value !== repeatInput.input.value) {
       showError("两次输入的新密码不一致");
-      repeatInput.focus();
+      repeatInput.input.focus();
       return;
     }
-    if (nextInput.value === currentInput.value) {
+    if (nextInput.input.value === currentInput.input.value) {
       showError("新密码不能与当前密码相同");
-      nextInput.focus();
+      nextInput.input.focus();
       return;
     }
 
@@ -81,7 +81,7 @@ export async function render(ctx: PageContext): Promise<void> {
     submit.textContent = "保存中…";
     try {
       await request("/me/password", {
-        json: { current: currentInput.value, password: nextInput.value },
+        json: { current: currentInput.input.value, password: nextInput.input.value },
       });
       // 标记由服务端清掉，重拉一次身份才知道「现在能正常用了」
       await loadMe();
@@ -106,5 +106,5 @@ export async function render(ctx: PageContext): Promise<void> {
   }
 
   ctx.outlet.append(form);
-  currentInput.focus();
+  currentInput.input.focus();
 }

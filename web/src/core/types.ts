@@ -57,6 +57,17 @@ export interface SiteInfo {
   plaza_grid_columns: number;
   /** 广场自动漫游间隔（秒）。0 = 关闭 */
   plaza_auto_refresh_seconds: number;
+  /** 首页公告：打开广场后自动弹出；version 由内容算出，用户确认后本地记住 */
+  announcement?: {
+    enabled: boolean;
+    title: string;
+    body: string;
+    version: string;
+    /** 服务端已读（仅登录用户） */
+    read?: boolean;
+    starts_at?: string | null;
+    ends_at?: string | null;
+  } | null;
   /** 背景音乐：只有管理员启用后前端才显示播放按钮 */
   music?: {
     enabled: boolean;
@@ -230,10 +241,18 @@ export interface HashCheck {
 export interface SessionRow {
   id: number;
   device: string | null;
+  /** 用户自己起的备注（「书房的笔记本」这类） */
+  label?: string | null;
   ip: string | null;
   created_at: string;
   last_seen_at: string;
+  expires_at?: string | null;
+  revoked_at?: string | null;
   current: boolean;
+  /** 是否是「保持登录」签发的长期 cookie */
+  remember?: boolean;
+  /** active / saved / expired / revoked */
+  state?: "active" | "saved" | "expired" | "revoked";
 }
 
 export interface ApiTokenRow {
@@ -550,6 +569,17 @@ export interface AdminSettings {
     plaza_grid_columns: number;
     /** 广场自动漫游间隔（秒）。0 = 关闭 */
     plaza_auto_refresh_seconds: number;
+    /** 首页公告 */
+    announcement?: {
+      enabled: boolean;
+      title: string;
+      body: string;
+      starts_at: string | null;
+      ends_at: string | null;
+      active: boolean;
+      reads: number;
+      user_total: number;
+    };
     /** 只在广场展示这些公开相册；空数组 = 全部公开图片 */
     plaza_album_ids?: number[];
     /** 管理员命名的相册集合，随机图 API 可用 collection=名字 取 */
@@ -571,6 +601,8 @@ export interface AdminSettings {
     idle_minutes: number;
     absolute_days: number;
     remember_days: number;
+    /** 已结束的会话记录保留天数；0 = 永久保留 */
+    history_retention_days: number;
   };
   security: {
     hotlink_enabled: boolean;

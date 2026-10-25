@@ -129,6 +129,11 @@ pub struct ImageFilter {
     pub query: Option<String>,
     /// 精确命中某个标签
     pub tag: Option<String>,
+    /// 任一命中（OR）的一组标签。广场的标签多选走这里；
+    /// 与 `tag` 同时给出时两条条件都要满足。
+    pub tags_any: Vec<String>,
+    /// 全部命中（AND）的一组标签。
+    pub tags_all: Vec<String>,
     /// 只要指定的一批 id（批量操作前回读用）
     pub ids: Option<Vec<i64>>,
     /// 包含已软删的图片（回收站/审计才需要）
@@ -1486,6 +1491,8 @@ impl Repo {
             && filter.album_id.is_none()
             && filter.query.is_none()
             && filter.tag.is_none()
+            && filter.tags_any.is_empty()
+            && filter.tags_all.is_empty()
             && filter.ids.is_none();
         if simple_public {
             if let Some(view) = self.random_public_image_fast().await? {
@@ -1836,6 +1843,29 @@ impl Repo {
             builder = builder.and(
                 "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
                           WHERE it.image_id = i.id AND t.name = ?)",
+                move |args| args.text(tag),
+            );
+        }
+        if !filter.tags_any.is_empty() {
+            let placeholders = vec!["?"; filter.tags_any.len()].join(", ");
+            let tags = filter.tags_any.clone();
+            builder = builder.and(
+                &format!(
+                    "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id \
+                      WHERE it.image_id = i.id AND t.name IN ({placeholders}))"
+                ),
+                move |mut args| {
+                    for tag in &tags {
+                        args = args.text(tag.clone());
+                    }
+                    args
+                },
+            );
+        }
+        for tag in &filter.tags_all {
+            let tag = tag.clone();
+            builder = builder.and(
+                "EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id = it.tag_id                           WHERE it.image_id = i.id AND t.name = ?)",
                 move |args| args.text(tag),
             );
         }

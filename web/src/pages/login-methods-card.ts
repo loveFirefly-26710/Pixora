@@ -33,6 +33,18 @@ export interface LoginMethodsAdmin {
   };
 }
 
+interface OAuthEndpointHealth {
+  ok: boolean;
+  status: number | null;
+  error: string | null;
+}
+
+interface OAuthHealth {
+  proxy_configured: boolean;
+  google: OAuthEndpointHealth;
+  github: OAuthEndpointHealth;
+}
+
 interface Draft {
   providers: Record<string, { enabled: boolean; clientId: HTMLInputElement; secret: HTMLInputElement }>;
   phoneEnabled: boolean;
@@ -87,7 +99,41 @@ export async function loginMethodsCard(): Promise<HTMLElement> {
   }
 
   const save = h("button.btn.pri", { type: "button", text: "保存登录方式" });
+  const healthBtn = h("button.btn", { type: "button", text: "测试第三方登录出网" });
   const status = h("div.tip", { style: { marginTop: "8px" } });
+
+  healthBtn.addEventListener("click", async () => {
+    healthBtn.disabled = true;
+    healthBtn.textContent = "检测中…";
+    status.replaceChildren("正在连接 Google / GitHub…");
+    try {
+      const result = await request<OAuthHealth>("/admin/settings/oauth-health");
+      const line = (label: string, item: OAuthEndpointHealth) =>
+        h(
+          "div",
+          { style: { marginTop: "4px" } },
+          h("b", { text: `${label}：` }),
+          h("span", {
+            style: { color: item.ok ? "var(--success)" : "var(--danger)" },
+            text: item.ok ? `可达（HTTP ${item.status ?? "?"}）` : `不可达（${item.error ?? "未知错误"}）`,
+          }),
+        );
+      status.replaceChildren(
+        h("div", { text: `代理配置：${result.proxy_configured ? "已配置 PIXORA_HTTP_PROXY" : "未显式配置（走系统环境）"}` }),
+        line("Google", result.google),
+        line("GitHub", result.github),
+        h("div", {
+          style: { marginTop: "6px", color: "var(--muted)" },
+          text: "只要收到 HTTP 响应就算网络可达；401/405 也正常。全部不可达时先检查服务器出网或代理。",
+        }),
+      );
+    } catch (err) {
+      status.replaceChildren(err instanceof Error ? err.message : "检测失败");
+    } finally {
+      healthBtn.disabled = false;
+      healthBtn.textContent = "测试第三方登录出网";
+    }
+  });
 
   save.addEventListener("click", async () => {
     save.disabled = true;
@@ -163,7 +209,7 @@ export async function loginMethodsCard(): Promise<HTMLElement> {
         text: "模板里的变量名要叫 code：本站发出去的是 {code: \"123456\"}，模板内容写「您的验证码是 ${code}」这类即可。",
       }),
     ),
-    h("div.flexline", { style: { marginTop: "12px" } }, save),
+    h("div.flexline", { style: { marginTop: "12px" } }, save, healthBtn),
     status,
   );
 }

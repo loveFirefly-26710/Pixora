@@ -590,6 +590,42 @@ textarea.f::placeholder {
   color: var(--faint);
 }
 
+/* 密码框：右侧一个显示/隐藏按钮，不占输入区宽度 */
+.pw-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.pw-wrap input.f {
+  padding-right: 58px;
+}
+
+.pw-toggle {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pw-toggle:hover,
+.pw-toggle:focus-visible {
+  color: var(--primary);
+  background: var(--primary-soft);
+  outline: none;
+}
+
 .row {
   display: flex;
   gap: 12px;

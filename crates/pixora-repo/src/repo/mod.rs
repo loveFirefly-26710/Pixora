@@ -11,6 +11,7 @@
 //! 参数用 [`crate::args::Args`] 按顺序给。只有需要按方言分流的语句才用 `sql_v`。
 
 pub mod albums;
+pub mod announcements;
 pub mod audit;
 pub mod backends;
 pub mod blobs;

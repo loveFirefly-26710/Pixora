@@ -210,11 +210,22 @@ pub async fn reconcile(state: &Arc<AppState>) -> pixora_core::Result<u64> {
 pub async fn purge_expired(state: &Arc<AppState>) -> pixora_core::Result<()> {
     let now = Utc::now();
 
-    // 过期会话：已吊销，或 90 天没活动过
-    let sessions = state
-        .repo
-        .purge_stale_sessions(now - chrono::Duration::days(90))
-        .await?;
+    // 过期会话：已结束且超过保留期，或长期没活动过。保留天数可在后台调，
+    // 填 0 表示不自动清理，留给管理员手动处理
+    let retention_days = state
+        .settings
+        .session()
+        .await
+        .map(|session| session.history_retention_days)
+        .unwrap_or(90);
+    let sessions = if retention_days > 0 {
+        state
+            .repo
+            .purge_stale_sessions(now - chrono::Duration::days(retention_days))
+            .await?
+    } else {
+        0
+    };
 
     // 过期验证码
     let codes = state

@@ -24,6 +24,7 @@ import {
   field,
   pageHead,
   pagination,
+  passwordControl,
   progressBar,
   qtip,
   roleBadge,
@@ -694,7 +695,7 @@ export async function render(ctx: PageContext): Promise<void> {
   /** 后台直接建号：邮箱直接激活，密码由管理员告诉对方，首次登录后自行修改。 */
   function openCreateUserDialog(): void {
     const email = textInput({ value: "", mono: true, placeholder: "user@example.com" });
-    const password = textInput({ type: "password", placeholder: "至少 10 位，要能通过强度校验" });
+    const password = passwordControl({ placeholder: "至少 10 位，要能通过强度校验" });
     const role = select([
       { value: "user", label: "普通用户" },
       { value: "admin", label: "管理员" },
@@ -710,7 +711,7 @@ export async function render(ctx: PageContext): Promise<void> {
         "div",
         null,
         field("邮箱", email, "创建后即为已验证状态，不会再发验证邮件"),
-        field("初始密码", password, "告诉对方后请提醒尽快在「安全」页改掉"),
+        field("初始密码", password.node, "告诉对方后请提醒尽快在「安全」页改掉"),
         field("角色", role, "管理员权限很大：能看全部用户的内容与统计、改系统设置"),
         errorLine,
       ),
@@ -720,7 +721,7 @@ export async function render(ctx: PageContext): Promise<void> {
     confirm.addEventListener("click", async () => {
       if (submitting) return;
       const mail = email.value.trim();
-      if (!mail || !password.value) {
+      if (!mail || !password.input.value) {
         errorLine.textContent = "邮箱与密码都要填。";
         return;
       }
@@ -730,7 +731,7 @@ export async function render(ctx: PageContext): Promise<void> {
       try {
         await request("/admin/users", {
           method: "POST",
-          json: { email: mail, password: password.value, role: role.value },
+          json: { email: mail, password: password.input.value, role: role.value },
         });
         toastOk(`已创建 ${mail}`);
         handle.close();

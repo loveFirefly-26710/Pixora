@@ -323,13 +323,106 @@ pub async fn sessions_list(
                 serde_json::json!({
                     "id": session.id,
                     "device": session.device,
+                    "label": session.label,
                     "ip": session.ip,
                     "created_at": rfc3339(session.created_at),
                     "last_seen_at": rfc3339(session.last_seen_at),
+                    "expires_at": session.expires_at.map(rfc3339),
+                    "revoked_at": session.revoked_at.map(rfc3339),
                     "current": session.current,
+                    "remember": session.remember,
+                    "state": session.state,
                 })
             })
             .collect())),
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
+/// `PATCH /api/v1/me/sessions/{id}`：给一条 cookie 记录改备注。
+pub async fn session_rename(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(session_id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = super::ensure_scope(&auth, "write") {
+        return resp;
+    }
+    let label = field_opt_str(&body, "label");
+    match state
+        .rename_session_label(auth.user.id, session_id, label.as_deref())
+        .await
+    {
+        Ok(updated) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "updated": updated,
+            "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+        }))),
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
+/// `DELETE /api/v1/me/sessions/{id}/record`：彻底删除一条会话记录。
+///
+/// 与 `DELETE /me/sessions/{id}`（下线）分开：下线只吊销，记录还在；
+/// 这里删的是历史里的那一行。当前正在用的会话不能这样删。
+pub async fn session_delete_record(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    Path(session_id): Path<i64>,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = super::ensure_scope(&auth, "write") {
+        return resp;
+    }
+    if auth.session_id == Some(session_id) {
+        return bad_request("当前正在使用的会话不能删除记录，请先退出登录");
+    }
+    match state
+        .delete_session_record(auth.user.id, session_id)
+        .await
+    {
+        Ok(deleted) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "deleted": deleted,
+            "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+        }))),
+        Err(err) => crate::http::error_response(err),
+    }
+}
+
+/// `DELETE /api/v1/me/sessions/history`：清空自己的登录历史记录。
+pub async fn session_history_clear(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+) -> Response {
+    let rectx = request_context(&state, &headers, peer.addr()).await;
+    let auth = match require_user(&state, &headers, rectx.ip.as_deref(), &method).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = super::ensure_scope(&auth, "write") {
+        return resp;
+    }
+    match state.clear_session_history(auth.user.id).await {
+        Ok(deleted) => finish::<serde_json::Value>(Ok(serde_json::json!({
+            "deleted": deleted,
+            "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+        }))),
         Err(err) => crate::http::error_response(err),
     }
 }

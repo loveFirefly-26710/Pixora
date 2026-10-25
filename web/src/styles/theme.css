@@ -4,6 +4,8 @@
 
 :root {
   --tabbar-h: 58px;
+  /* 移动端点击不要那层方形高亮：它会把圆形唱片、图片卡片盖成一整块灰蓝色 */
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* ---------- 背景氛围 ---------- */
@@ -1448,7 +1450,57 @@ tr.pick td {
 }
 
 .auto-roam {
+  position: relative;
   gap: 8px;
+  max-width: 230px;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    max-width .36s cubic-bezier(.2, .7, .2, 1),
+    opacity .26s ease,
+    transform .36s cubic-bezier(.2, .7, .2, 1),
+    padding .36s ease,
+    margin .36s ease,
+    border-width .26s ease;
+}
+
+/* 非随机排序时自动漫游收起，只留「投递影像」；用宽度收拢而不是直接 display:none。
+   选择器带上 .plaza-hero-actions，压过窄屏那条 `.plaza-hero-actions .btn { flex:1 }` */
+.plaza-hero-actions .auto-roam.is-hidden {
+  flex: 0 0 0;
+  max-width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  margin-left: -9px;
+  border-width: 0;
+  opacity: 0;
+  transform: translateX(-12px) scale(.92);
+  pointer-events: none;
+}
+
+/* 出现时像一点萤火散开：轻微模糊 → 清晰，同时带一圈短暂的光晕 */
+.auto-roam.is-revealing {
+  animation: auto-roam-in .48s cubic-bezier(.2, .8, .2, 1) both;
+}
+
+@keyframes auto-roam-in {
+  0% {
+    opacity: 0;
+    transform: translateX(-14px) scale(.9);
+    filter: blur(3px);
+    box-shadow: 0 0 0 rgba(79, 224, 182, 0);
+  }
+  55% {
+    opacity: 1;
+    transform: translateX(1px) scale(1.02);
+    filter: blur(0);
+    box-shadow: 0 0 24px var(--glow);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+    box-shadow: 0 0 0 rgba(79, 224, 182, 0);
+  }
 }
 
 .auto-roam .auto-label {
@@ -1558,6 +1610,17 @@ tr.pick td {
   z-index: 2;
   padding: 7px;
   cursor: pointer;
+  /* 移除浏览器按钮的默认外观与点击高亮：圆片本身是圆的，方形高亮很突兀 */
+  appearance: none;
+  -webkit-appearance: none;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+  transform-origin: center;
+}
+
+.hero-frame:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 5px;
 }
 
 .hero-frame-inner {
@@ -1574,15 +1637,23 @@ tr.pick td {
 }
 
 .hero-frame-inner img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
-  transition: transform 1.1s cubic-bezier(0.2, 0.7, 0.2, 1);
+  opacity: 1;
+  transition: opacity .7s ease, transform 1.1s cubic-bezier(0.2, 0.7, 0.2, 1);
   /* 动画一直挂着、靠 play-state 暂停/继续：暂停时停在当前角度，
      恢复时从那里接着转；直接增删 animation 会让它瞬间回到 0°。 */
   animation: music-spin 24s linear infinite;
   animation-play-state: paused;
+}
+
+/* 自动漫游换图：新图先透明，下一帧再淡入；旧图垫在下面直到淡入结束 */
+.hero-frame-inner img.hero-img-enter {
+  opacity: 0;
 }
 
 .hero-frame:hover .hero-frame-inner {
@@ -1749,6 +1820,360 @@ tr.pick td {
 
 .plaza-toolbar .btn.sm {
   min-height: 34px;
+}
+
+.plaza-toolbar-label {
+  color: var(--faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* 广场标签云：搜索与筛选的可见参考，点了就按该标签过滤 */
+.plaza-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -6px 0 16px;
+}
+
+.plaza-tags:empty {
+  display: none;
+}
+
+.plaza-tags-label {
+  margin-right: 2px;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.plaza-tags-chips {
+  display: contents;
+}
+
+.plaza-tags .chip {
+  padding: 4px 9px;
+  font-size: 11.5px;
+}
+
+.plaza-tag-search {
+  width: 128px;
+  min-height: 28px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  outline: none;
+}
+
+.plaza-tag-search:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
+
+.plaza-tags-mode-label {
+  margin-left: 4px;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.plaza-tags-empty {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+@media (max-width: 767px) {
+  .plaza-toolbar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .plaza-toolbar-label {
+    display: none;
+  }
+  .plaza-tags {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+  }
+  .plaza-tag-search {
+    flex: 0 0 104px;
+    width: 104px;
+  }
+}
+
+.plaza-tags .chip.on {
+  box-shadow: 0 0 18px var(--glow);
+}
+
+.plaza-tags-hint {
+  margin-left: 2px;
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* ---------- 首页公告（流萤主题） ---------- */
+
+.modal-announcement .sheet {
+  border-color: rgba(120, 243, 205, 0.24);
+  background:
+    radial-gradient(120% 90% at 12% 0%, rgba(79, 224, 182, 0.17), transparent 58%),
+    radial-gradient(90% 70% at 100% 100%, rgba(226, 177, 91, 0.08), transparent 60%),
+    var(--elev);
+  box-shadow: 0 26px 90px rgba(0, 0, 0, 0.5), 0 0 70px rgba(79, 224, 182, 0.1);
+}
+
+:root[data-theme="light"] .modal-announcement .sheet {
+  border-color: rgba(17, 169, 133, 0.28);
+  box-shadow: 0 24px 70px rgba(24, 75, 62, 0.2), 0 0 50px rgba(17, 169, 133, 0.12);
+}
+
+.modal-announcement .sheet-head {
+  border-bottom-color: rgba(120, 243, 205, 0.12);
+  background: transparent;
+}
+
+.modal-announcement .sheet-head b {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.modal-announcement .sheet-foot {
+  border-top-color: rgba(120, 243, 205, 0.12);
+  background: rgba(3, 13, 13, 0.28);
+  align-items: center;
+}
+
+:root[data-theme="light"] .modal-announcement .sheet-foot {
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.announcement {
+  position: relative;
+  padding: 4px 3px 2px;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* 背景星轨：淡淡的圆环与三点萤火，不抢正文 */
+.announcement-sky {
+  position: absolute;
+  inset: -46px -28px -20px;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.announcement-ring {
+  position: absolute;
+  right: -84px;
+  top: -76px;
+  width: 260px;
+  height: 260px;
+  border: 1px solid rgba(120, 243, 205, 0.16);
+  border-radius: 50%;
+  box-shadow: inset 0 0 70px rgba(79, 224, 182, 0.07);
+}
+
+.announcement-ring::before,
+.announcement-ring::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  border: 1px dashed rgba(120, 243, 205, 0.12);
+}
+
+.announcement-ring::before { inset: 26px; }
+.announcement-ring::after { inset: 58px; border-style: solid; }
+
+.announcement-spark {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #a9ffe4;
+  box-shadow: 0 0 12px 3px rgba(79, 224, 182, 0.6);
+  opacity: 0.6;
+  animation: announcement-spark 5.4s ease-in-out infinite;
+}
+
+.announcement-spark.s1 { left: 8%; top: 24%; animation-delay: -.8s; }
+.announcement-spark.s2 { left: 74%; top: 12%; width: 3px; height: 3px; animation-delay: -2.8s; }
+.announcement-spark.s3 { left: 88%; top: 62%; width: 2px; height: 2px; animation-delay: -4.1s; }
+
+@keyframes announcement-spark {
+  0%, 100% { opacity: 0.18; transform: translate3d(0, 0, 0) scale(.85); }
+  45% { opacity: 0.95; transform: translate3d(4px, -9px, 0) scale(1.15); }
+}
+
+.announcement-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.announcement-mark {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  flex: 0 0 58px;
+  border: 1px solid rgba(120, 243, 205, 0.36);
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 42%, rgba(79, 224, 182, 0.26), rgba(3, 13, 13, 0.42) 72%);
+  box-shadow: 0 0 0 6px rgba(79, 224, 182, 0.06), 0 0 30px rgba(79, 224, 182, 0.22);
+  color: var(--primary);
+}
+
+.announcement-mark svg {
+  width: 34px;
+  height: 34px;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 10px var(--glow));
+}
+
+:root[data-theme="light"] .announcement-mark {
+  background: radial-gradient(circle at 50% 42%, rgba(17, 169, 133, 0.2), rgba(255, 255, 255, 0.8) 72%);
+}
+
+.announcement-heading {
+  min-width: 0;
+}
+
+.announcement-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.2em;
+}
+
+.announcement-eyebrow::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 9px var(--primary);
+}
+
+.announcement-title {
+  margin: 5px 0 2px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.announcement-meta {
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.announcement-rule {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 13px;
+}
+
+.announcement-rule::before {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: linear-gradient(90deg, rgba(120, 243, 205, 0.42), rgba(120, 243, 205, 0.04));
+}
+
+.announcement-rule::after {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--gold);
+  box-shadow: 0 0 10px rgba(226, 177, 91, 0.6);
+}
+
+/* 公告正文：保留换行，长文可以滚动 */
+.announcement-body {
+  max-height: min(52vh, 420px);
+  overflow: auto;
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.95;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-right: 2px;
+}
+
+.announcement-sign {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 18px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+}
+
+.announcement-sign b {
+  color: var(--primary);
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.announcement-ack {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  margin-right: auto;
+  padding: 4px 6px 4px 2px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.announcement-ack input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+@media (max-width: 767px) {
+  .announcement-head { gap: 11px; }
+  .announcement-mark { width: 48px; height: 48px; flex-basis: 48px; }
+  .announcement-mark svg { width: 28px; height: 28px; }
+  .announcement-title { font-size: 19px; }
+  .modal-announcement .sheet-foot {
+    justify-content: stretch;
+  }
+  .announcement-ack {
+    flex: 1 0 100%;
+    margin-right: 0;
+  }
 }
 
 /* 相册工具条与页面里的固定条 */
@@ -3932,7 +4357,9 @@ tr.pick td {
   .music-disc svg,
   .music-cover > svg,
   .hero-frame-inner img,
-  .hero-frame.is-tapping {
+  .hero-frame.is-tapping,
+  .auto-roam.is-revealing,
+  .announcement-spark {
     animation: none !important;
   }
 

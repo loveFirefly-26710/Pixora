@@ -30,6 +30,7 @@ import {
   emptyState,
   field,
   pageHead,
+  passwordControl,
   qtip,
   responsiveTable,
   roleBadge,
@@ -287,39 +288,39 @@ function basicCard(detail: UserDetailPayload, reload: () => void): HTMLElement {
 /* ------------------------------------------------------------------ */
 
 function passwordCard(user: DetailUser): HTMLElement {
-  const next = textInput({ type: "password", placeholder: "至少 10 位，含大小写与数字" });
-  const repeat = textInput({ type: "password", placeholder: "再输一次" });
+  const next = passwordControl({ placeholder: "至少 10 位，含大小写与数字" });
+  const repeat = passwordControl({ placeholder: "再输一次" });
   const errorLine = h("div.tip", { style: { color: "var(--danger)" } });
   // 安装账号的密码不给别的管理员重置，理由与改邮箱一样：那是主钥匙
   const operable = canOperateAccount(user.uid);
 
   const reset = h("button.btn", { type: "button", text: "重置密码" });
   if (!operable) {
-    next.readOnly = true;
-    repeat.readOnly = true;
+    next.input.readOnly = true;
+    repeat.input.readOnly = true;
     reset.disabled = true;
     reset.title = "安装时创建的管理员账号，只有它自己能改密码";
   }
   // 访客账号不接受登录（见 core/guest.rs）：给它设密码或发重置邮件都没有意义，
   // 两张卡一起停掉。服务端同样会拒，这里只是不让管理员白点
   if (user.guest) {
-    next.readOnly = true;
-    repeat.readOnly = true;
+    next.input.readOnly = true;
+    repeat.input.readOnly = true;
     reset.disabled = true;
     reset.title = "访客账号是系统账号，不接受登录";
   }
   reset.addEventListener("click", async () => {
     errorLine.textContent = "";
     if (
-      next.value.length < 10 ||
-      !/[a-z]/.test(next.value) ||
-      !/[A-Z]/.test(next.value) ||
-      !/\d/.test(next.value)
+      next.input.value.length < 10 ||
+      !/[a-z]/.test(next.input.value) ||
+      !/[A-Z]/.test(next.input.value) ||
+      !/\d/.test(next.input.value)
     ) {
       errorLine.textContent = "新密码至少 10 位，且需包含大小写字母与数字。";
       return;
     }
-    if (next.value !== repeat.value) {
+    if (next.input.value !== repeat.input.value) {
       errorLine.textContent = "两次输入的新密码不一致。";
       return;
     }
@@ -328,7 +329,7 @@ function passwordCard(user: DetailUser): HTMLElement {
     try {
       const payload = await request<{ mail?: { delivered: boolean; detail?: string | null } }>(
         `/admin/users/${user.id}`,
-        { method: "PATCH", json: { password: next.value } },
+        { method: "PATCH", json: { password: next.input.value } },
       );
       const mail = payload?.mail ?? null;
       // 如实说明邮件出去没有：管理员容易以为「设完他就知道了」，
@@ -343,8 +344,8 @@ function passwordCard(user: DetailUser): HTMLElement {
       } else {
         toastOk("密码已重置");
       }
-      next.value = "";
-      repeat.value = "";
+      next.input.value = "";
+      repeat.input.value = "";
     } catch (err) {
       toastError(err);
     } finally {
@@ -379,8 +380,8 @@ function passwordCard(user: DetailUser): HTMLElement {
 
   return card(
     "密码",
-    h("div.fld", null, h("label.f", { text: "直接设置新密码" }), next),
-    h("div.fld", null, h("label.f", { text: "确认新密码" }), repeat),
+    h("div.fld", null, h("label.f", { text: "直接设置新密码" }), next.node),
+    h("div.fld", null, h("label.f", { text: "确认新密码" }), repeat.node),
     h("div.flexline", null, reset),
     errorLine,
     h("div.tip", {

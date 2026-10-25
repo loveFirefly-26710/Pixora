@@ -181,10 +181,18 @@ pub struct RegisterOutcome {
 pub struct SessionView {
     pub id: i64,
     pub device: Option<String>,
+    /// 用户可改的备注
+    pub label: Option<String>,
     pub ip: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
     pub last_seen_at: chrono::DateTime<Utc>,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+    pub revoked_at: Option<chrono::DateTime<Utc>>,
     pub current: bool,
+    /// 是否是「记住我」签发的长期 cookie
+    pub remember: bool,
+    /// `active` / `saved` / `expired` / `revoked`
+    pub state: &'static str,
 }
 
 /// 二次验证的密钥。
@@ -664,10 +672,16 @@ impl AppState {
     ///
     /// 过期判定用设置里的策略（闲置超时 + 最长寿命）；判到过期就地吊销这一行，
     /// 于是「活跃会话」列表里也就自然没有它了。
+    ///
+    /// `device` 是当前请求的粗粒度设备标签（`Chrome · Windows`）。与签发会话时
+    /// 记下的标签对不上，说明 cookie 被复制到了另一种浏览器/系统上：直接吊销并
+    /// 记一条登录失败。标签只到浏览器大类与平台，浏览器小版本升级不会误伤；
+    /// 取不到 UA（脚本、老客户端）时不做这项判断。
     pub async fn authenticate_session(
         &self,
         session_token: &str,
         ip: Option<&str>,
+        device: Option<&str>,
     ) -> Result<(User, pixora_repo::model::Session)> {
         let hash = crypto_token::token_hash(session_token);
         let Some(session) = self.repo.find_session_by_hash(&hash).await? else {
@@ -675,6 +689,34 @@ impl AppState {
         };
         if !session.is_live() {
             return Err(AppError::Unauthorized);
+        }
+        if let (Some(expected), Some(current)) = (
+            session
+                .device
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            device.map(str::trim).filter(|value| !value.is_empty()),
+        ) {
+            if !expected.eq_ignore_ascii_case(current) {
+                let _ = self
+                    .repo
+                    .revoke_session(session.id, session.user_id, Utc::now())
+                    .await;
+                self.audit_detail(
+                    actions::LOGIN_FAIL,
+                    Some(session.user_id),
+                    format!("session:{}", session.id),
+                    serde_json::json!({
+                        "reason": "session_device_mismatch",
+                        "expected": expected,
+                        "actual": current,
+                    }),
+                    ip,
+                )
+                .await;
+                return Err(AppError::Unauthorized);
+            }
         }
         let policy = self.session_policy().await;
         if session.is_expired(policy, Utc::now()) {
@@ -771,6 +813,11 @@ impl AppState {
     // 会话管理
     // ============================================================
 
+    /// 安全页的会话记录。
+    ///
+    /// 这里返回**全部**记录（含已吊销、已过期），由前端分成三组摆：
+    /// 「当前活动会话」「免登录记录」「登录历史」。以前只返回还能用的行，
+    /// 于是「记住我」签发的旧 cookie 混在活跃会话里，看着像登录历史。
     pub async fn list_sessions(
         &self,
         user_id: i64,
@@ -778,40 +825,77 @@ impl AppState {
     ) -> Result<Vec<SessionView>> {
         let policy = self.session_policy().await;
         let now = Utc::now();
-        // 过期的会话先吊销掉，再把剩下的列出来。
-        // 「活跃会话」只该有真正还能用的那些：长期未活动、或者「记住我」已到期的
-        // 行还挂在列表里，用户会以为自己没退出过。
-        let idle_before = if policy.idle_minutes > 0 {
-            Some(now - chrono::Duration::minutes(policy.idle_minutes))
-        } else {
-            None
-        };
-        let created_before = if policy.absolute_days > 0 {
-            Some(now - chrono::Duration::days(policy.absolute_days))
-        } else {
-            None
-        };
+        let idle_before = idle_cutoff(policy, now);
+        let created_before = absolute_cutoff(policy, now);
+        // 过期的行先吊销：留一条「什么时候掉线的」线索，同时让状态判断稳定。
         if let Err(err) = self
             .repo
             .revoke_expired_sessions(user_id, now, idle_before, created_before)
             .await
         {
-            tracing::warn!(error = %err, "吊销过期会话失败，列表仍按策略过滤");
+            tracing::warn!(error = %err, "吊销过期会话失败，列表仍按策略计算状态");
         }
 
-        let sessions = self.repo.list_sessions(user_id).await?;
+        let sessions = self.repo.list_all_sessions(user_id, 200).await?;
         Ok(sessions
             .into_iter()
-            .filter(|session| !session.is_expired(policy, now))
-            .map(|session| SessionView {
-                current: session.id == current_session_id,
-                device: session.device.clone(),
-                ip: session.ip.clone(),
-                created_at: session.created_at,
-                last_seen_at: session.last_seen_at,
-                id: session.id,
+            .map(|session| {
+                let current = session.id == current_session_id;
+                SessionView {
+                    current,
+                    remember: session.expires_at.is_some(),
+                    state: session.state(policy, now, current),
+                    device: session.device.clone(),
+                    label: session.label.clone(),
+                    ip: session.ip.clone(),
+                    created_at: session.created_at,
+                    last_seen_at: session.last_seen_at,
+                    expires_at: session.expires_at,
+                    revoked_at: session.revoked_at,
+                    id: session.id,
+                }
             })
             .collect())
+    }
+
+    /// 改一条会话记录的备注（用户自己的命名）。
+    pub async fn rename_session_label(
+        &self,
+        user_id: i64,
+        session_id: i64,
+        label: Option<&str>,
+    ) -> Result<u64> {
+        let label = label
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(60).collect::<String>());
+        Ok(self
+            .repo
+            .rename_session(session_id, user_id, label.as_deref())
+            .await?)
+    }
+
+    /// 删除一条会话记录（彻底删行，不只是吊销）。
+    pub async fn delete_session_record(&self, user_id: i64, session_id: i64) -> Result<u64> {
+        Ok(self
+            .repo
+            .delete_session(session_id, Some(user_id))
+            .await?)
+    }
+
+    /// 清空自己的登录历史（已吊销/已过期的记录）。
+    pub async fn clear_session_history(&self, user_id: i64) -> Result<u64> {
+        let policy = self.session_policy().await;
+        let now = Utc::now();
+        Ok(self
+            .repo
+            .delete_session_history(
+                Some(user_id),
+                now,
+                idle_cutoff(policy, now),
+                absolute_cutoff(policy, now),
+            )
+            .await?)
     }
 
     pub async fn revoke_session(
@@ -1964,6 +2048,24 @@ pub fn normalize_recovery_code(code: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .collect::<String>()
         .to_lowercase()
+}
+
+/// 「闲置超过多久算掉线」的分界点。策略填 0 表示不限。
+fn idle_cutoff(
+    policy: pixora_repo::model::SessionPolicy,
+    now: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
+    (policy.idle_minutes > 0)
+        .then(|| now - chrono::Duration::minutes(policy.idle_minutes))
+}
+
+/// 「单次登录最长多久」的分界点。策略填 0 表示不限。
+fn absolute_cutoff(
+    policy: pixora_repo::model::SessionPolicy,
+    now: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
+    (policy.absolute_days > 0)
+        .then(|| now - chrono::Duration::days(policy.absolute_days))
 }
 
 #[cfg(test)]
