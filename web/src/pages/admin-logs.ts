@@ -84,7 +84,7 @@ const FILTERS: Array<{ value: string; label: string }> = [
 
 
 export async function render(ctx: PageContext): Promise<void> {
-  const pad = h("div.pad");
+  const pad = h("div.pad.admin-logs-page");
   ctx.outlet.append(pad);
 
   pad.append(

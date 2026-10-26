@@ -223,6 +223,12 @@ body {
   opacity: 1;
 }
 
+/* 首图在挂外壳前就已解码：不能让它再走 1.15s 淡入，否则首屏仍是一段空背景。
+   首帧画完后由 background.ts 移除 .initial，后续轮播恢复交叉淡入。 */
+.site-bg.initial img {
+  transition: none;
+}
+
 body.has-site-bg .card {
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);

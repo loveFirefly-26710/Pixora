@@ -60,7 +60,7 @@ const STATE_TONE: Record<AdminSessionRow["state"], "ok" | "info" | "warn" | "mut
 };
 
 export async function render(ctx: PageContext): Promise<void> {
-  const pad = h("div.pad");
+  const pad = h("div.pad.admin-sessions-page");
   ctx.outlet.append(pad);
   pad.append(
     pageHead(
