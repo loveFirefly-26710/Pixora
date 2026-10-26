@@ -47,6 +47,14 @@ export interface SiteInfo {
   thumb_server_fallback: boolean;
   appeal_email: string | null;
   background: string | null;
+  /** 多图背景的公开地址；有它时优先于 background */
+  backgrounds?: string[];
+  background_opacity?: number;
+  background_blur?: number;
+  background_mode?: "single" | "slideshow" | "random";
+  background_interval?: number;
+  /** 维护模式：开启后非管理员只读 */
+  maintenance?: { enabled: boolean; message: string };
   /** 站点默认头像：账号自己没设头像时用它，没配过是 null */
   default_avatar?: string | null;
   /** 支持的登录方式：登录页、注册页与账号安全页都读它 */
@@ -462,6 +470,8 @@ export interface QuotaAdmin {
 
 export interface RateLimitAdmin {
   global: PolicyFields;
+  /** 是否把全局策略数值同时作为全站聚合上限 */
+  global_enabled?: boolean;
   /** 游客的下载限额（游客没有账号，这两格是站点设置） */
   download_policy: {
     anon_per_minute: number;
@@ -585,6 +595,9 @@ export interface AdminSettings {
     /** 管理员命名的相册集合，随机图 API 可用 collection=名字 取 */
     plaza_collections?: Record<string, number[]>;
     recycle_retention_days: number;
+    /** 维护模式：非管理员只读 */
+    maintenance_enabled?: boolean;
+    maintenance_message?: string;
   };
   upload: {
     max_file_bytes: number;
@@ -642,7 +655,15 @@ export interface AdminSettings {
     third_party_check: boolean;
     third_party_set: boolean;
   };
-  appearance: { background: string | null; default_avatar: string | null };
+  appearance: {
+    background: string | null;
+    backgrounds?: string[];
+    background_opacity?: number;
+    background_blur?: number;
+    background_mode?: "single" | "slideshow" | "random";
+    background_interval?: number;
+    default_avatar: string | null;
+  };
   /** 管理后台挑「首页展示相册」用的公开相册清单 */
   plaza_albums?: Array<{
     id: number;

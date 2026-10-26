@@ -32,8 +32,9 @@ use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, FromRequestParts, OptionalFromRequestParts, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, Method};
-use axum::response::Response;
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use pixora_core::audit::actions;
 use pixora_core::images::Viewer;
 use pixora_core::{AppError, AppState};
@@ -110,6 +111,63 @@ pub async fn enforce_ip(
         return crate::http::error_response(err);
     }
     next.run(request).await
+}
+
+/// 维护模式：开启后非管理员只能读，写接口统一 503；管理员不受影响。
+///
+/// 放行登录/登出与安装、以及 `/admin/*`：管理员得能登录把维护关掉；
+/// 其它写接口再额外认一次管理员身份，管理员仍可上传、改资料。
+pub async fn maintenance_guard(
+    State(state): State<Arc<AppState>>,
+    peer: PeerAddr,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let maintenance = match state.settings.maintenance().await {
+        Ok(value) => value,
+        Err(_) => return next.run(request).await,
+    };
+    if !maintenance.enabled {
+        return next.run(request).await;
+    }
+    let method = request.method().clone();
+    if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(request).await;
+    }
+    let path = request.uri().path();
+    // 登录/找回密码/OAuth 回调放行：管理员可能只绑定了第三方登录，维护时
+    // 也得能进来关闭维护。注册仍然挡住（维护期间不接新账号）。
+    let auth_allowed =
+        path.starts_with("/api/v1/auth/") && !path.starts_with("/api/v1/auth/register");
+    let path_allowed = auth_allowed
+        || path.starts_with("/api/v1/admin/")
+        || path.starts_with("/api/v1/install/")
+        // 公告已读是维护公告的确认动作，不是内容修改，维护期间也要能记
+        || path.starts_with("/api/v1/announcements/");
+    if path_allowed {
+        return next.run(request).await;
+    }
+    let rectx = crate::http::request_context(&state, request.headers(), peer.addr()).await;
+    let is_admin = matches!(
+        authenticate(&state, request.headers(), rectx.ip.as_deref()).await,
+        Ok(auth) if auth.user.is_admin()
+    );
+    if is_admin {
+        return next.run(request).await;
+    }
+    let message = if maintenance.message.trim().is_empty() {
+        "站点正在维护，暂时只能浏览公开图片。"
+    } else {
+        maintenance.message.as_str()
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "data": null,
+            "error": { "code": "MAINTENANCE", "message": message }
+        })),
+    )
+        .into_response()
 }
 
 // ============================================================

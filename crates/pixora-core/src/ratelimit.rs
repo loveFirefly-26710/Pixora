@@ -42,6 +42,8 @@ pub mod scope {
     pub const USER: &str = "user";
     pub const IP: &str = "ip";
     pub const TOKEN: &str = "token";
+    /// 全站聚合额度：防止每个用户都没跑满、但加起来把系统总配额吃穿
+    pub const GLOBAL: &str = "global";
 }
 
 /// 一个令牌桶。
@@ -95,16 +97,25 @@ pub struct DownloadLimits {
 
 pub struct RateLimits {
     repo: Repo,
+    settings: crate::settings::Settings,
     /// key → 桶。键形如 `api:42`。
     buckets: Mutex<HashMap<String, Bucket>>,
 }
 
 impl RateLimits {
-    pub fn new(repo: Repo) -> Self {
+    pub fn new(repo: Repo, settings: crate::settings::Settings) -> Self {
         Self {
             repo,
+            settings,
             buckets: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn global_enabled(&self) -> bool {
+        self.settings
+            .bool(crate::settings::keys::RATELIMIT_GLOBAL_ENABLED, false)
+            .await
+            .unwrap_or(false)
     }
 
     /// API 调用的准入检查。读接口有单独的额度，因为成本差得远。
@@ -152,6 +163,9 @@ impl RateLimits {
     }
 
     /// 上传张数与流量的准入检查。按窗口查库计数。
+    ///
+    /// 先查用户自己的额度，再查全站聚合额度。管理员豁免；用户级「不限」只
+    /// 跳过自己的那张表，不跳过全站总闸。
     pub async fn check_upload<'a>(
         &self,
         user: &User,
@@ -159,53 +173,95 @@ impl RateLimits {
         count: i64,
         bytes: i64,
     ) -> Result<()> {
-        if policy.unlimited || user.is_admin() {
+        if user.is_admin() {
             return Ok(());
         }
-        let now = Utc::now();
+        if !policy.unlimited {
+            self.check_upload_windows(scope::USER, &user.id.to_string(), policy, count, bytes, "")
+                .await?;
+        }
+        if !self.global_enabled().await {
+            return Ok(());
+        }
+        let global = self.repo.global_policy().await?;
+        if !global.unlimited {
+            self.check_upload_windows(scope::GLOBAL, "all", &global, count, bytes, "全站")
+                .await?;
+        }
+        Ok(())
+    }
 
+    async fn check_upload_windows(
+        &self,
+        scope_name: &str,
+        subject: &str,
+        policy: &RateLimitPolicy,
+        count: i64,
+        bytes: i64,
+        label: &str,
+    ) -> Result<()> {
+        let now = Utc::now();
         if policy.upload_per_minute > 0 {
             let used = self
-                .read(kind::UPLOAD_MINUTE, user.id, minute_window(now))
+                .read_scope(
+                    scope_name,
+                    subject,
+                    kind::UPLOAD_MINUTE,
+                    minute_window(now),
+                )
                 .await?;
             if used + count > policy.upload_per_minute {
                 return Err(AppError::RateLimited {
                     retry_after: seconds_to_next_minute(now),
-                    detail: format!("上传张数超出额度（{} 张/分钟）", policy.upload_per_minute),
+                    detail: format!(
+                        "{label}上传张数超出额度（{} 张/分钟）",
+                        policy.upload_per_minute
+                    ),
                 });
             }
         }
         if policy.upload_per_hour > 0 {
             let used = self
-                .read(kind::UPLOAD_HOUR, user.id, hour_window(now))
+                .read_scope(scope_name, subject, kind::UPLOAD_HOUR, hour_window(now))
                 .await?;
             if used + count > policy.upload_per_hour {
                 return Err(AppError::RateLimited {
                     retry_after: seconds_to_next_hour(now),
-                    detail: format!("上传张数超出额度（{} 张/小时）", policy.upload_per_hour),
+                    detail: format!(
+                        "{label}上传张数超出额度（{} 张/小时）",
+                        policy.upload_per_hour
+                    ),
                 });
             }
         }
         if policy.upload_per_day > 0 {
             let used = self
-                .read(kind::UPLOAD_DAY, user.id, day_window(now))
+                .read_scope(scope_name, subject, kind::UPLOAD_DAY, day_window(now))
                 .await?;
             if used + count > policy.upload_per_day {
                 return Err(AppError::RateLimited {
                     retry_after: seconds_to_next_day(now),
-                    detail: format!("上传张数超出额度（{} 张/天）", policy.upload_per_day),
+                    detail: format!(
+                        "{label}上传张数超出额度（{} 张/天）",
+                        policy.upload_per_day
+                    ),
                 });
             }
         }
         if policy.upload_bytes_per_day > 0 {
             let used = self
-                .read_bytes(kind::UPLOAD_BYTES_DAY, user.id, day_window(now))
+                .read_bytes_scope(
+                    scope_name,
+                    subject,
+                    kind::UPLOAD_BYTES_DAY,
+                    day_window(now),
+                )
                 .await?;
             if used + bytes > policy.upload_bytes_per_day {
                 return Err(AppError::RateLimited {
                     retry_after: seconds_to_next_day(now),
                     detail: format!(
-                        "上传流量超出额度（{} 每天）",
+                        "{label}上传流量超出额度（{} 每天）",
                         human_bytes(policy.upload_bytes_per_day)
                     ),
                 });
@@ -215,18 +271,44 @@ impl RateLimits {
     }
 
     /// 记一次上传消耗。**只对真正落盘的文件调用**——去重跳过的不该占额度。
+    /// 用户额度与全站聚合额度一起记。
     pub async fn record_upload(&self, user_id: i64, count: i64, bytes: i64) -> Result<()> {
         let now = Utc::now();
+        let count_global = self.global_enabled().await;
         for (kind_name, window) in [
             (kind::UPLOAD_MINUTE, minute_window(now)),
             (kind::UPLOAD_HOUR, hour_window(now)),
             (kind::UPLOAD_DAY, day_window(now)),
         ] {
-            self.bump(kind_name, user_id, window, count, 0).await?;
+            self.bump_scope(
+                scope::USER,
+                &user_id.to_string(),
+                kind_name,
+                window.clone(),
+                count,
+                0,
+            )
+            .await?;
+            if count_global {
+                self.bump_scope(scope::GLOBAL, "all", kind_name, window, count, 0)
+                    .await?;
+            }
         }
         if bytes > 0 {
-            self.bump(kind::UPLOAD_BYTES_DAY, user_id, day_window(now), 0, bytes)
-                .await?;
+            let window = day_window(now);
+            self.bump_scope(
+                scope::USER,
+                &user_id.to_string(),
+                kind::UPLOAD_BYTES_DAY,
+                window.clone(),
+                0,
+                bytes,
+            )
+            .await?;
+            if count_global {
+                self.bump_scope(scope::GLOBAL, "all", kind::UPLOAD_BYTES_DAY, window, 0, bytes)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -246,14 +328,66 @@ impl RateLimits {
         Ok(())
     }
 
+    /// 全站 API 总闸。用户自己的额度照旧查，这里再限制所有用户加起来的
+    /// 每分钟调用量；分钟桶在进程内，和用户级同一套机制。
+    async fn check_api_global(&self, policy: &RateLimitPolicy, is_read: bool) -> Result<()> {
+        if policy.unlimited || !self.global_enabled().await {
+            return Ok(());
+        }
+        let (per_minute, suffix) = if is_read {
+            (policy.api_read_per_minute, "read")
+        } else {
+            (policy.api_per_minute, "write")
+        };
+        if per_minute <= 0 {
+            return Ok(());
+        }
+        let wait = self.take_bucket(&format!("api:global:{suffix}"), per_minute as f64, 1.0);
+        if wait > 0 {
+            return Err(AppError::RateLimited {
+                retry_after: wait,
+                detail: format!("全站 API 调用超出额度（{per_minute} 次/分钟）"),
+            });
+        }
+        Ok(())
+    }
+
+    /// 小时级 API 总闸。分钟桶挡瞬时，小时桶挡「一分钟没超但一天到晚都在刷」。
+    fn check_api_hour(&self, key: &str, per_hour: i64) -> Result<()> {
+        if per_hour <= 0 {
+            return Ok(());
+        }
+        let wait = self.take_bucket(key, per_hour as f64, 1.0);
+        if wait > 0 {
+            return Err(AppError::RateLimited {
+                retry_after: wait,
+                detail: format!("API 调用超出额度（{per_hour} 次/小时）"),
+            });
+        }
+        Ok(())
+    }
+
     /// 鉴权通过后的 API 限流。
     ///
     /// 准入在进程内令牌桶里做（每个请求都要过，不能查库）；计数落库只为
     /// 管理页展示，浏览器翻页产生的读请求不记，免得把每次看图都变成两次写。
     /// Token 客户端与写操作仍然记账，管理员能看出脚本用了多少。
     pub async fn enforce_api(&self, user: &User, is_read: bool, record: bool) -> Result<()> {
+        if user.is_admin() {
+            return Ok(());
+        }
         let policy = self.repo.effective_policy(user).await?;
-        self.check_api(user, &policy, is_read)?;
+        if !policy.unlimited {
+            self.check_api(user, &policy, is_read)?;
+            self.check_api_hour(&format!("api:hour:{}", user.id), policy.api_per_hour)?;
+        }
+        if self.global_enabled().await {
+            let global = self.repo.global_policy().await?;
+            if !global.unlimited {
+                self.check_api_global(&global, is_read).await?;
+                self.check_api_hour("api:hour:global", global.api_per_hour)?;
+            }
+        }
         if record {
             if let Err(err) = self.record_api(user.id, is_read).await {
                 tracing::debug!(error = %err, user_id = user.id, "API 用量计数写入失败");
@@ -279,25 +413,32 @@ impl RateLimits {
     }
 
     async fn read(&self, kind_name: &str, user_id: i64, window: String) -> Result<i64> {
+        self.read_scope(scope::USER, &user_id.to_string(), kind_name, window)
+            .await
+    }
+
+    async fn read_scope(
+        &self,
+        scope_name: &str,
+        subject: &str,
+        kind_name: &str,
+        window: String,
+    ) -> Result<i64> {
         self.repo
-            .read_counter(
-                scope::USER,
-                &user_id.to_string(),
-                kind_name,
-                parse_window(&window)?,
-            )
+            .read_counter(scope_name, subject, kind_name, parse_window(&window)?)
             .await
             .map_err(AppError::from)
     }
 
-    async fn read_bytes(&self, kind_name: &str, user_id: i64, window: String) -> Result<i64> {
+    async fn read_bytes_scope(
+        &self,
+        scope_name: &str,
+        subject: &str,
+        kind_name: &str,
+        window: String,
+    ) -> Result<i64> {
         self.repo
-            .read_counter_bytes(
-                scope::USER,
-                &user_id.to_string(),
-                kind_name,
-                parse_window(&window)?,
-            )
+            .read_counter_bytes(scope_name, subject, kind_name, parse_window(&window)?)
             .await
             .map_err(AppError::from)
     }
@@ -310,10 +451,30 @@ impl RateLimits {
         count: i64,
         bytes: i64,
     ) -> Result<()> {
+        self.bump_scope(
+            scope::USER,
+            &user_id.to_string(),
+            kind_name,
+            window,
+            count,
+            bytes,
+        )
+        .await
+    }
+
+    async fn bump_scope(
+        &self,
+        scope_name: &str,
+        subject: &str,
+        kind_name: &str,
+        window: String,
+        count: i64,
+        bytes: i64,
+    ) -> Result<()> {
         self.repo
             .bump_counter(
-                scope::USER,
-                &user_id.to_string(),
+                scope_name,
+                subject,
                 kind_name,
                 parse_window(&window)?,
                 count,
@@ -338,6 +499,7 @@ impl RateLimits {
         &self,
         actor: &DownloadActor,
         limits: DownloadLimits,
+        admin: bool,
     ) -> Result<()> {
         let now = Utc::now();
         if limits.per_minute > 0 {
@@ -365,22 +527,70 @@ impl RateLimits {
                 });
             }
         }
+        if !admin && self.global_enabled().await {
+            let global = self.repo.global_policy().await?;
+            if !global.unlimited {
+                if global.download_per_minute > 0 {
+                    let wait =
+                        self.take_bucket("download:global", global.download_per_minute as f64, 1.0);
+                    if wait > 0 {
+                        return Err(AppError::RateLimited {
+                            retry_after: wait,
+                            detail: format!(
+                                "全站下载过于频繁（{} 次/分钟）",
+                                global.download_per_minute
+                            ),
+                        });
+                    }
+                }
+                if global.download_per_day > 0 {
+                    let used = self
+                        .read_count(
+                            scope::GLOBAL,
+                            "all",
+                            kind::DOWNLOAD_DAY,
+                            day_window(now),
+                        )
+                        .await?;
+                    if used + 1 > global.download_per_day {
+                        return Err(AppError::RateLimited {
+                            retry_after: seconds_to_next_day(now),
+                            detail: format!(
+                                "全站今天的下载次数已用完（{} 次/天）",
+                                global.download_per_day
+                            ),
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
     /// 记一次下载。放在真的把文件发出去之前——限的是「被取走多少」，
-    /// 而不是「被请求多少」。
-    pub async fn record_download(&self, actor: &DownloadActor) -> Result<()> {
-        self.repo
-            .bump_counter(
-                actor.scope(),
-                &actor.subject(),
+    /// 而不是「被请求多少」。管理员不计入全站总量。
+    pub async fn record_download(&self, actor: &DownloadActor, admin: bool) -> Result<()> {
+        let window = day_window(Utc::now());
+        self.bump_scope(
+            actor.scope(),
+            &actor.subject(),
+            kind::DOWNLOAD_DAY,
+            window.clone(),
+            1,
+            0,
+        )
+        .await?;
+        if !admin && self.global_enabled().await {
+            self.bump_scope(
+                scope::GLOBAL,
+                "all",
                 kind::DOWNLOAD_DAY,
-                parse_window(&day_window(Utc::now()))?,
+                window,
                 1,
                 0,
             )
             .await?;
+        }
         Ok(())
     }
 
@@ -542,7 +752,9 @@ mod tests {
         let db = pixora_repo::Db::connect(pixora_repo::DbDriver::Sqlite, &dsn, 1)
             .await
             .expect("临时库");
-        RateLimits::new(Repo::new(std::sync::Arc::new(db)))
+        let repo = Repo::new(std::sync::Arc::new(db));
+        let settings = crate::settings::Settings::new(repo.clone(), None);
+        RateLimits::new(repo, settings)
     }
 
     #[test]

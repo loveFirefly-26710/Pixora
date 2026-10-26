@@ -91,8 +91,33 @@ pub async fn site(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
-    let announcement_version = site.announcement.version();
-    let announcement_active = site.announcement.is_active(chrono::Utc::now());
+    // 维护模式期间由公告向全体用户公示：不再看管理员原先配的公告，
+    // 统一弹「维护模式（只读）」；公告版本跟着维护文案走。
+    let (announcement_title, announcement_body, announcement_version, announcement_active, announcement_starts, announcement_ends) =
+        if site.maintenance.enabled {
+            let message = if site.maintenance.message.trim().is_empty() {
+                "站点正在维护，暂时只能浏览公开图片。"
+            } else {
+                site.maintenance.message.trim()
+            };
+            let title = "维护模式".to_string();
+            let body = format!("{message}\n\n当前站点处于维护模式（只读），除管理员外不可修改内容。");
+            let raw = format!("{title}\n{body}");
+            let version: String = pixora_crypto::hash::sha256_hex(raw.as_bytes())
+                .chars()
+                .take(16)
+                .collect();
+            (title, body, version, true, None, None)
+        } else {
+            (
+                site.announcement.title.clone(),
+                site.announcement.body.clone(),
+                site.announcement.version(),
+                site.announcement.is_active(chrono::Utc::now()),
+                site.announcement.starts_at.clone(),
+                site.announcement.ends_at.clone(),
+            )
+        };
     let announcement_read = match auth.as_ref() {
         Some(authenticated) => state
             .announcement_read(authenticated.user.id, &announcement_version)
@@ -134,11 +159,11 @@ pub async fn site(
         "announcement": {
             // 定时窗口未到/已过时这里就是 false，前端不需要自己比较时间
             "enabled": announcement_active,
-            "title": site.announcement.title,
-            "body": site.announcement.body,
+            "title": announcement_title,
+            "body": announcement_body,
             "version": announcement_version,
-            "starts_at": site.announcement.starts_at,
-            "ends_at": site.announcement.ends_at,
+            "starts_at": announcement_starts,
+            "ends_at": announcement_ends,
             // 登录用户的服务端已读状态：换设备/清缓存也不会重复弹
             "read": announcement_read,
         },
@@ -154,6 +179,16 @@ pub async fn site(
         "thumb_server_fallback": upload.thumb_server_fallback,
         "appeal_email": mail.appeal_email,
         "background": background,
+        // 多图背景与展示参数；旧前端只读 background，新前端优先读 backgrounds
+        "backgrounds": site.background_urls,
+        "background_opacity": site.background_opacity,
+        "background_blur": site.background_blur,
+        "background_mode": site.background_mode,
+        "background_interval": site.background_interval,
+        "maintenance": {
+            "enabled": site.maintenance.enabled,
+            "message": site.maintenance.message,
+        },
         // 站点默认头像：账号自己没设头像时前端回落到它，再没有就回落到内置翼标
         "default_avatar": default_avatar,
         // 本站支持哪些登录方式：登录页/注册页照着它渲染按钮，
@@ -397,6 +432,30 @@ pub async fn site_background(State(state): State<Arc<AppState>>, headers: Header
         "背景图",
     )
     .await
+}
+
+/// `GET /api/v1/site/background/{asset}` — 公开。多图背景里的某一张。
+///
+/// `asset` 只允许字母数字、`-`、`_`：这是数据键名的一部分，不能让它拼出
+/// 别的 `storage_objects` 键。
+pub async fn site_background_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(asset): Path<String>,
+) -> Response {
+    if asset.is_empty()
+        || asset.len() > 80
+        || !asset
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return crate::http::error_response(AppError::NotFound("背景图不存在".into()));
+    }
+    let key = format!(
+        "{}{asset}",
+        pixora_core::settings::keys::BACKGROUND_ASSET_PREFIX
+    );
+    serve_site_asset(&state, &headers, &key, "背景图").await
 }
 
 /// `GET /api/v1/terms` — 公开（带会话时多回「我同意了没」）。

@@ -21,6 +21,7 @@ import { confirmDialog } from "../core/modal";
 import type { PageContext } from "../core/router";
 import { loadMe, updateUser } from "../core/state";
 import { avatarUrl, navGroups, navHref, refreshNav } from "../ui/shell";
+import { openAvatarCrop } from "../ui/avatar-crop";
 import { toastError, toastOk } from "../core/toast";
 import type { UserLimits, UserProfile } from "../core/types";
 import {
@@ -242,7 +243,8 @@ async function uploadAvatar(file: File, button: HTMLButtonElement, reload: () =>
   button.disabled = true;
   button.textContent = "处理中…";
   try {
-    const blob = await downscaleToSquare(file, 256);
+    const blob = await openAvatarCrop(file, 512);
+    if (!blob) return;
     const form = new FormData();
     form.append("file", blob, "avatar.jpg");
     // 不指定相册 = 落到用户的默认相册；标签固定成 avatar
@@ -271,37 +273,6 @@ async function uploadAvatar(file: File, button: HTMLButtonElement, reload: () =>
     button.disabled = false;
     button.textContent = "上传图片";
   }
-}
-
-/** 本机裁剪成正方形并缩到 `size` 像素：头像是圆的，长方形留着也是被裁掉。 */
-async function downscaleToSquare(file: File, size: number): Promise<Blob> {
-  const bitmap: ImageBitmap | HTMLImageElement =
-    typeof createImageBitmap === "function"
-      ? await createImageBitmap(file)
-      : await new Promise<HTMLImageElement>((resolve, reject) => {
-          const image = new Image();
-          const url = URL.createObjectURL(file);
-          image.onload = () => resolve(image);
-          image.onerror = () => reject(new Error("图片无法读取，请更换后重试"));
-          image.src = url;
-        });
-
-  const width = bitmap instanceof HTMLImageElement ? bitmap.naturalWidth : bitmap.width;
-  const height = bitmap instanceof HTMLImageElement ? bitmap.naturalHeight : bitmap.height;
-  if (width <= 0 || height <= 0) throw new Error("图片无法读取，请更换后重试");
-
-  const side = Math.min(width, height);
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("浏览器不支持本地压缩，请改用图片地址");
-  context.drawImage(bitmap, (width - side) / 2, (height - side) / 2, side, side, 0, 0, size, size);
-  if (bitmap instanceof ImageBitmap) bitmap.close();
-
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
-  if (!blob) throw new Error("压缩失败，请改用图片地址");
-  return blob;
 }
 
 /** 身份卡：邮箱 / UID / 角色 / 状态 / 注册与最近登录时间。 */

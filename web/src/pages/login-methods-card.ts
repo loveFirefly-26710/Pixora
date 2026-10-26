@@ -40,7 +40,6 @@ interface OAuthEndpointHealth {
 }
 
 interface OAuthHealth {
-  proxy_configured: boolean;
   google: OAuthEndpointHealth;
   github: OAuthEndpointHealth;
 }
@@ -119,12 +118,11 @@ export async function loginMethodsCard(): Promise<HTMLElement> {
           }),
         );
       status.replaceChildren(
-        h("div", { text: `代理配置：${result.proxy_configured ? "已配置 PIXORA_HTTP_PROXY" : "未显式配置（走系统环境）"}` }),
         line("Google", result.google),
         line("GitHub", result.github),
         h("div", {
           style: { marginTop: "6px", color: "var(--muted)" },
-          text: "只要收到 HTTP 响应就算网络可达；401/405 也正常。全部不可达时先检查服务器出网或代理。",
+          text: "只要收到 HTTP 响应就算网络可达，401/405 也正常。这里测的是服务器能否出网；项目不提供代理服务，用户设备的代理只影响浏览器打开授权页。",
         }),
       );
     } catch (err) {

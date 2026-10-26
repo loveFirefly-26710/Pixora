@@ -42,6 +42,7 @@ import { render as recyclePage } from "./pages/recycle";
 import { render as adminUsersPage } from "./pages/admin-users";
 import { render as adminUserDetailPage } from "./pages/admin-user-detail";
 import { render as adminStoragePage } from "./pages/admin-storage";
+import { render as adminStoragePolicyPage } from "./pages/admin-storage-policy";
 import { render as adminQuotaPage } from "./pages/admin-quota";
 import { render as adminIpPage } from "./pages/admin-ip";
 import { render as adminLogsPage } from "./pages/admin-logs";
@@ -83,10 +84,10 @@ function registerRoutes(): void {
   route("/admin/users", adminUsersPage, { auth: true, admin: true });
   route("/admin/users/:id", adminUserDetailPage, { auth: true, admin: true });
   route("/admin/storage", adminStoragePage, { auth: true, admin: true });
+  route("/admin/storage-policy", adminStoragePolicyPage, { auth: true, admin: true });
   route("/admin/quota", adminQuotaPage, { auth: true, admin: true });
-  // 频率限制已经并进系统设置，导航里也没有这一项了；老收藏与旧链接
-  // 直接送过去，别让人撞上「页面不存在」
-  route("/admin/ratelimit", () => navigate("/admin/settings", { replace: true }), {
+  // 频率限制已经并进「存储策略」；老收藏与旧链接直接送过去
+  route("/admin/ratelimit", () => navigate("/admin/storage-policy", { replace: true }), {
     auth: true,
     admin: true,
   });
