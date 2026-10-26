@@ -295,7 +295,7 @@ expect "主路径 /admin/ratelimit" '"ok":true' "$out"
 out=$(req GET /admin/ratelimit)
 expect "全局值已更新" '"api_per_minute":160' "$out"
 
-say "单批次最大张数：批量预检按它卡条数"
+say "单批次最大张数：预检不拦，上传接口按实际批次拦"
 # 内容随便，预检只校验形状（64 位十六进制）
 hashes() {
   python -c "print(','.join('\"%064x\"' % i for i in range($1)))"
@@ -304,10 +304,17 @@ hashes() {
 # 跑完再放回 3，后面的用例看到的仍是原来那份设置
 out=$(req PUT /admin/settings '{"upload":{"max_batch_size":5,"queue_depth":1000}}')
 expect "单批上限调到 5" '"ok":true' "$out"
+# 预检只回答「内容在不在」，不承担队列准入：客户端一次选多少张都不该在这里被拒
 out=$(req POST /blobs/exists "{\"hashes\":[$(hashes 6)]}")
-expect "6 个哈希超过单批上限 5，被拒" '单批次上限 5 张' "$out"
+expect "6 个哈希预检照常返回" '"missing"' "$out"
 out=$(req POST /blobs/exists "{\"hashes\":[$(hashes 4)]}")
-expect "4 个哈希在限额内放行" '"missing"' "$out"
+expect "4 个哈希预检照常返回" '"missing"' "$out"
+# 直接一次传 6 张时，上传接口仍按生效的单批上限拒绝（前端是逐张上传，不会走到这里）
+python "$ROOT/scripts/make-test-png.py" "$DIR/batch.png" 24
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload/batch" -H "X-CSRF-Token: $(csrf)" \
+  -F "file=@$DIR/batch.png" -F "file=@$DIR/batch.png" -F "file=@$DIR/batch.png" \
+  -F "file=@$DIR/batch.png" -F "file=@$DIR/batch.png" -F "file=@$DIR/batch.png")
+expect "一次上传 6 张被拒" '单批最多 5 张图片' "$out"
 out=$(req PUT /admin/settings '{"upload":{"max_batch_size":1000,"queue_depth":3}}')
 expect "单批上限改回 1000" '"ok":true' "$out"
 
@@ -532,7 +539,7 @@ expect "切回管理员" 'admin@pixora.test' "$out"
 out=$(req GET /admin/users)
 expect "切回后管理接口可用" '"email"' "$out"
 
-say "单批次最大张数：按用户覆盖收紧"
+say "单批次最大张数：按用户覆盖收紧（上传接口）"
 USER_UID=$(req GET "/admin/users?per_page=50" | python -c "
 import json,sys
 items = json.load(sys.stdin)['data']
@@ -543,7 +550,10 @@ expect "给这个用户把单批上限压到 2" '"ok":true' "$out"
 out=$(req POST "/admin/users/$USER_ID/impersonate" '{}')
 expect "再次切换到该用户" 'user@pixora.test' "$out"
 out=$(req POST /blobs/exists "{\"hashes\":[$(hashes 3)]}")
-expect "他按覆盖值被挡住（3 > 2）" '单批次上限 2 张' "$out"
+expect "他的 3 个哈希预检照常返回" '"missing"' "$out"
+out=$(curl -s -b "$JAR" -c "$JAR" -X POST "$BASE/upload/batch" -H "X-CSRF-Token: $(csrf)" \
+  -F "file=@$DIR/up.png" -F "file=@$DIR/up.png" -F "file=@$DIR/up.png")
+expect "他一次传 3 张被覆盖值挡住（3 > 2）" '单批最多 2 张图片' "$out"
 out=$(req POST /blobs/exists "{\"hashes\":[$(hashes 2)]}")
 expect "2 个哈希在他这里放行" '"missing"' "$out"
 out=$(req POST /admin/impersonate/stop '{}')
