@@ -141,8 +141,6 @@ pub struct OAuthEndpointHealth {
 /// OAuth 出网自检结果。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OAuthHealth {
-    /// 是否显式配置了 `PIXORA_HTTP_PROXY`
-    pub proxy_configured: bool,
     pub google: OAuthEndpointHealth,
     pub github: OAuthEndpointHealth,
 }
@@ -305,19 +303,11 @@ impl AppState {
 
     /// OAuth 出网自检：只探测固定端点，不接受管理员传 URL，避免变成 SSRF 探针。
     pub async fn oauth_health(&self) -> OAuthHealth {
-        let proxy_configured = std::env::var("PIXORA_HTTP_PROXY")
-            .ok()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
         let (google, github) = tokio::join!(
             self.probe_oauth_endpoint("https://oauth2.googleapis.com/token"),
             self.probe_oauth_endpoint("https://github.com/login/oauth/access_token"),
         );
-        OAuthHealth {
-            proxy_configured,
-            google,
-            github,
-        }
+        OAuthHealth { google, github }
     }
 
     async fn probe_oauth_endpoint(&self, url: &str) -> OAuthEndpointHealth {

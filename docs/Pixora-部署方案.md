@@ -96,8 +96,7 @@ openssl rand -hex 32
 
 ```dotenv
 PIXORA_BASE_URL=https://img.example.com
-# 服务器访问 Google/GitHub 需要代理时再填，例如 http://10.0.0.2:7890
-# PIXORA_HTTP_PROXY=http://10.0.0.2:7890
+# Pixora 不提供代理服务；服务器出网能力由部署环境自己解决
 ```
 
 只有 IP、没有域名就写 `http://203.0.113.10:8080`。直链、邮件里的链接、OAuth 回跳都按它拼。忘了设置时，反向代理后面会推出来容器内网地址（`http://172.x.x.x/...`），现象是“页面能开，图片全裂”。
@@ -326,7 +325,7 @@ configs:
           encode zstd gzip
           # 上传体积上限，与应用侧的上限保持一致
           request_body {
-              max_size 64MB
+              max_size 1GB
           }
           reverse_proxy pixora:8080
           header {
@@ -466,7 +465,7 @@ configs:
       {$$PIXORA_DOMAIN} {
           encode zstd gzip
           request_body {
-              max_size 64MB
+              max_size 1GB
           }
           reverse_proxy pixora:8080
           header {
@@ -590,7 +589,7 @@ configs:
       {$$PIXORA_DOMAIN} {
           encode zstd gzip
           request_body {
-              max_size 64MB
+              max_size 1GB
           }
           reverse_proxy pixora:8080
           header {
@@ -857,7 +856,7 @@ docker compose start pixora
 | 浏览器打开是 502 | Caddy 起来了但应用没起来，`docker compose ps` 看 `pixora` 是否 healthy |
 | 连不上单独部署的库 | 按 §4.5 逐项对：`host.docker.internal` 有没有配 `extra_hosts`；PG 的 `pg_hba.conf` / `listen_addresses`；MySQL 的 `bind-address` 与账号来源；防火墙 5432/3306 |
 | 图片裂开、地址是 `172.x.x.x` | `PIXORA_BASE_URL` 没填对，或安装向导里写错了基础 URL |
-| 上传报 413 | 内嵌配置里的 `request_body` 上限被改小了；默认 64MB，与应用侧一致 |
+| 上传报 413 | 内嵌配置里的 `request_body` 上限被改小了；默认 1GB，与应用侧的 1GB 硬上限一致 |
 | 日志把磁盘写满 | 本文编排已经给每个服务加了 10MB × 3 的日志轮转；自己改过的话检查 `logging` 段 |
 | `database is locked`（SQLite） | 有两个进程或容器在写同一个 `pixora.db`。SQLite 只能单实例 |
 | `./data` 权限报错 | 镜像以 root 运行，通常不用改；只有 rootless Docker 或用户命名空间才需要按映射的 UID 授权 |
@@ -903,8 +902,7 @@ PIXORA_DATA_DIR=/srv/pixora/data
 PIXORA_DB_DRIVER=sqlite
 PIXORA_DB_DSN=/srv/pixora/data/pixora.db
 PIXORA_BASE_URL=https://img.example.com
-# 服务器访问 Google/GitHub 需要代理时再填，例如 http://10.0.0.2:7890
-# PIXORA_HTTP_PROXY=http://10.0.0.2:7890
+# Pixora 不提供代理服务；服务器出网能力由部署环境自己解决
 PIXORA_MASTER_KEY=<主密钥>
 # 前面有 Nginx/Caddy 时填 1；直接暴露到公网填 0
 PIXORA_TRUST_PROXY=1

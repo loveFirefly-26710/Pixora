@@ -249,7 +249,17 @@ impl AppState {
                 max_batch_size: upload.max_batch,
                 max_file_size: upload.max_file_bytes,
                 max_pixels: upload.max_pixels,
+                max_width: upload.max_width,
+                max_height: upload.max_height,
                 formats: upload.formats,
+                download_per_minute: custom
+                    .as_ref()
+                    .map(|row| row.download_per_minute)
+                    .unwrap_or(policy.download_per_minute),
+                download_per_day: custom
+                    .as_ref()
+                    .map(|row| row.download_per_day)
+                    .unwrap_or(policy.download_per_day),
                 note: custom.as_ref().and_then(|row| row.note.clone()),
             },
             policy_override: custom.as_ref().map(|row| PolicyRow {
@@ -267,11 +277,15 @@ impl AppState {
                 max_batch_size: row.max_batch_size,
                 max_file_size: row.max_file_size,
                 max_pixels: row.max_pixels,
+                max_width: row.max_width,
+                max_height: row.max_height,
                 formats: row
                     .formats
                     .as_deref()
                     .map(crate::settings::parse_format_list)
                     .unwrap_or_default(),
+                download_per_minute: row.download_per_minute,
+                download_per_day: row.download_per_day,
                 note: row.note.clone(),
             }),
             identities,
@@ -973,7 +987,11 @@ pub struct PolicyRow {
     pub max_batch_size: i64,
     pub max_file_size: i64,
     pub max_pixels: i64,
+    pub max_width: i64,
+    pub max_height: i64,
     pub formats: Vec<String>,
+    pub download_per_minute: i64,
+    pub download_per_day: i64,
     pub note: Option<String>,
 }
 

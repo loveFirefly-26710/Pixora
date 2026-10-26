@@ -16,7 +16,8 @@ import { formatBytes, formatNumber, parseSize, percent, toGigabytes } from "../c
 import { promptDialog } from "../core/modal";
 import type { PageContext } from "../core/router";
 import { toast, toastError, toastOk } from "../core/toast";
-import type { AdminUserRow, QuotaAdmin, StorageAdmin } from "../core/types";
+import type { AdminUserRow, QuotaAdmin, RateLimitAdmin, StorageAdmin } from "../core/types";
+import { usersCard } from "./ratelimit-cards";
 import {
   badge,
   card,
@@ -119,14 +120,15 @@ export async function render(ctx: PageContext): Promise<void> {
   try {
     // 探测信息在存储页，但「为什么要求手填总额」得在这里讲，所以顺带拉一次；
     // 拉不到不影响本页主体功能，只是少了那段说明。
-    const [quota, storage] = await Promise.all([
+    const [quota, storage, rate] = await Promise.all([
       request<QuotaAdmin>("/admin/quota"),
       request<StorageAdmin>("/admin/storage").catch(() => null),
+      request<RateLimitAdmin>("/admin/ratelimit").catch(() => null),
     ]);
     // 保存接口会把保存后的整页生效值回传，就地用它重画：页面显示的一定是
     // 服务端确认过的数字，不再是一次额外的 GET 之后的猜测
     const paint = (fresh: QuotaAdmin): void => {
-      mount(root, ...view(reload, paint, fresh, storage));
+      mount(root, ...view(reload, paint, fresh, storage, rate));
     };
     paint(quota);
   } catch (err) {
@@ -139,6 +141,7 @@ function view(
   paint: (fresh: QuotaAdmin) => void,
   data: QuotaAdmin,
   storage: StorageAdmin | null,
+  rate: RateLimitAdmin | null,
 ): Node[] {
   const draft: QuotaDraft = {
     mode: () => "auto",
@@ -154,6 +157,18 @@ function view(
     pageHead("配额与容量", "系统总额、默认注册配额、已分配合计的联动校验，以及容量触顶自动关闭注册。"),
     h("div.row", { style: { marginBottom: "14px" } }, capacityCard(draft, data, storage), allocationCard(data)),
     h("div.row", { style: { marginBottom: "14px" } }, defaultsCard(draft), autoCloseCard(draft, data)),
+    ...(rate
+      ? [
+          usersCard(
+            reload,
+            rate,
+            (rate.upload_policy?.formats ?? []).map((ext) => ({
+              ext,
+              label: ext.toUpperCase(),
+            })),
+          ),
+        ]
+      : []),
     topUsersCard(reload, data),
     note(
       "w",

@@ -33,7 +33,7 @@ use crate::direct;
 
 /// 上传请求体的上限。单文件上限在设置里（默认 20MiB），这里留出 multipart
 /// 头部与缩略图的空间；再大的请求连业务逻辑都进不去。
-const MAX_UPLOAD_BODY: usize = 64 * 1024 * 1024;
+const MAX_UPLOAD_BODY: usize = 1024 * 1024 * 1024;
 
 pub fn build(state: Arc<AppState>) -> Router {
     let api = api_routes();
@@ -57,6 +57,10 @@ pub fn build(state: Arc<AppState>) -> Router {
     // 全站 IP 规则放在业务层之外：被拉黑的人不该还能浏览广场、拉直链。
     // 再往外套一层安全响应头，连被 IP 规则拦下的响应也带上。
     router
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::routes::maintenance_guard,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state,
             crate::routes::enforce_ip,
@@ -91,6 +95,10 @@ fn api_routes() -> Router<Arc<AppState>> {
         // ---------- 公开 ----------
         .route("/site", get(r::public::site))
         .route("/site/background", get(r::public::site_background))
+        .route(
+            "/site/background/{asset}",
+            get(r::public::site_background_asset),
+        )
         .route("/site/avatar", get(r::public::site_avatar))
         // 公告已读：登录用户按版本记录，游客由浏览器本地兜底
         .route(
@@ -303,6 +311,10 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route(
             "/admin/settings/background",
             post(r::admin::background_upload),
+        )
+        .route(
+            "/admin/settings/backgrounds",
+            post(r::admin::backgrounds_upload),
         )
         // 站点默认头像：没设过头像的账号（含新注册的）都用它
         .route("/admin/settings/avatar", post(r::admin::avatar_upload))

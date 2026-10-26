@@ -27,6 +27,7 @@ export type ApiErrorCode =
   | "CONTENT_REJECTED"
   | "RATE_LIMITED"
   | "QUEUE_FULL"
+  | "MAINTENANCE"
   | "TERMS_REQUIRED"
   | "TOTP_REQUIRED"
   | "INTERNAL"

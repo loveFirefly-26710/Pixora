@@ -371,12 +371,10 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   concurrencySelect.value = String(queue.getSettings().concurrency);
 
   const settingsTip = h("span.tip.settings-tip", { style: { margin: "0", marginRight: "auto" }, text: "" });
-  const clearBtn = h("button.btn", { type: "button", text: "清空" });
   const startBtn = h("button.btn.pri", { type: "button", text: "开始上传" });
   const inlineActions = h(
     "div.flexline.upload-actions-inline.settings-actions",
     { style: { justifyContent: "flex-end", marginTop: "10px" } },
-    clearBtn,
     startBtn,
   );
   const settingsCard = h(
@@ -489,21 +487,23 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     queue.setSettings({ concurrency: concurrencyValue() });
   });
 
-  clearBtn.addEventListener("click", () => {
-    const pending = queue.snapshot().filter((item) => item.status !== "done" && item.status !== "skipped");
-    if (pending.length === 0) {
+  let hasStarted = false;
+  startBtn.addEventListener("click", () => {
+    // 已点过「开始上传」且全部处理完：按钮变成「重新上传」，清空清单后重新选文件
+    if (hasStarted) {
+      if (queue.stats().waiting > 0) return;
       queue.clearAll();
+      hasStarted = false;
+      fileInput.value = "";
+      fileInput.click();
       return;
     }
-    queue.clearPending();
-  });
-
-  startBtn.addEventListener("click", () => {
     if (queue.isRunning() && queue.isPaused()) {
       queue.resume();
       return;
     }
     queue.start();
+    hasStarted = true;
   });
 
   // ---------- 队列区 ----------
@@ -512,6 +512,11 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   const queueSub = h("div.tip", { style: { marginTop: "2px" } });
   const pauseBtn = h("button.btn.sm", { type: "button", text: "暂停" });
   const stopBtn = h("button.btn.sm.dgr", { type: "button", text: "取消" });
+  const clearQueueBtn = h("button.btn.sm", { type: "button", text: "清空队列" });
+  clearQueueBtn.addEventListener("click", () => {
+    queue.clearAll();
+    hasStarted = false;
+  });
   const barInner = h("i", { style: { width: "0%" } });
   const bar = h("div.bar-l", { style: { height: "8px" } }, barInner);
   const doneLabel = h("span");
@@ -531,6 +536,10 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     }
   });
   const exportBtn = h("button.btn", { type: "button", text: "导出成功清单" });
+  const clearSuccessBtn = h("button.btn", { type: "button", text: "清空成功项" });
+  clearSuccessBtn.addEventListener("click", () => {
+    queue.clearSucceeded();
+  });
   const queueCard = h(
     "div.card",
     null,
@@ -538,7 +547,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
       "div.flexline",
       { style: { justifyContent: "space-between", marginBottom: "10px" } },
       h("div", { style: { minWidth: "0" } }, queueTitle, queueSub),
-      h("div.flexline", null, pauseBtn, stopBtn),
+      h("div.flexline", null, pauseBtn, stopBtn, clearQueueBtn),
     ),
     bar,
     h(
@@ -549,7 +558,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     ),
     statHost,
     h("div", { style: { marginTop: "14px" } }, tableHost),
-    h("div.flexline", { style: { marginTop: "14px" } }, retryAllBtn, clearFailedBtn, exportBtn),
+    h("div.flexline", { style: { marginTop: "14px" } }, retryAllBtn, clearFailedBtn, clearSuccessBtn, exportBtn),
   );
 
   const uploadBar = h("div.upload-bar");
@@ -561,8 +570,19 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   barPauseBtn.addEventListener("click", () => (queue.isPaused() ? queue.resume() : queue.pause()));
   stopBtn.addEventListener("click", () => queue.stop());
   barStartBtn.addEventListener("click", () => {
+    if (hasStarted) {
+      if (queue.stats().waiting > 0) return;
+      queue.clearAll();
+      hasStarted = false;
+      fileInput.value = "";
+      fileInput.click();
+      return;
+    }
     if (queue.isRunning() && queue.isPaused()) queue.resume();
-    else queue.start();
+    else {
+      queue.start();
+      hasStarted = true;
+    }
   });
   retryAllBtn.addEventListener("click", () => queue.retryFailed());
   exportBtn.addEventListener("click", async () => {
@@ -580,6 +600,8 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
   const noticesHost = h("div");
 
   const root = h("div.upload-panel", { class: options.compact ? "is-compact" : "" });
+  // 广场首页的紧凑面板也要给登录用户并发选择；游客没有这个选项
+  if (options.compact && !options.guest) root.classList.add("show-concurrency");
   root.append(
     noticesHost,
     desktopCard,
@@ -692,8 +714,81 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     return { text: item.note ?? "—", mono: false, danger: false };
   }
 
+  let rowSortKey: "name" | "size" | "status" = "name";
+  let rowSortAsc = true;
+  const statusRank = (status: QueueItem["status"]): number => {
+    if (status === "failed") return 0;
+    if (status === "needs-reselect") return 1;
+    if (status === "uploading") return 2;
+    if (status === "ready" || status === "hashing") return 3;
+    return 4;
+  };
+  const sortedRows = (items: QueueItem[]): QueueItem[] => {
+    const copy = [...items];
+    copy.sort((a, b) => {
+      let delta = 0;
+      if (rowSortKey === "name") delta = a.name.localeCompare(b.name, "zh-CN");
+      else if (rowSortKey === "size") delta = a.size - b.size;
+      else delta = statusRank(a.status) - statusRank(b.status);
+      return rowSortAsc ? delta : -delta;
+    });
+    return copy;
+  };
+  const sortHead = (
+    label: string,
+    key: "name" | "size" | "status",
+    width?: string,
+  ): HTMLElement =>
+    h(
+      "th",
+      { style: width ? { width } : undefined },
+      h("button.th-sort", {
+        type: "button",
+        text: `${label}${rowSortKey === key ? (rowSortAsc ? " ↑" : " ↓") : ""}`,
+        "aria-label": `按${label}排序`,
+        on: {
+          click: () => {
+            if (rowSortKey === key) rowSortAsc = !rowSortAsc;
+            else {
+              rowSortKey = key;
+              rowSortAsc = true;
+            }
+            renderRows();
+          },
+        },
+      }),
+    );
+
+  function fillOp(op: HTMLElement, item: QueueItem): void {
+    const url = item.result?.url ?? null;
+    const mode =
+      item.status === "failed" || item.status === "needs-reselect" ? "retry" : "remove";
+    if (op.dataset.link === (url ?? "") && op.dataset.mode === mode) return;
+    op.dataset.link = url ?? "";
+    op.dataset.mode = mode;
+    const copy = h("button.btn.sm", {
+      type: "button",
+      text: "复制直链",
+      disabled: !url,
+      title: url ? "复制这张图片的直链" : "上传成功后才有直链",
+      on: {
+        click: async () => {
+          if (!url) return;
+          const ok = await copyText(url);
+          if (ok) toastWithCode("✓ 已复制直链", url);
+          else toastError(new Error("复制失败，请检查浏览器剪贴板权限"));
+        },
+      },
+    });
+    const action =
+      item.status === "failed" || item.status === "needs-reselect"
+        ? h("button.btn.sm", { type: "button", text: "重试", on: { click: () => queue.retry(item.id) } })
+        : h("button.btn.sm.gho", { type: "button", text: "移除", on: { click: () => queue.removeItem(item.id) } });
+    op.replaceChildren(copy, action);
+  }
+
   function renderRows(): void {
-    const items = queue.snapshot();
+    const items = sortedRows(queue.snapshot());
     rowRefs.clear();
     if (items.length === 0) {
       tableHost.replaceChildren();
@@ -714,23 +809,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
         text: note.text,
       });
       const op = h("td", { "data-label": "操作" });
-      if (item.status === "failed" || item.status === "needs-reselect") {
-        op.append(
-          h("button.btn.sm", {
-            type: "button",
-            text: "重试",
-            on: { click: () => queue.retry(item.id) },
-          }),
-        );
-      } else {
-        op.append(
-          h("button.btn.sm.gho", {
-            type: "button",
-            text: "移除",
-            on: { click: () => queue.removeItem(item.id) },
-          }),
-        );
-      }
+      fillOp(op, item);
       const row = h(
         "tr",
         { "data-id": item.id },
@@ -749,11 +828,11 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
       h(
         "tr",
         null,
-        h("th", { style: { width: "44%" }, text: "文件" }),
-        h("th", { style: { width: "96px" }, text: "大小" }),
-        h("th", { style: { width: "132px" }, text: "状态" }),
+        sortHead("文件", "name", "40%"),
+        sortHead("大小", "size", "96px"),
+        sortHead("状态", "status", "132px"),
         h("th", { text: "说明" }),
-        h("th", { style: { width: "86px" }, text: "操作" }),
+        h("th", { style: { width: "170px" }, text: "操作" }),
       ),
     );
     const table = h("table.responsive", null, thead, tbody);
@@ -778,19 +857,7 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
     refs.note.className = note.mono ? "mono" : "";
     refs.note.style.color = note.danger ? "var(--danger)" : note.mono ? "var(--faint)" : "var(--muted)";
     refs.note.style.fontSize = note.mono ? "11px" : "12.5px";
-    if (item.status === "failed" || item.status === "needs-reselect") {
-      if (refs.op.dataset.mode !== "retry") {
-        refs.op.dataset.mode = "retry";
-        refs.op.replaceChildren(
-          h("button.btn.sm", { type: "button", text: "重试", on: { click: () => queue.retry(item.id) } }),
-        );
-      }
-    } else if (refs.op.dataset.mode !== "remove") {
-      refs.op.dataset.mode = "remove";
-      refs.op.replaceChildren(
-        h("button.btn.sm.gho", { type: "button", text: "移除", on: { click: () => queue.removeItem(item.id) } }),
-      );
-    }
+    fillOp(refs.op, item);
   }
 
   function updatePreviewItem(item: QueueItem): void {
@@ -816,6 +883,8 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
 
     const running = queue.isRunning();
     const paused = queue.isPaused();
+    const processed = stats.total > 0 && stats.waiting === 0;
+    if (stats.total === 0) hasStarted = false;
     // 用 queuedCount 而不是 readyCount：刚选完文件的瞬间全在算哈希，
     // 这时按钮也该是可点的（点了就先置运行态，就绪后自动开传）
     const queued = queue.queuedCount();
@@ -847,17 +916,24 @@ export function createUploadPanel(options: UploadPanelOptions = {}): UploadPanel
 
     pauseBtn.textContent = paused ? "继续" : "暂停";
     barPauseBtn.textContent = paused ? "继续" : "暂停";
+    pauseBtn.hidden = !running || processed;
+    stopBtn.hidden = !running || processed;
+    clearQueueBtn.hidden = running && !processed;
     const label = `开始上传（${formatNumber(queued)} 张）`;
-    // 正在跑且没暂停时按钮无事可做，置灰；其余情况要么开始要么继续
-    const startDisabled = (running && !paused) || (!running && queued === 0 && queue.failedItems().length === 0);
-    startBtn.textContent = running && paused ? "继续上传" : label;
+    // 点过开始之后，按钮变成「重新上传」；队列全部处理完（含失败项）才可点，
+    // 点了先清空缩略图和记录，再重新选文件。
+    const startDisabled = hasStarted
+      ? !processed
+      : (running && !paused) || (!running && queued === 0 && queue.failedItems().length === 0);
+    startBtn.textContent = hasStarted ? "重新上传" : running && paused ? "继续上传" : label;
     startBtn.disabled = startDisabled;
-    barStartBtn.textContent = running && paused ? "继续上传" : label;
+    barStartBtn.textContent = hasStarted ? "重新上传" : running && paused ? "继续上传" : label;
     barStartBtn.disabled = startDisabled;
     retryAllBtn.disabled = queue.failedItems().length === 0;
     clearFailedBtn.disabled = retryAllBtn.disabled;
+    clearSuccessBtn.disabled = stats.success + stats.skipped === 0;
     exportBtn.disabled = queue.successLinks().length === 0;
-    clearBtn.disabled = items.length === 0;
+    clearQueueBtn.disabled = items.length === 0;
 
     // 队列不跨刷新保留：刷新后这张清单就该是空的（文件本身浏览器也存不下）
     const hasReselect = stats.needsReselect > 0;

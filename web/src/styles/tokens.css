@@ -189,28 +189,49 @@ body {
   background: transparent;
 }
 
-/* 站点背景图。
-   管理员在「系统设置 → 外观」里配的图（本地上传或外链）由 state.applySiteIdentity
-   写进 --site-bg-image。做成固定底层而不是 body 的 background：
-   body 上的背景会在长页面里跟着滚，而且卡片区一旦有半透明背景就糊成一片。 */
-body.has-site-bg::before {
-  content: "";
+/* 站点背景层。固定铺满视口，置于内容之下；不使用 body 背景，
+   避免长页面滚动时跟着重绘、以及负 z-index 被 body 背景盖住。
+   两层 <img> 由 core/background.ts 做交叉淡入。 */
+.site-bg {
   position: fixed;
   inset: 0;
-  z-index: -2;
-  background-image: var(--site-bg-image);
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
-  /* 暗底上把背景图压暗；亮色主题再抬回来一点 */
-  opacity: .2;
-  filter: saturate(.8) brightness(.75);
+  z-index: 0;
+  overflow: hidden;
   pointer-events: none;
+  opacity: var(--site-bg-opacity, .32);
+  background: var(--bg);
 }
 
-:root[data-theme="light"] body.has-site-bg::before {
-  opacity: .22;
-  filter: saturate(.9) brightness(1.05);
+.site-bg img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transform: scale(1.045);
+  filter: blur(var(--site-bg-blur, 0px)) saturate(.9) brightness(.78);
+  transition: opacity 1.15s ease;
+  will-change: opacity;
+}
+
+:root[data-theme="light"] .site-bg img {
+  filter: blur(var(--site-bg-blur, 0px)) saturate(.95) brightness(1.02);
+}
+
+.site-bg img.on {
+  opacity: 1;
+}
+
+body.has-site-bg .card {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-bg img {
+    transition: none;
+  }
 }
 
 a {

@@ -96,26 +96,14 @@ impl AppState {
         let repo = Repo::new(db);
         let settings = Settings::new(repo.clone(), config.master_key.clone());
 
-        // 出网代理：服务器到 Google / GitHub / 存储后端的链路可能需要走代理。
-        // reqwest 本身会读系统代理环境变量；这里额外支持一个站点专用的
-        // `PIXORA_HTTP_PROXY`，避免和宿主机其它服务的代理设置混在一起。
-        let mut http_builder = reqwest::Client::builder()
-            .user_agent("Pixora")
-            // 建连单独限制：DNS 卡住或对端不接时尽快失败，别等整个请求超时
-            .connect_timeout(std::time::Duration::from_secs(8))
-            .timeout(std::time::Duration::from_secs(60));
-        if let Some(proxy) = std::env::var("PIXORA_HTTP_PROXY")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            http_builder = http_builder.proxy(
-                reqwest::Proxy::all(&proxy)
-                    .map_err(|err| AppError::Config(format!("PIXORA_HTTP_PROXY 不是合法代理地址：{err}")))?,
-            );
-        }
+        // 出网客户端：给远端存储与第三方登录共用。代理属于部署环境的网络配置，
+        // Pixora 不提供代理服务，也不在应用层维护代理设置。
         let http = Arc::new(
-            http_builder
+            reqwest::Client::builder()
+                .user_agent("Pixora")
+                // 建连单独限制：DNS 卡住或对端不接时尽快失败，别等整个请求超时
+                .connect_timeout(std::time::Duration::from_secs(8))
+                .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .map_err(|err| AppError::internal(format!("HTTP 客户端构建失败：{err}")))?,
         );
@@ -132,7 +120,7 @@ impl AppState {
             storage.install_local_fallback().await?;
         }
 
-        let limits = Arc::new(RateLimits::new(repo.clone()));
+        let limits = Arc::new(RateLimits::new(repo.clone(), settings.clone()));
         let ip_guard = Arc::new(IpGuard::new(
             repo.clone(),
             settings.clone(),
