@@ -1730,15 +1730,43 @@ function appearanceCard(_reload: () => void, draft: SettingsDraft, _data: AdminS
     });
   });
 
-  const urlInput = textInput({ placeholder: "https://… 或 /images/…", mono: true });
+  const urlInput = textarea({
+    rows: 3,
+    placeholder:
+      "每行一个，也可以用逗号分隔。\n" +
+      "https://images.example.com/wall-1.jpg\n" +
+      "https://images.example.com/wall-2.jpg\n" +
+      "/images/2026/10/wall-3.webp",
+  });
+  urlInput.classList.add("background-url-input");
   const addUrlBtn = h("button.btn.sm", { type: "button", text: "添加地址" });
   addUrlBtn.addEventListener("click", () => {
     const raw = urlInput.value.trim();
-    if (!/^https?:\/\//.test(raw) && !raw.startsWith("/")) {
-      toastError("背景地址要以 http(s):// 或 / 开头");
+    if (!raw) return;
+    // 一次粘贴多行/逗号分隔的多个壁纸地址，逐条校验、去重后追加
+    const pieces = raw
+      .split(/[\n,，;；]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    let added = 0;
+    let invalid = 0;
+    for (const piece of pieces) {
+      if (!/^https?:\/\//.test(piece) && !piece.startsWith("/")) {
+        invalid += 1;
+        continue;
+      }
+      if (!draft.backgrounds.includes(piece)) {
+        draft.backgrounds.push(piece);
+        added += 1;
+      }
+    }
+    if (added === 0 && invalid === 0) {
+      toastError("这些地址已经在列表里了");
       return;
     }
-    if (!draft.backgrounds.includes(raw)) draft.backgrounds.push(raw);
+    if (invalid > 0) {
+      toastError(`${invalid} 个地址格式不对，已跳过；地址要以 http(s):// 或 / 开头`);
+    }
     urlInput.value = "";
     sync();
   });
@@ -1772,6 +1800,18 @@ function appearanceCard(_reload: () => void, draft: SettingsDraft, _data: AdminS
   draft.backgroundOpacity.addEventListener("input", () => {
     opacityValue.textContent = `${draft.backgroundOpacity.value}%`;
   });
+  const fillExample = h("button.btn.sm.gho", {
+    type: "button",
+    text: "填入示例",
+    title: "把示例地址填进上面的输入框，方便照着改",
+  });
+  fillExample.addEventListener("click", () => {
+    urlInput.value =
+      "https://images.example.com/wall-1.jpg\n" +
+      "https://images.example.com/wall-2.jpg\n" +
+      "/images/2026/10/wall-3.webp";
+    urlInput.focus();
+  });
 
   return cardNode(
     cardHead("外观"),
@@ -1784,7 +1824,11 @@ function appearanceCard(_reload: () => void, draft: SettingsDraft, _data: AdminS
     h(
       "div.row",
       { style: { alignItems: "flex-end" } },
-      field("背景图地址", urlInput, "也可以直接上传多张；保存设置后生效。"),
+      field(
+        "背景图 URL（可一次填多个）",
+        urlInput,
+        "也可以直接上传多张；保存设置后生效。",
+      ),
       h(
         "div",
         { style: { display: "flex", gap: "8px", paddingBottom: "13px", flexWrap: "wrap" } },
@@ -1794,6 +1838,18 @@ function appearanceCard(_reload: () => void, draft: SettingsDraft, _data: AdminS
       ),
     ),
     fileInput,
+    h(
+      "div.background-url-example",
+      null,
+      h("b", { text: "多壁纸填写示例" }),
+      h("code", { text: "https://images.example.com/wall-1.jpg" }),
+      h("code", { text: "https://images.example.com/wall-2.jpg" }),
+      h("code", { text: "/images/2026/10/wall-3.webp" }),
+      h("span", {
+        text: "可以一次粘贴多行，或用逗号分隔；添加后在上方列表里预览、删除。轮播模式按列表顺序切换。",
+      }),
+      fillExample,
+    ),
     h(
       "div.row",
       { style: { marginTop: "10px" } },

@@ -2141,6 +2141,52 @@ tr.pick td {
   gap: 8px;
 }
 
+.background-url-example {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.background-url-example b {
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 12px;
+}
+
+.background-url-example code {
+  color: var(--primary);
+  background: transparent;
+  font-size: 11.5px;
+}
+
+.background-url-example span {
+  margin-top: 2px;
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.background-url-example .btn {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+.background-url-input {
+  min-height: 78px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .background-thumb {
   position: relative;
   width: 104px;
@@ -3085,10 +3131,16 @@ tr.pick td {
 
 /* ---------- 相册 ---------- */
 
+.albums-split {
+  gap: 14px;
+}
+
 .albums-split .albumlist {
-  border-right: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
   background: var(--surface);
   backdrop-filter: blur(18px);
+  box-shadow: var(--shadow-soft);
 }
 
 .albumlist a,
@@ -3146,6 +3198,12 @@ tr.pick td {
 .albums-body .albums-toolbar {
   background: rgba(4, 12, 14, 0.82);
   backdrop-filter: blur(18px);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: var(--shadow-soft);
+  padding: 0 12px;
+  margin-bottom: 14px;
+  overflow: hidden;
 }
 
 :root[data-theme="light"] .albums-body .albums-toolbar {
@@ -3344,6 +3402,35 @@ tr.pick td {
 }
 
 /* ---------- 后台与账号共用 ---------- */
+
+/* 会话记录与系统日志：表格直接铺在页面上，背景图透进来会把文字压花。
+   这两页的卡片、表头和每一行都用与无背景图时相同的实底色，任何一层都不
+   再让壁纸透上来。 */
+.admin-sessions-page .card,
+.admin-logs-page .card,
+.admin-sessions-page .table-wrap,
+.admin-logs-page .table-wrap,
+.admin-sessions-page table,
+.admin-logs-page table,
+.admin-sessions-page tbody,
+.admin-logs-page tbody,
+.admin-sessions-page tr,
+.admin-logs-page tr,
+.admin-sessions-page td,
+.admin-logs-page td,
+.admin-sessions-page th,
+.admin-logs-page th {
+  background: var(--surface-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.admin-sessions-page .table-wrap,
+.admin-logs-page .table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: var(--shadow-soft);
+}
 
 .endpoint {
   border-color: var(--border);

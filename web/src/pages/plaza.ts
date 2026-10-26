@@ -1107,8 +1107,7 @@ export async function render(ctx: PageContext): Promise<void> {
     }
   }
 
-  /**
-   * 自动漫游的刷新：不先清空网格，等第一页回来再整体替换。
+  /** 自动漫游的刷新：不先清空网格，等第一页回来再整体替换。
    * 这样不会每次换图都闪一次骨架屏；请求失败时也保留当前画面。
    */
   async function quietRefresh(): Promise<void> {
@@ -1119,10 +1118,11 @@ export async function render(ctx: PageContext): Promise<void> {
     // 先把当前滚动位置记下来，替换完再兜底恢复一次；如果请求期间用户自己
     // 滑过页面，就不要抢回旧位置。
     const scrollY = window.scrollY;
+    const beforeIds = items.map((item) => item.id).join(",");
     try {
       // 随机排序换一个种子，非随机排序保持当前口径
       if (query.sort === "shuffle") query.seed = newShuffleSeed();
-      const page = await requestPage<ImageItem>("/plaza", {
+      let page = await requestPage<ImageItem>("/plaza", {
         query: {
           q: query.q ?? undefined,
           tags: query.tags.length > 0 ? query.tags.join(",") : undefined,
@@ -1133,6 +1133,33 @@ export async function render(ctx: PageContext): Promise<void> {
           per_page: PER_PAGE,
         },
       });
+      // 随机顺序偶尔会和上一轮完全一样；这时再抽一次，避免只闪背景、列表没变
+      if (
+        query.sort === "shuffle" &&
+        items.length > 1 &&
+        page.items.map((item) => item.id).join(",") === beforeIds
+      ) {
+        query.seed = newShuffleSeed();
+        page = await requestPage<ImageItem>("/plaza", {
+          query: {
+            q: query.q ?? undefined,
+            tags: query.tags.length > 0 ? query.tags.join(",") : undefined,
+            tag_mode: query.tags.length > 0 ? query.tagMode : undefined,
+            sort: query.sort,
+            seed: query.seed,
+            page: 1,
+            per_page: PER_PAGE,
+          },
+        });
+      }
+      const afterIds = page.items.map((item) => item.id).join(",");
+      if (afterIds === beforeIds && items.length > 0) {
+        // 内容没变就不要做淡出/淡入：否则用户只会看到背景闪一下
+        heroState?.setTotal(page.meta.total);
+        heroState?.setFeatured(page.items[0] ?? null);
+        failed = false;
+        return;
+      }
       currentPage = page.meta.page;
       totalPages = Math.max(1, page.meta.total_pages);
       items.length = 0;

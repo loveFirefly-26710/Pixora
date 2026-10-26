@@ -18,6 +18,7 @@ import {
   startRouter,
 } from "./core/router";
 import { initTheme } from "./core/theme";
+import { backgroundReady } from "./core/background";
 import { bootstrap, getState, setUser, subscribe, updateUser } from "./core/state";
 import { mountShell, refreshNav } from "./ui/shell";
 import { openModal } from "./core/modal";
@@ -174,6 +175,23 @@ async function promptTermsIfNeeded(): Promise<void> {
   });
 }
 
+async function waitForBackground(timeoutMs = 8000): Promise<void> {
+  // 无痕/首次访问时 /site 和壁纸都比 HTML 晚：先让背景层把首图真正解码并挂上，
+  // 再挂外壳。以前这里只是另起一个 Image 预加载，背景层的 <img> 仍要等外壳
+  // 挂完才加载，还会走 1.15s 淡入——用户看到的正是“先无壁纸、过一会儿才贴上”。
+  let timer = 0;
+  try {
+    await Promise.race([
+      backgroundReady(),
+      new Promise<void>((resolve) => {
+        timer = window.setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 async function main(): Promise<void> {
   const root = document.getElementById("app");
   if (!root) return;
@@ -197,6 +215,7 @@ async function main(): Promise<void> {
   });
 
   await bootstrap();
+  await waitForBackground();
   const outlet = mountShell(root);
   setOutlet(outlet);
   registerRoutes();
