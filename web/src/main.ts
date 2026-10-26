@@ -18,6 +18,7 @@ import {
   startRouter,
 } from "./core/router";
 import { initTheme } from "./core/theme";
+import { backgroundReady } from "./core/background";
 import { bootstrap, getState, setUser, subscribe, updateUser } from "./core/state";
 import { mountShell, refreshNav } from "./ui/shell";
 import { openModal } from "./core/modal";
@@ -42,6 +43,7 @@ import { render as recyclePage } from "./pages/recycle";
 import { render as adminUsersPage } from "./pages/admin-users";
 import { render as adminUserDetailPage } from "./pages/admin-user-detail";
 import { render as adminStoragePage } from "./pages/admin-storage";
+import { render as adminStoragePolicyPage } from "./pages/admin-storage-policy";
 import { render as adminQuotaPage } from "./pages/admin-quota";
 import { render as adminIpPage } from "./pages/admin-ip";
 import { render as adminLogsPage } from "./pages/admin-logs";
@@ -83,10 +85,10 @@ function registerRoutes(): void {
   route("/admin/users", adminUsersPage, { auth: true, admin: true });
   route("/admin/users/:id", adminUserDetailPage, { auth: true, admin: true });
   route("/admin/storage", adminStoragePage, { auth: true, admin: true });
+  route("/admin/storage-policy", adminStoragePolicyPage, { auth: true, admin: true });
   route("/admin/quota", adminQuotaPage, { auth: true, admin: true });
-  // 频率限制已经并进系统设置，导航里也没有这一项了；老收藏与旧链接
-  // 直接送过去，别让人撞上「页面不存在」
-  route("/admin/ratelimit", () => navigate("/admin/settings", { replace: true }), {
+  // 频率限制已经并进「存储策略」；老收藏与旧链接直接送过去
+  route("/admin/ratelimit", () => navigate("/admin/storage-policy", { replace: true }), {
     auth: true,
     admin: true,
   });
@@ -173,6 +175,23 @@ async function promptTermsIfNeeded(): Promise<void> {
   });
 }
 
+async function waitForBackground(timeoutMs = 8000): Promise<void> {
+  // 无痕/首次访问时 /site 和壁纸都比 HTML 晚：先让背景层把首图真正解码并挂上，
+  // 再挂外壳。以前这里只是另起一个 Image 预加载，背景层的 <img> 仍要等外壳
+  // 挂完才加载，还会走 1.15s 淡入——用户看到的正是“先无壁纸、过一会儿才贴上”。
+  let timer = 0;
+  try {
+    await Promise.race([
+      backgroundReady(),
+      new Promise<void>((resolve) => {
+        timer = window.setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 async function main(): Promise<void> {
   const root = document.getElementById("app");
   if (!root) return;
@@ -196,6 +215,7 @@ async function main(): Promise<void> {
   });
 
   await bootstrap();
+  await waitForBackground();
   const outlet = mountShell(root);
   setOutlet(outlet);
   registerRoutes();

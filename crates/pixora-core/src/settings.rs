@@ -116,6 +116,8 @@ pub mod keys {
     pub const SMS_SIGN_NAME: &str = "sms.sign_name";
     pub const SMS_TEMPLATE_CODE: &str = "sms.template_code";
     pub const RATELIMIT_ON_BREACH: &str = "ratelimit.on_breach";
+    /// 是否把全局策略同时当作「全站总量」上限。默认关，避免默认值意外卡住所有用户。
+    pub const RATELIMIT_GLOBAL_ENABLED: &str = "ratelimit.global_enabled";
     pub const RATELIMIT_BAN_THRESHOLD: &str = "ratelimit.ban_threshold";
     pub const RATELIMIT_BAN_MINUTES: &str = "ratelimit.ban_minutes";
     pub const IP_ENABLED: &str = "ip.enabled";
@@ -136,8 +138,21 @@ pub mod keys {
     pub const ANTISPAM_MX: &str = "antispam.mx_check";
     pub const ANTISPAM_THIRD_PARTY: &str = "antispam.third_party_key";
     pub const APPEARANCE_BACKGROUND: &str = "appearance.background";
+    /// 多张背景图：JSON 数组，元素是外链、`asset`（旧版单图）或 `asset:<id>`
+    pub const APPEARANCE_BACKGROUNDS: &str = "appearance.backgrounds";
+    pub const APPEARANCE_BACKGROUND_OPACITY: &str = "appearance.background_opacity";
+    pub const APPEARANCE_BACKGROUND_BLUR: &str = "appearance.background_blur";
+    /// `single` / `slideshow` / `random`
+    pub const APPEARANCE_BACKGROUND_MODE: &str = "appearance.background_mode";
+    pub const APPEARANCE_BACKGROUND_INTERVAL: &str = "appearance.background_interval";
+    /// 多图上传的资产键前缀；完整键是 `config:background:<id>`
+    pub const BACKGROUND_ASSET_PREFIX: &str = "config:background:";
+    pub const BACKGROUND_PUBLIC_PREFIX: &str = "/api/v1/site/background/";
     /// 站点默认头像：没设过头像的账号（含新注册的）用它。外链或上传的那张
     pub const SITE_DEFAULT_AVATAR: &str = "site.default_avatar";
+    /// 维护模式：开启后除管理员外只读
+    pub const SITE_MAINTENANCE_ENABLED: &str = "site.maintenance_enabled";
+    pub const SITE_MAINTENANCE_MESSAGE: &str = "site.maintenance_message";
     /// 回收站保留天数。0 = 关闭回收站（删除即彻底删）
     pub const RECYCLE_RETENTION_DAYS: &str = "recycle.retention_days";
     /// 会话闲置超时（分钟）。0 = 不按闲置判
@@ -257,6 +272,14 @@ pub mod defaults {
     /// 浏览器里没有本地音量记忆时的默认音量
     pub const MUSIC_DEFAULT_VOLUME: f64 = 0.3;
     pub const SITE_NAME: &str = "Pixora";
+    /// 背景图默认压暗到 32%，既能看出图，又不压住正文
+    pub const BACKGROUND_OPACITY: f64 = 0.32;
+    pub const BACKGROUND_BLUR: i64 = 0;
+    pub const BACKGROUND_MODE: &str = "single";
+    pub const BACKGROUND_INTERVAL: i64 = 12;
+    pub const BACKGROUND_INTERVAL_MIN: i64 = 3;
+    pub const BACKGROUND_INTERVAL_MAX: i64 = 3600;
+    pub const MAINTENANCE_MESSAGE: &str = "站点正在维护，暂时只能浏览公开图片。";
     pub const FROM_NAME: &str = "Pixora 管理团队";
     pub const SMTP_HOST: &str = "smtp.qiye.aliyun.com";
     pub const SMTP_PORT: i64 = 465;
@@ -282,6 +305,13 @@ pub struct SiteSettings {
     pub announcement: AnnouncementSettings,
     /// 允许注册的邮箱域名（白名单，空 = 不限）
     pub email_domains: RegisterDomains,
+    /// 背景图公开地址（已经解析成浏览器能直接用的地址）
+    pub background_urls: Vec<String>,
+    pub background_opacity: f64,
+    pub background_blur: i64,
+    pub background_mode: String,
+    pub background_interval: i64,
+    pub maintenance: MaintenanceSettings,
 }
 
 /// 首页公告。打开广场时自动弹出，用户确认后关闭。
@@ -330,6 +360,23 @@ impl AnnouncementSettings {
         }
         true
     }
+}
+
+/// 外观配置（背景图部分）。`backgrounds` 是存储形态，公开地址要再解析。
+#[derive(Debug, Clone, Default)]
+pub struct AppearanceSettings {
+    pub backgrounds: Vec<String>,
+    pub opacity: f64,
+    pub blur: i64,
+    pub mode: String,
+    pub interval: i64,
+}
+
+/// 维护模式配置。
+#[derive(Debug, Clone, Default)]
+pub struct MaintenanceSettings {
+    pub enabled: bool,
+    pub message: String,
 }
 
 /// 音乐播放配置。
@@ -669,6 +716,9 @@ impl Settings {
     }
 
     pub async fn site(&self, env_base_url: Option<&str>) -> Result<SiteSettings> {
+        let appearance = self.appearance().await?;
+        let maintenance = self.maintenance().await?;
+        let background_urls = self.background_public_urls().await?;
         Ok(SiteSettings {
             name: self.string(keys::SITE_NAME, defaults::SITE_NAME).await?,
             // 设置里的地址优先于环境变量？不：环境变量是运维真相，
@@ -710,6 +760,12 @@ impl Settings {
             email_domains: RegisterDomains::parse(
                 self.raw(keys::REGISTER_EMAIL_DOMAINS).await?.as_deref(),
             ),
+            background_urls,
+            background_opacity: appearance.opacity,
+            background_blur: appearance.blur,
+            background_mode: appearance.mode,
+            background_interval: appearance.interval,
+            maintenance,
         })
     }
 
@@ -1044,6 +1100,114 @@ impl Settings {
             .collect();
         let enabled = self.upload().await?.formats;
         Ok((all, enabled))
+    }
+
+    /// 后台外观配置的原始值。`backgrounds` 里保留 `asset` / `asset:<id>` 标记，
+    /// 方便保存时判断哪些上传资产还要留。
+    pub async fn appearance(&self) -> Result<AppearanceSettings> {
+        let mut backgrounds: Vec<String> = self
+            .raw(keys::APPEARANCE_BACKGROUNDS)
+            .await?
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .unwrap_or_default();
+        backgrounds.retain(|item| !item.trim().is_empty());
+        backgrounds.truncate(60);
+        if backgrounds.is_empty() {
+            if let Some(legacy) = self.raw(keys::APPEARANCE_BACKGROUND).await? {
+                let legacy = legacy.trim();
+                if !legacy.is_empty() {
+                    backgrounds.push(legacy.to_string());
+                }
+            }
+        }
+        let opacity = self
+            .string(
+                keys::APPEARANCE_BACKGROUND_OPACITY,
+                &defaults::BACKGROUND_OPACITY.to_string(),
+            )
+            .await?
+            .parse::<f64>()
+            .unwrap_or(defaults::BACKGROUND_OPACITY)
+            .clamp(0.0, 1.0);
+        let blur = self
+            .integer(keys::APPEARANCE_BACKGROUND_BLUR, defaults::BACKGROUND_BLUR)
+            .await?
+            .clamp(0, 40);
+        let mode = self
+            .string(keys::APPEARANCE_BACKGROUND_MODE, defaults::BACKGROUND_MODE)
+            .await?
+            .trim()
+            .to_ascii_lowercase();
+        let mode = match mode.as_str() {
+            "slideshow" | "random" => mode,
+            _ => "single".to_string(),
+        };
+        let interval = self
+            .integer(
+                keys::APPEARANCE_BACKGROUND_INTERVAL,
+                defaults::BACKGROUND_INTERVAL,
+            )
+            .await?
+            .clamp(
+                defaults::BACKGROUND_INTERVAL_MIN,
+                defaults::BACKGROUND_INTERVAL_MAX,
+            );
+        Ok(AppearanceSettings {
+            backgrounds,
+            opacity,
+            blur,
+            mode,
+            interval,
+        })
+    }
+
+    /// 维护模式开关。
+    pub async fn maintenance(&self) -> Result<MaintenanceSettings> {
+        Ok(MaintenanceSettings {
+            enabled: self.bool(keys::SITE_MAINTENANCE_ENABLED, false).await?,
+            message: self
+                .string(keys::SITE_MAINTENANCE_MESSAGE, defaults::MAINTENANCE_MESSAGE)
+                .await?,
+        })
+    }
+
+    /// 背景图公开地址列表。上传图走本站地址并带版本号；外链原样返回。
+    pub async fn background_public_urls(&self) -> Result<Vec<String>> {
+        let appearance = self.appearance().await?;
+        let mut urls: Vec<String> = Vec::new();
+        for entry in appearance.backgrounds {
+            let resolved = if entry == keys::BACKGROUND_ASSET_MARKER {
+                self.background_public_url().await?
+            } else if let Some(id) = entry.strip_prefix("asset:") {
+                let key = format!("{}{id}", keys::BACKGROUND_ASSET_PREFIX);
+                let version = self
+                    .repo
+                    .asset_version(&key)
+                    .await?
+                    .unwrap_or_default();
+                let version: String = version.chars().filter(|ch| ch.is_ascii_digit()).collect();
+                Some(format!(
+                    "{}{}?v={}",
+                    keys::BACKGROUND_PUBLIC_PREFIX,
+                    id,
+                    version
+                ))
+            } else if entry.starts_with("http://")
+                || entry.starts_with("https://")
+                || entry.starts_with('/')
+            {
+                Some(entry.clone())
+            } else {
+                None
+            };
+            if let Some(url) = resolved {
+                if !urls.contains(&url) {
+                    urls.push(url);
+                }
+            }
+        }
+        urls.truncate(60);
+        Ok(urls)
     }
 
     /// 背景图的对外地址。

@@ -7,7 +7,7 @@
  */
 
 import { request, cacheSite, currentCsrfToken, setCsrfToken, type ApiError } from "./api";
-import { absUrl } from "./config";
+import { applySiteBackground } from "./background";
 import type { ImpersonatorInfo, SiteInfo, UserProfile } from "./types";
 
 type Listener = () => void;
@@ -130,6 +130,12 @@ export async function loadSite(): Promise<void> {
       thumb_server_fallback: false,
       appeal_email: null,
       background: null,
+      backgrounds: [],
+      background_opacity: 0.32,
+      background_blur: 0,
+      background_mode: "single",
+      background_interval: 12,
+      maintenance: { enabled: false, message: "" },
       default_avatar: null,
       // 拿不到站点信息时一个第三方入口都不摆：按钮点下去大概率也是报错
       login_methods: { github: false, google: false, qq: false, wechat: false, phone: false },
@@ -165,16 +171,8 @@ export function applySiteIdentity(): void {
     node.textContent = name;
   }
 
-  // 背景图可能是后端上传的那张（站内相对路径），同源直接用
-  const background = absUrl(site.background).trim();
-  const root = document.documentElement;
-  if (background) {
-    root.style.setProperty("--site-bg-image", `url("${background}")`);
-    document.body.classList.add("has-site-bg");
-  } else {
-    root.style.removeProperty("--site-bg-image");
-    document.body.classList.remove("has-site-bg");
-  }
+  // 背景图：单图、多图轮播或本站随机图；独立固定层，不跟 body 背景抢层级
+  applySiteBackground(site);
 }
 
 export function impersonator(): ImpersonatorInfo | null {

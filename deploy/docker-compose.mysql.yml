@@ -107,7 +107,7 @@ configs:
       {$$PIXORA_DOMAIN} {
           encode zstd gzip
           request_body {
-              max_size 64MB
+              max_size 1GB
           }
           reverse_proxy pixora:8080
           header {

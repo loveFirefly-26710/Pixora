@@ -59,6 +59,11 @@
   min-width: 0;
 }
 
+/* display:flex 之类的规则会盖过 [hidden] 的浏览器默认样式，统一兜住 */
+[hidden] {
+  display: none !important;
+}
+
 .spacer {
   flex: 1;
 }
@@ -199,6 +204,8 @@
 
 /* 侧边栏：≥1024px 常驻，更窄收进抽屉 */
 .shell {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: flex-start;
   gap: 0;

@@ -129,7 +129,7 @@ export async function loginMethodsCard(): Promise<HTMLElement> {
         line("GitHub", result.github),
         h("div", {
           style: { marginTop: "6px", color: "var(--muted)" },
-          text: "只要收到 HTTP 响应就算网络可达，401/405 也正常。不可达时先在浏览器确认同一个代理能打开 Google，再确认服务进程与当前 Windows 用户一致（系统代理按用户保存）。",
+          text: "只要收到 HTTP 响应就算网络可达，401/405 也正常。不可达时先在浏览器确认同一个代理能打开 Google，再确认服务进程与当前 Windows 用户一致（系统代理按用户保存）。这里测的是服务器能否出网；Pixora 不提供代理服务，用户设备的代理只影响浏览器打开授权页。",
         }),
       );
     } catch (err) {

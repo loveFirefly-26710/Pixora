@@ -47,6 +47,7 @@ const USER_NAV: NavItem[] = [
 const ADMIN_NAV: NavItem[] = [
   { path: "/admin/users", label: "用户管理", icon: "👥", match: ["/admin/users"] },
   { path: "/admin/storage", label: "存储管理", icon: "💾", match: ["/admin/storage"] },
+  { path: "/admin/storage-policy", label: "存储策略", icon: "⚖", match: ["/admin/storage-policy"] },
   { path: "/admin/quota", label: "配额与容量", icon: "📊", match: ["/admin/quota"] },
   { path: "/admin/ip", label: "IP 黑名单", icon: "🛡", match: ["/admin/ip"] },
   { path: "/admin/logs", label: "系统日志", icon: "📋", match: ["/admin/logs"] },
@@ -56,6 +57,11 @@ const ADMIN_NAV: NavItem[] = [
 ];
 
 const ABOUT_NAV: NavItem[] = [{ path: "/docs/api", label: "API 文档", icon: "📘", match: ["/docs"] }];
+
+/** 维护模式下非管理员没有写入口。 */
+function readOnlySite(): boolean {
+  return Boolean(getState().site?.maintenance?.enabled) && !isAdmin();
+}
 
 let refs: {
   shell: HTMLElement;
@@ -117,8 +123,7 @@ export function navHref(path: string): string {
   return path === "/" ? "/" : `#${path}`;
 }
 
-function navLink(item: NavItem): HTMLElement {
-  const best = bestMatch();
+function navLink(item: NavItem): HTMLElement {  const best = bestMatch();
   const isActive = best !== null && (item.match ?? [item.path]).includes(best);
   return h("a", {
     href: navHref(item.path),
@@ -154,8 +159,11 @@ export function renderNavbar(): HTMLElement {
   logo.append(brandLockup(name));
 
   // 主入口只放广场、相册、上传：账号与后台在头像里，侧栏负责其余入口。
+  // 维护期间非管理员没有上传入口，避免点进去只收到 503。
+  const readOnly = readOnlySite();
   const topnav = h("nav.topnav", { "aria-label": "主导航" });
   for (const item of [PLAZA, ALBUMS, UPLOAD]) {
+    if (item === UPLOAD && readOnly) continue;
     const isActive = topnavActive(item);
     topnav.append(
       h("a", {
@@ -171,15 +179,41 @@ export function renderNavbar(): HTMLElement {
   // 搜索框固定在顶栏（不再只在广场与相册页出现）：在哪儿搜都落到当前板块的结果页
   const path = currentPath();
   const target = path.startsWith("/albums") ? "/albums" : "/";
-  const input = h("input", { placeholder: "搜索标签、关键词…", "aria-label": "搜索" });
+  const input = h("input", { type: "search", placeholder: "搜索标签、关键词…", "aria-label": "搜索" });
   // 回填当前查询串：刷新或前进后退后，搜索框和地址栏说同一件事
   const query = new URLSearchParams(location.hash.split("?")[1] ?? "").get("q");
   if (query) input.value = query;
-  const form = h("form.search", { role: "search" }, "⌕", input);
+  const clear = h("button.search-clear", {
+    type: "button",
+    text: "×",
+    "aria-label": "清除搜索",
+    title: "清除搜索",
+  });
+  clear.hidden = !query;
+  const submitButton = h("button.search-submit", {
+    type: "submit",
+    text: "搜索",
+    "aria-label": "搜索",
+  });
+  const submitSearch = () => {
+    const keyword = input.value.trim();
+    // 保留当前板块的标签、排序等筛选，只替换关键词；这样在广场里按标签
+    // 筛选后再搜索，不会把标签条件悄悄丢掉。
+    const params = new URLSearchParams(location.hash.split("?")[1] ?? "");
+    if (keyword) params.set("q", keyword);
+    else params.delete("q");
+    const queryString = params.toString();
+    navigate(queryString ? `${target}?${queryString}` : target);
+  };
+  const form = h("form.search", { role: "search" }, "⌕", input, submitButton, clear);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    const keyword = input.value.trim();
-    navigate(keyword ? `${target}?q=${encodeURIComponent(keyword)}` : target);
+    submitSearch();
+  });
+  clear.addEventListener("click", () => {
+    input.value = "";
+    submitSearch();
+    input.focus();
   });
 
   const dark = currentTheme() === "dark";
@@ -327,7 +361,9 @@ export function renderTabbar(): HTMLElement {
   const tabbar = h("nav.tabbar", { "aria-label": "主导航" });
   if (isStandalone(currentPath())) return tabbar;
   const user = getState().user;
-  const items = user ? [PLAZA, ALBUMS, UPLOAD, MINE] : [PLAZA, { ...ALBUMS }, MINE];
+  const items = user
+    ? [PLAZA, ALBUMS, ...(readOnlySite() ? [] : [UPLOAD]), MINE]
+    : [PLAZA, { ...ALBUMS }, MINE];
   for (const item of items) {
     const isActive = topnavActive(item);
     tabbar.append(
@@ -369,8 +405,11 @@ function renderSidebar(): HTMLElement | null {
   if (isStandalone(path)) return null;
 
   const sidebar = h("nav.sidebar", { "aria-label": "侧边导航" });
+  const visibleUserNav = readOnlySite()
+    ? USER_NAV.filter((item) => item.path !== UPLOAD.path)
+    : USER_NAV;
   const groups: Array<[string, NavItem[]]> = [
-    ["用户中心", USER_NAV],
+    ["用户中心", visibleUserNav],
     ["管理后台", isAdmin() ? ADMIN_NAV : []],
     ["关于", ABOUT_NAV],
   ];
@@ -486,8 +525,42 @@ export function mountShell(root: HTMLElement): HTMLElement {
 /** 填提示条槽位。没有要提示的东西时槽位留空（CSS 里 `:empty` 不占位置）。 */
 function refreshBanner(): void {
   if (!refs) return;
+  const site = getState().site;
+  const nodes: Node[] = [];
+  if (site?.maintenance?.enabled) {
+    nodes.push(maintenanceBanner(site.maintenance.message || "站点正在维护，暂时只能浏览公开图片。"));
+  }
   const info = impersonator();
-  mount(refs.banner, info ? impersonationBanner(info, () => void stopImpersonation()) : null);
+  if (info) nodes.push(impersonationBanner(info, () => void stopImpersonation()));
+  mount(refs.banner, ...nodes);
+}
+
+function maintenanceBanner(message: string): HTMLElement {
+  return h(
+    "div",
+    {
+      style: {
+        background: "var(--warning-soft, rgba(226, 177, 91, .16))",
+        border: "1px solid color-mix(in srgb, var(--warning) 38%, transparent)",
+        borderRadius: "10px",
+        padding: "10px 14px",
+        marginBottom: "14px",
+        display: "flex",
+        gap: "10px",
+        alignItems: "center",
+        flexWrap: "wrap",
+      },
+    },
+    h(
+      "div",
+      { style: { flex: "1", minWidth: "200px", fontSize: "13px", color: "var(--warning)" } },
+      h("b", { text: "维护模式 · 只读" }),
+      h("div", { style: { fontSize: "12px", marginTop: "2px" }, text: message }),
+    ),
+    isAdmin()
+      ? h("a.btn.sm", { href: "#/admin/settings", text: "去关闭维护" })
+      : h("span.tip", { style: { margin: "0" }, text: "维护模式期间只能浏览，不能上传、删除或修改" }),
+  );
 }
 
 export function outlet(): HTMLElement {

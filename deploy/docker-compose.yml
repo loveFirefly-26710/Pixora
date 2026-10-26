@@ -92,7 +92,7 @@ configs:
           encode zstd gzip
           # 上传体积上限，与应用侧的上限保持一致
           request_body {
-              max_size 64MB
+              max_size 1GB
           }
           reverse_proxy pixora:8080
           header {

@@ -29,7 +29,7 @@
 	@upload path /api/v1/upload /upload /api/v1/blobs/exists
 	handle @upload {
 		request_body {
-			max_size 64MB
+			max_size 1GB
 		}
 		reverse_proxy pixora:8080 {
 			# 上传可能较慢，宽限到 5 分钟（应用自己的超时是 120 秒，

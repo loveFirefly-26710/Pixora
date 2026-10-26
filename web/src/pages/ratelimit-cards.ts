@@ -123,6 +123,8 @@ export interface RateLimitDraft {
   downloadPerDay: HTMLInputElement;
   downloadAnonPerMinute: HTMLInputElement;
   downloadAnonPerDay: HTMLInputElement;
+  /** 是否把上面的全局策略数值同时当作全站聚合上限 */
+  globalEnabled: boolean;
   onBreach: { respond: boolean; audit: boolean; tempBan: boolean };
   breachThreshold: HTMLInputElement;
   breachWindow: HTMLInputElement;
@@ -153,6 +155,7 @@ export function rateLimitDraft(data: RateLimitAdmin): RateLimitDraft {
       type: "number",
       mono: true,
     }),
+    globalEnabled: data.global_enabled ?? false,
     onBreach: {
       respond: data.on_breach.respond,
       audit: data.on_breach.audit,
@@ -162,6 +165,24 @@ export function rateLimitDraft(data: RateLimitAdmin): RateLimitDraft {
     breachWindow: textInput({ value: String(data.on_breach.threshold_minutes), type: "number", mono: true }),
     banMinutes: textInput({ value: String(data.on_breach.ban_minutes), type: "number", mono: true }),
   };
+}
+
+/** 全站总量开关：默认关，打开后全局策略数值同时作为所有用户合计的上限。 */
+export function globalLimitCard(draft: RateLimitDraft): HTMLElement {
+  return cardNode(
+    cardHead("全站总量", badge(draft.globalEnabled ? "已启用" : "默认关闭", draft.globalEnabled ? "warn" : "mute")),
+    switchRow(
+      "启用全站合计上限",
+      "打开后，API / 上传 / 下载的全局数值同时作为所有用户合计的上限；单个用户的覆盖值仍然先按用户判定。默认关闭，避免默认值意外卡住全站。",
+      draft.globalEnabled,
+      (next) => {
+        draft.globalEnabled = next;
+      },
+    ),
+    h("div.tip", {
+      text: "启用前请先把全局数值调到所有用户共享也够用的量级；例如全局上传 120 张/分钟、单用户覆盖 30 张/分钟。",
+    }),
+  );
 }
 
 /** API 调用频率（全局默认）。 */
@@ -292,6 +313,7 @@ export async function saveRateLimit(draft: RateLimitDraft): Promise<void> {
       download_per_day: intOf(draft.downloadPerDay),
       download_anon_per_minute: intOf(draft.downloadAnonPerMinute),
       download_anon_per_day: intOf(draft.downloadAnonPerDay),
+      global_enabled: draft.globalEnabled,
     },
   });
   await request("/admin/ratelimit/on_breach", {
@@ -634,6 +656,16 @@ function editOverride(
     }),
     maxWidth: textInput({ value: String(base.max_width || 0), type: "number", mono: true }),
     maxHeight: textInput({ value: String(base.max_height || 0), type: "number", mono: true }),
+    downloadPerMinute: textInput({
+      value: String(base.download_per_minute || 0),
+      type: "number",
+      mono: true,
+    }),
+    downloadPerDay: textInput({
+      value: String(base.download_per_day || 0),
+      type: "number",
+      mono: true,
+    }),
     note: textInput({ value: base.note ?? "", placeholder: "为什么给这个人单独放额度" }),
   };
   let unlimited = Boolean(base.unlimited);
@@ -674,7 +706,7 @@ function editOverride(
     title: `调整 u_${row.uid} 的额度`,
     body: [
       h("div.tip", { text: row.email }),
-      switchRow("不限额度", "该用户的频率与流量不受限制（上传大小、格式仍按下面的策略走）", unlimited, (next) => {
+      switchRow("不限该用户自己的额度", "只跳过这个账号的用户级限额；全站总闸仍生效，防止一个人吃穿所有人的总量", unlimited, (next) => {
         unlimited = next;
       }),
       cardHead("API 调用"),
@@ -719,6 +751,13 @@ function editOverride(
         formatGrid,
         h("div.tip", { text: "一个都不勾 = 跟随全局默认；勾了就以这一份为准。" }),
       ),
+      cardHead("下载"),
+      h(
+        "div.row",
+        null,
+        field("次 / 分钟", inputs.downloadPerMinute, "0 表示不限"),
+        field("次 / 天", inputs.downloadPerDay, "0 表示不限"),
+      ),
       field("备注", inputs.note, "只给后台看"),
     ],
     footer: [
@@ -759,6 +798,8 @@ function editOverride(
       max_pixels: Number.isFinite(pixelsInWan) ? Math.max(0, Math.round(pixelsInWan)) * 10000 : 0,
       max_width: intOf(inputs.maxWidth),
       max_height: intOf(inputs.maxHeight),
+      download_per_minute: intOf(inputs.downloadPerMinute),
+      download_per_day: intOf(inputs.downloadPerDay),
       formats,
       note: inputs.note.value.trim(),
     };

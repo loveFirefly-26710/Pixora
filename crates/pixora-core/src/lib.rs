@@ -102,6 +102,7 @@ impl AppState {
         // 出网代理：服务器到 Google / GitHub / 存储后端的链路可能需要走代理。
         // Windows 用户开的是「Internet 选项」里的系统代理，reqwest 不读那里，
         // 所以先自己解析（环境变量 / 系统代理），再把结果显式交给客户端。
+        // 这是跟随部署环境已有的代理，不是由 Pixora 提供代理服务。
         let proxy = proxy::detect();
         let mut http_builder = reqwest::Client::builder()
             .user_agent("Pixora")
@@ -143,7 +144,7 @@ impl AppState {
             storage.install_local_fallback().await?;
         }
 
-        let limits = Arc::new(RateLimits::new(repo.clone()));
+        let limits = Arc::new(RateLimits::new(repo.clone(), settings.clone()));
         let ip_guard = Arc::new(IpGuard::new(
             repo.clone(),
             settings.clone(),
