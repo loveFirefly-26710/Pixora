@@ -154,6 +154,10 @@ interface PlazaHeroOptions {
   /** 只有随机排序才显示自动漫游（其它排序下自动刷新没有意义） */
   autoVisible: boolean;
   musicEnabled: boolean;
+  /** 维护模式下非管理员不能上传 */
+  canUpload?: boolean;
+  /** 随机挑一张当前广场图片打开 */
+  onRandom: () => void;
 }
 
 /** 倒计时显示：一分钟以内写秒，超过一分钟写成 m:ss。 */
@@ -214,8 +218,14 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
     if (featured) options.onOpen(featured);
   });
 
-  const upload = h("button.btn.pri", { type: "button", text: "投递影像" });
+  const upload = h("button.btn.pri", {
+    type: "button",
+    text: options.canUpload === false ? "维护中只读" : "投递影像",
+    disabled: options.canUpload === false,
+  });
   upload.addEventListener("click", options.onUpload);
+  const random = h("button.btn.gho", { type: "button", text: "随机一帧" });
+  random.addEventListener("click", options.onRandom);
 
   let autoButton: HTMLButtonElement | null = null;
   let autoLabel: HTMLElement | null = null;
@@ -267,7 +277,7 @@ function buildPlazaHero(options: PlazaHeroOptions): PlazaHeroHandle {
       h("p.plaza-hero-desc", {
         text: "在夜里，留下一点光。浏览公开影像，或把自己的那一帧投进这片夜空。",
       }),
-      h("div.plaza-hero-actions", null, upload, autoButton),
+      h("div.plaza-hero-actions", null, upload, random, autoButton),
       h(
         "div.plaza-hero-meta",
         null,
@@ -485,6 +495,7 @@ export async function render(ctx: PageContext): Promise<void> {
   const query = readQuery(ctx);
   const user = currentUser();
   const site = getState().site;
+  const readOnly = Boolean(site?.maintenance?.enabled) && user?.role !== "admin";
 
   // 内容限宽居中：广场图片不铺满整屏，两侧留白（与其他页面同一套 .pad）
   const root = h("div.pad.plaza-pad");
@@ -519,6 +530,30 @@ export async function render(ctx: PageContext): Promise<void> {
   let autoEnabled = autoVisible && autoUserEnabled;
   let autoRemaining = autoSeconds;
   let autoTimer: number | null = null;
+  // 用户正在滑动时不要自动换图：换一批会重排瀑布流，哪怕保留了滚动位置，
+  // 也会在手指底下抖一下。手指/滚轮停下 1.5 秒后才允许刷新。
+  let lastScrollAt = 0;
+  let userMovedDuringRefresh = false;
+  const onScroll = () => {
+    if (!root.isConnected) {
+      window.removeEventListener("scroll", onScroll);
+      return;
+    }
+    lastScrollAt = Date.now();
+    if (loading) userMovedDuringRefresh = true;
+  };
+  window.addEventListener("scroll", onScroll, { passive: true });
+  const onUserMove = () => {
+    if (!root.isConnected) {
+      window.removeEventListener("touchmove", onUserMove);
+      window.removeEventListener("wheel", onUserMove);
+      return;
+    }
+    lastScrollAt = Date.now();
+    if (loading) userMovedDuringRefresh = true;
+  };
+  window.addEventListener("touchmove", onUserMove, { passive: true });
+  window.addEventListener("wheel", onUserMove, { passive: true });
   let heroState: PlazaHeroHandle | null = null;
   const musicEnabled = Boolean(site?.music?.enabled);
   // 列数：先取本机偏好，没有就用管理员配的默认值
@@ -572,6 +607,11 @@ export async function render(ctx: PageContext): Promise<void> {
       autoEnabled,
       autoVisible,
       musicEnabled,
+      canUpload: !readOnly,
+      onRandom: () => {
+        if (items.length === 0) return;
+        openPlazaItem(items[Math.floor(Math.random() * items.length)]);
+      },
       onUpload: () => jumpToUpload(),
       onToggleAuto: () => toggleAuto(),
       onToggleMusic: () => void toggleMusic(),
@@ -622,6 +662,45 @@ export async function render(ctx: PageContext): Promise<void> {
 
   // 网格只建一次，往下追加节点：重建会把已经排好的瀑布流和滚动位置一起丢掉
   const grid = h("div.grid.igrid", { style: gridColumnsStyle(columns) });
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const revealTimers = new WeakMap<HTMLElement, number>();
+  const revealObserver =
+    !reducedMotion && typeof IntersectionObserver === "function"
+      ? new IntersectionObserver(
+          (entries) => {
+            for (const entry of entries) {
+              if (!entry.isIntersecting) continue;
+              const timer = revealTimers.get(entry.target as HTMLElement);
+              if (timer) window.clearTimeout(timer);
+              entry.target.classList.add("reveal-in");
+              revealObserver?.unobserve(entry.target);
+            }
+          },
+          { rootMargin: "0px 0px -6% 0px", threshold: 0.08 },
+        )
+      : null;
+  function revealTile(tile: HTMLElement): void {
+    if (!revealObserver) {
+      tile.classList.add("reveal", "reveal-in");
+      return;
+    }
+    tile.classList.add("reveal");
+    // 观察器在某些内嵌浏览器/隐藏标签页里不触发；给一个兜底，卡片不能永远透明
+    const timer = window.setTimeout(() => {
+      tile.classList.add("reveal-in");
+      revealObserver?.unobserve(tile);
+    }, 900);
+    revealTimers.set(tile, timer);
+    revealObserver.observe(tile);
+    // 某些内嵌/后台页面会暂停 CSS 过渡；兜底把初始隐藏状态摘掉，卡片不能永远透明
+    window.setTimeout(() => {
+      const pending = revealTimers.get(tile);
+      if (pending) window.clearTimeout(pending);
+      tile.classList.remove("reveal");
+      tile.classList.remove("reveal-in");
+      tile.style.removeProperty("--stagger");
+    }, 1600);
+  }
   const footer = h("div", {
     style: {
       display: "flex",
@@ -639,7 +718,7 @@ export async function render(ctx: PageContext): Promise<void> {
   // 上传区：登录用户看得到；未登录的人只在站点开着「允许游客上传」时看到
   // （上传会落到访客账号里，见 core/guest.rs）
   const guestUpload = !user && (site?.guest_upload?.enabled ?? false);
-  if (user || guestUpload) {
+  if ((user || guestUpload) && !readOnly) {
     const panel = createUploadPanel({
       guest: !user,
       compact: true,
@@ -669,6 +748,50 @@ export async function render(ctx: PageContext): Promise<void> {
   const tagsRow = h("div.plaza-tags");
   root.append(tagRow, tagsRow, grid, footer);
 
+  let plazaTags: TagRow[] = [];
+  let tagQuery = "";
+  const tagsChips = h("div.plaza-tags-chips");
+  const tagSearch = h("input.plaza-tag-search", {
+    type: "search",
+    placeholder: "筛选标签…",
+    "aria-label": "筛选标签",
+    autocomplete: "off",
+  });
+  const tagSearchButton = h("button.btn.sm.gho.plaza-tag-search-btn", {
+    type: "submit",
+    text: "搜索",
+  });
+  const tagSearchForm = h("form.plaza-tag-search-form", { role: "search" }, tagSearch, tagSearchButton);
+  // 只有提交/回车才过滤：输入过程中不把标签云刷空，避免还没打完就
+  // 看到「没有匹配的标签」，也避免用户以为标签被永久过滤掉了。
+  tagSearchForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    tagQuery = tagSearch.value.trim();
+    renderTags();
+  });
+  const tagReset = h("button.btn.sm.gho", {
+    type: "button",
+    text: "重置",
+    title: "清除标签搜索与已选标签",
+  });
+  tagReset.addEventListener("click", () => {
+    tagQuery = "";
+    tagSearch.value = "";
+    tagSearchForm.reset();
+    if (query.tags.length > 0) {
+      update({ tags: [], tagMode: "any" });
+    } else {
+      renderTags();
+    }
+  });
+  tagsRow.append(tagsChips);
+  tagsRow.hidden = true;
+  tagSearch.addEventListener("input", () => {
+    // 输入本身不触发过滤；按钮置灰提示有未提交的内容
+    const dirty = tagSearch.value.trim() !== tagQuery;
+    tagSearchButton.classList.toggle("is-dirty", dirty);
+  });
+
   // 排序下拉。默认「随机」；「最热」按浏览量，后端有 views 统计，所以保留。
   // 换排序时换一个种子：不然「随机」切回来还是同一份顺序，看着像没生效
   const sortControl = sortSelect(query.sort, (value) => applySort(value), [
@@ -696,27 +819,14 @@ export async function render(ctx: PageContext): Promise<void> {
     applyMasonry(grid);
   });
   tagRow.append(
+    tagSearchForm,
+    tagReset,
     h("span.spacer"),
     h("span.plaza-toolbar-label", { text: "列数" }),
     columnControl,
     reshuffle,
     sortControl,
   );
-
-  let plazaTags: TagRow[] = [];
-  let tagQuery = "";
-  const tagsChips = h("div.plaza-tags-chips");
-  const tagSearch = h("input.plaza-tag-search", {
-    type: "search",
-    placeholder: "筛选标签…",
-    "aria-label": "筛选标签",
-  });
-  tagsRow.append(tagsChips, tagSearch);
-  tagsRow.hidden = true;
-  tagSearch.addEventListener("input", () => {
-    tagQuery = tagSearch.value.trim();
-    renderTags();
-  });
 
   function renderTags(): void {
     // URL 里带来的标签可能不在前 40 个热门标签里，也要摆出来，否则用户
@@ -730,7 +840,11 @@ export async function render(ctx: PageContext): Promise<void> {
       ? merged.filter((tag) => tag.name.toLowerCase().includes(needle))
       : merged;
     tagsRow.hidden = merged.length === 0;
+    tagSearchForm.hidden = merged.length === 0;
+    tagReset.hidden = merged.length === 0;
     tagSearch.hidden = merged.length === 0;
+    tagSearchButton.hidden = merged.length === 0;
+    tagSearchButton.classList.remove("is-dirty");
 
     const chips: Node[] = [
       h("span.plaza-tags-label", { text: "广场标签" }),
@@ -760,7 +874,7 @@ export async function render(ctx: PageContext): Promise<void> {
       chips.push(chip);
     }
     if (filtered.length === 0) {
-      chips.push(h("span.plaza-tags-empty", { text: "没有匹配的标签" }));
+      chips.push(h("span.plaza-tags-empty", { text: "没有匹配的标签，换个词试试" }));
     }
     if (query.tags.length >= 2) {
       const modeChip = (mode: "any" | "all", text: string, title: string) =>
@@ -890,17 +1004,17 @@ export async function render(ctx: PageContext): Promise<void> {
         }
       } else {
         for (const item of page.items) {
-          grid.append(
-            imageTile(item, {
-              // 只给用户自己写的标题与时间，不暴露上传者 UID / 原始文件名
-              title: item.title,
-              subtitle: relativeTime(item.upload_time),
-              // 广场每张图底部都带浏览量，0 也显示
-              alwaysShowViews: true,
-              // 预览浮层拿累加后的整份列表：翻到哪就能在浮层里前后翻到哪
-              onOpen: openPlazaItem,
-            }),
-          );
+          const tile = imageTile(item, {
+            // 只给用户自己写的标题与时间，不暴露上传者 UID / 原始文件名
+            title: item.title,
+            subtitle: relativeTime(item.upload_time),
+            // 广场每张图底部都带浏览量，0 也显示
+            alwaysShowViews: true,
+            // 预览浮层拿累加后的整份列表：翻到哪就能在浮层里前后翻到哪
+            onOpen: openPlazaItem,
+          });
+          revealTile(tile);
+          grid.append(tile);
         }
         items.push(...page.items);
         if (currentPage === 1) preloadNextHero(items);
@@ -963,6 +1077,7 @@ export async function render(ctx: PageContext): Promise<void> {
       if (loading) return;
       if (document.visibilityState !== "visible") return;
       if (document.querySelector(".lb, .modal")) return;
+      if (Date.now() - lastScrollAt < 1500) return;
       void quietRefresh();
     }, 1000);
   }
@@ -992,20 +1107,22 @@ export async function render(ctx: PageContext): Promise<void> {
     }
   }
 
-  /**
-   * 自动漫游的刷新：不先清空网格，等第一页回来再整体替换。
+  /** 自动漫游的刷新：不先清空网格，等第一页回来再整体替换。
    * 这样不会每次换图都闪一次骨架屏；请求失败时也保留当前画面。
    */
   async function quietRefresh(): Promise<void> {
     if (loading) return;
     loading = true;
+    userMovedDuringRefresh = false;
     // 自动刷新发生在用户正在看图的时候：换一批不能把人送回页面顶部。
-    // 先把当前滚动位置记下来，替换完再兜底恢复一次。
+    // 先把当前滚动位置记下来，替换完再兜底恢复一次；如果请求期间用户自己
+    // 滑过页面，就不要抢回旧位置。
     const scrollY = window.scrollY;
+    const beforeIds = items.map((item) => item.id).join(",");
     try {
       // 随机排序换一个种子，非随机排序保持当前口径
       if (query.sort === "shuffle") query.seed = newShuffleSeed();
-      const page = await requestPage<ImageItem>("/plaza", {
+      let page = await requestPage<ImageItem>("/plaza", {
         query: {
           q: query.q ?? undefined,
           tags: query.tags.length > 0 ? query.tags.join(",") : undefined,
@@ -1016,6 +1133,33 @@ export async function render(ctx: PageContext): Promise<void> {
           per_page: PER_PAGE,
         },
       });
+      // 随机顺序偶尔会和上一轮完全一样；这时再抽一次，避免只闪背景、列表没变
+      if (
+        query.sort === "shuffle" &&
+        items.length > 1 &&
+        page.items.map((item) => item.id).join(",") === beforeIds
+      ) {
+        query.seed = newShuffleSeed();
+        page = await requestPage<ImageItem>("/plaza", {
+          query: {
+            q: query.q ?? undefined,
+            tags: query.tags.length > 0 ? query.tags.join(",") : undefined,
+            tag_mode: query.tags.length > 0 ? query.tagMode : undefined,
+            sort: query.sort,
+            seed: query.seed,
+            page: 1,
+            per_page: PER_PAGE,
+          },
+        });
+      }
+      const afterIds = page.items.map((item) => item.id).join(",");
+      if (afterIds === beforeIds && items.length > 0) {
+        // 内容没变就不要做淡出/淡入：否则用户只会看到背景闪一下
+        heroState?.setTotal(page.meta.total);
+        heroState?.setFeatured(page.items[0] ?? null);
+        failed = false;
+        return;
+      }
       currentPage = page.meta.page;
       totalPages = Math.max(1, page.meta.total_pages);
       items.length = 0;
@@ -1025,6 +1169,14 @@ export async function render(ctx: PageContext): Promise<void> {
       heroState?.setFeatured(page.items[0] ?? null);
 
       if (page.items.length === 0) {
+        if (!reducedMotion) {
+          const oldTiles = Array.from(grid.querySelectorAll<HTMLElement>(".tile"));
+          oldTiles.forEach((tile, index) => {
+            tile.style.setProperty("--stagger", `${Math.min(index * 16, 100)}ms`);
+            tile.classList.add("roam-out");
+          });
+          if (oldTiles.length > 0) await new Promise((resolve) => setTimeout(resolve, 320));
+        }
         grid.replaceChildren(emptyGridHint(query, Boolean(user)));
         currentPage = 1;
         totalPages = 1;
@@ -1033,20 +1185,41 @@ export async function render(ctx: PageContext): Promise<void> {
         // 逐张 append 会先经历一帧「网格为空」的布局，页面高度瞬间塌陷，
         // 浏览器就会把滚动位置夹回顶部——这正是自动漫游跳顶的原因。
         const fragment = document.createDocumentFragment();
+        let index = 0;
         for (const item of page.items) {
-          fragment.append(
-            imageTile(item, {
-              title: item.title,
-              subtitle: relativeTime(item.upload_time),
-              alwaysShowViews: true,
-              onOpen: openPlazaItem,
-            }),
-          );
+          const tile = imageTile(item, {
+            title: item.title,
+            subtitle: relativeTime(item.upload_time),
+            alwaysShowViews: true,
+            onOpen: openPlazaItem,
+          });
+          if (!reducedMotion) {
+            tile.classList.add("roam-in");
+            tile.style.setProperty("--stagger", `${Math.min(index * 22, 120)}ms`);
+            const clean = (): void => tile.classList.remove("roam-in");
+            tile.addEventListener("animationend", clean, { once: true });
+            // 后台/内嵌页面可能暂停 CSS 动画；兜底摘掉类，避免一直停在透明度 0
+            window.setTimeout(clean, 1000);
+          }
+          fragment.append(tile);
+          index += 1;
+        }
+
+        // 先错峰淡出旧一批，再在不可见窗口里替换，最后淡入新一批。
+        // 只在动画时间窗里做，不改变网格高度；替换后再用瀑布流重算。
+        if (!reducedMotion) {
+          const oldTiles = Array.from(grid.querySelectorAll<HTMLElement>(".tile"));
+          oldTiles.forEach((tile, index) => {
+            tile.style.setProperty("--stagger", `${Math.min(index * 18, 100)}ms`);
+            tile.classList.add("roam-out");
+          });
+          if (oldTiles.length > 0) await new Promise((resolve) => setTimeout(resolve, 340));
         }
         grid.replaceChildren(fragment);
         applyMasonry(grid);
-        // Fragment 已经避免塌陷；这里再兜一次，防止瀑布流高度重算时抖动
-        if (Math.abs(window.scrollY - scrollY) > 1) {
+        // Fragment 已经避免塌陷；用户没在请求期间滑动时再兜一次，
+        // 防止瀑布流高度重算时抖动。用户自己在滑就别抢滚动位置。
+        if (!userMovedDuringRefresh && Math.abs(window.scrollY - scrollY) > 1) {
           window.scrollTo({ top: scrollY, behavior: "auto" });
         }
       }

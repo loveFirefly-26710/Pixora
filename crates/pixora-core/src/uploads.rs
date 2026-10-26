@@ -302,25 +302,8 @@ impl AppState {
                 "单次最多预检 {CEILING} 个哈希"
             )));
         }
-        // 一次预检就是客户端的一批：条数上限按**这个账号生效的**单批次最大张数算。
-        // 上传本身是逐张发的，服务端看不见批次；预检是唯一能按批卡住的地方。
-        let limits = self.effective_upload_limits(user).await?;
-        if limits.max_batch > 0 && hashes.len() as i64 > limits.max_batch {
-            return Err(AppError::bad_request(format!(
-                "单批次上限 {} 张（单批次最大张数），本次预检 {} 个；请分批上传",
-                limits.max_batch,
-                hashes.len()
-            )));
-        }
-        // 队列深度阈值既管服务端的在途任务，也管「客户端一次贴进来多少张」
-        let upload_settings = self.settings.upload().await?;
-        if upload_settings.queue_depth > 0 && hashes.len() as i64 > upload_settings.queue_depth {
-            return Err(AppError::bad_request(format!(
-                "单次最多预检 {} 个文件（队列深度阈值），本次 {} 个；请分批上传",
-                upload_settings.queue_depth,
-                hashes.len()
-            )));
-        }
+        // 预检只是「这些内容库里有没有」的查询，不承担入队准入：用户选多少
+        // 都不能在这里被截断或拒绝，真正的队列由上传接口按条处理。
         for hash in hashes {
             if hash.len() != 64 || !hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
                 return Err(AppError::bad_request(format!("哈希格式不正确：{hash}")));
@@ -475,8 +458,9 @@ impl AppState {
                 self.repo
                     .mark_job_done(job.id, outcome.image_id, &outcome.sha256, outcome.dedup)
                     .await?;
-                // 只有真正落盘的新文件才消耗上传额度（去重跳过的不算）
-                if !outcome.dedup {
+                // 只有真正落盘的新文件才消耗上传额度（去重跳过的不算）。
+                // 管理员豁免配额，也不把他们的上传算进全站总量。
+                if !outcome.dedup && !user.is_admin() {
                     self.limits
                         .record_upload(user.id, 1, collected.size as i64)
                         .await?;

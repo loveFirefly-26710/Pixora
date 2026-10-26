@@ -15,7 +15,7 @@
 import { ApiError, request } from "../core/api";
 import { absUrl } from "../core/config";
 import { h, mount } from "../core/dom";
-import { formatBytes, formatNumber, parseSize } from "../core/format";
+import { formatBytes, formatNumber } from "../core/format";
 import { confirmDialog, promptDialog } from "../core/modal";
 import { openMailTemplates } from "./mail-templates";
 import { loginMethodsCard } from "./login-methods-card";
@@ -24,21 +24,11 @@ import { toastError, toastOk } from "../core/toast";
 import { currentUser, loadMe, loadSite } from "../core/state";
 import { reloadMusic, syncMusicDefaults } from "../core/music";
 import { openAnnouncementModal } from "../ui/announcement";
+import { openAvatarCrop } from "../ui/avatar-crop";
 import { BUILTIN_AVATAR } from "../ui/brand";
 import { refreshNav } from "../ui/shell";
 import type { AdminSettings, MusicPlaylist, RateLimitAdmin } from "../core/types";
-import {
-  apiRateCard,
-  downloadRateCard,
-  breachCard,
-  rateLimitDraft,
-  rateLogsButton,
-  saveRateLimit,
-  uploadRateCard,
-  usersCard,
-  validateRateLimit,
-  type RateLimitDraft,
-} from "./ratelimit-cards";
+import { rateLogsButton, type RateLimitDraft } from "./ratelimit-cards";
 import {
   badge,
   card,
@@ -129,6 +119,9 @@ interface SettingsDraft {
   announcementBody: HTMLTextAreaElement;
   announcementStarts: HTMLInputElement;
   announcementEnds: HTMLInputElement;
+  /** 维护模式：开启后非管理员只读 */
+  maintenanceEnabled: boolean;
+  maintenanceMessage: HTMLInputElement;
   /** 首页只展示这些公开相册；空 = 全部公开图片 */
   plazaAlbumIds: Set<number>;
   /** 命名集合：每个集合从公开相册里勾选 */
@@ -192,7 +185,12 @@ interface SettingsDraft {
   disposableCheck: boolean;
   mxCheck: boolean;
   thirdPartyCheck: boolean;
-  background: HTMLInputElement;
+  /** 背景图列表（外链或上传后的公开地址） */
+  backgrounds: string[];
+  backgroundMode: HTMLSelectElement;
+  backgroundOpacity: HTMLInputElement;
+  backgroundBlur: HTMLInputElement;
+  backgroundInterval: HTMLInputElement;
   /** 站点默认头像地址（外链或上传那张的公开地址） */
   defaultAvatar: HTMLInputElement;
   /** 格式白名单改一处就提交一次，这里只是当前选中态 */
@@ -246,13 +244,6 @@ function fromLocalDateTime(value: string): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-/** 容量输入：不带单位按默认单位解释。 */
-function sizeOf(input: HTMLInputElement, unit: string): number {
-  const text = input.value.trim();
-  if (!text) return 0;
-  return parseSize(/[a-z]$/i.test(text) ? text : `${text} ${unit}`) ?? 0;
-}
-
 function unitInput(input: HTMLInputElement, unit: string): HTMLElement {
   return h(
     "div.row",
@@ -269,19 +260,15 @@ export async function render(ctx: PageContext): Promise<void> {
   const reload = (): void => void render(ctx);
 
   try {
-    // 频率限制那几张卡片也在这一页，两个接口一起拉：
-    // 分两次渲染会让页面先闪一遍半成品
-    const [data, rate] = await Promise.all([
-      request<AdminSettings>("/admin/settings"),
-      request<RateLimitAdmin>("/admin/ratelimit"),
-    ]);
-    mount(root, ...view(reload, data, rate));
+    // 频率限制与上传策略已经移到「存储策略」页，这里只拉站点设置
+    const data = await request<AdminSettings>("/admin/settings");
+    mount(root, ...view(reload, data));
   } catch (err) {
     mount(root, errorBlock(err, reload));
   }
 }
 
-function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): Node[] {
+function view(reload: () => void, data: AdminSettings): Node[] {
   const draft: SettingsDraft = {
     siteName: textInput({ value: data.site.name }),
     baseUrl: textInput({ value: data.site.base_url, mono: true }),
@@ -313,6 +300,11 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       type: "datetime-local",
       value: toLocalDateTime(data.site.announcement?.ends_at ?? null),
       "aria-label": "公告结束时间",
+    }),
+    maintenanceEnabled: data.site.maintenance_enabled ?? false,
+    maintenanceMessage: textInput({
+      value: data.site.maintenance_message ?? "",
+      placeholder: "站点正在维护，暂时只能浏览公开图片。",
     }),
     plazaAlbumIds: new Set(data.site.plaza_album_ids ?? []),
     plazaCollections: Object.entries(data.site.plaza_collections ?? {})
@@ -391,7 +383,40 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     disposableCheck: data.mail.disposable_check,
     mxCheck: data.mail.mx_check,
     thirdPartyCheck: data.mail.third_party_check,
-    background: textInput({ value: data.appearance.background ?? "", mono: true }),
+    backgrounds: [...(data.appearance.backgrounds ?? [])],
+    backgroundMode: select(
+      [
+        { value: "single", label: "单图" },
+        { value: "slideshow", label: "多图轮播" },
+        { value: "random", label: "本站随机图 API" },
+      ],
+      data.appearance.background_mode ?? "single",
+    ),
+    backgroundOpacity: (() => {
+      const input = h("input", {
+        type: "range",
+        min: "0",
+        max: "100",
+        step: "1",
+        value: String(Math.round((data.appearance.background_opacity ?? 0.32) * 100)),
+        "aria-label": "背景图透明度",
+      });
+      return input;
+    })(),
+    backgroundBlur: textInput({
+      value: String(data.appearance.background_blur ?? 0),
+      type: "number",
+      mono: true,
+      min: "0",
+      max: "40",
+    }),
+    backgroundInterval: textInput({
+      value: String(data.appearance.background_interval ?? 12),
+      type: "number",
+      mono: true,
+      min: "3",
+      max: "3600",
+    }),
     defaultAvatar: textInput({ value: data.appearance.default_avatar ?? "", mono: true, name: "default-avatar" }),
     formats: [...(data.upload.formats ?? [])],
     maxWidth: textInput({ value: String(data.upload.max_width ?? 0), type: "number", mono: true }),
@@ -477,7 +502,6 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
     moderationNotify: data.moderation?.notify_admin ?? true,
     moderationFailOpen: data.moderation?.fail_open ?? true,
   };
-  const rateDraft = rateLimitDraft(rate);
   // 登录方式那张卡自己拉配置：整页草稿里塞不下密钥这类东西
   const loginMethodsHost = h("div");
   void loginMethodsCard().then((node) => loginMethodsHost.replaceChildren(node));
@@ -485,8 +509,8 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
   return [
     pageHead(
       "系统设置",
-      "站点、上传策略、格式白名单、缩略图策略、会话、频率限制、内容审核、防盗链、邮件与反临时邮箱。" +
-        "路径类配置已移出，改由环境变量注入。",
+      "站点、缩略图策略、会话、内容审核、防盗链、邮件、登录方式与外观。" +
+        "上传策略、接口/上传/下载频率在「存储策略」；路径类配置由环境变量注入。",
     ),
     // 卡片流：按高度自己排，短卡片不再被撑成长卡片那样高（见 components.css）
     h(
@@ -496,12 +520,6 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
       plazaAlbumsCard(draft, data),
       musicCard(draft),
       sessionCard(draft),
-      uploadCard(draft, data, rate, rateDraft),
-      apiRateCard(rateDraft),
-      uploadRateCard(rateDraft),
-      downloadRateCard(rateDraft),
-      breachCard(rateDraft),
-      usersCard(reload, rate, data.upload.format_options?.length ? data.upload.format_options : FALLBACK_FORMATS),
       thumbCard(draft),
       defaultAvatarCard(reload, draft, data),
       securityCard(draft),
@@ -520,14 +538,13 @@ function view(reload: () => void, data: AdminSettings, rate: RateLimitAdmin): No
         type: "button",
         text: "保存设置",
         on: {
-          click: (event) => void save(reload, draft, data, rateDraft, event.target as HTMLButtonElement),
+          click: (event) => void save(reload, draft, data, event.target as HTMLButtonElement),
         },
       }),
     ),
     note(
       "w",
-      "上传配额、注册默认配额、容量阈值不在这里——它们在「配额与容量」页统一算账。" +
-        "这里只管「允不允许、多大、什么格式、多久一次」。",
+      "上传配额、注册默认配额、容量阈值在「配额与容量」；上传策略、接口/上传/下载频率在「存储策略」。",
     ),
   ];
 }
@@ -1052,6 +1069,19 @@ function siteCard(draft: SettingsDraft, data: AdminSettings): HTMLElement {
       draft.recycleRetention,
       "删除的图片与相册先留在回收站，这个天数内可恢复；到期由后台彻底删除。填 0 关闭回收站。",
     ),
+    switchRow(
+      "维护模式",
+      "开启后全站只读：非管理员不能上传、删除或改配置，只能浏览公开图片；公告会向所有用户公示维护状态",
+      draft.maintenanceEnabled,
+      (next) => {
+        draft.maintenanceEnabled = next;
+      },
+    ),
+    field(
+      "维护公告文案",
+      draft.maintenanceMessage,
+      "开启维护模式后，通过公告向全体用户展示；留空用默认文案。公告会附加「只读，不可修改」说明。",
+    ),
     switchRow("拒绝游客上传", "上传必须登录", draft.requireLogin, (next) => {
       draft.requireLogin = next;
     }),
@@ -1104,7 +1134,7 @@ function siteCard(draft: SettingsDraft, data: AdminSettings): HTMLElement {
 }
 
 /** 上传策略 + 格式白名单 chips（改动即时提交）。 */
-function uploadCard(
+export function uploadCard(
   draft: SettingsDraft,
   data: AdminSettings,
   rate: RateLimitAdmin,
@@ -1647,99 +1677,225 @@ function defaultAvatarCard(reload: () => void, draft: SettingsDraft, data: Admin
   );
 }
 
-/** 外观：背景图（可以填地址，也可以直接上传一张）。 */
-function appearanceCard(
-  reload: () => void,
-  draft: SettingsDraft,
-  data: AdminSettings,
-): HTMLElement {
-  const preview = h("div.ph", { style: { flex: "0 0 200px", height: "64px" } });
+/** 外观：背景图支持单图、多张轮播和本站随机图 API。 */
+function appearanceCard(_reload: () => void, draft: SettingsDraft, _data: AdminSettings): HTMLElement {
+  const list = h("div.background-list");
+  const preview = h("div.ph.background-preview");
   const sync = (): void => {
-    const url = draft.background.value.trim();
-    if (!url) {
-      mount(preview, "未设置背景图");
-      return;
+    const urls = draft.backgrounds;
+    list.replaceChildren(
+      ...urls.map((url, index) =>
+        h(
+          "div.background-thumb",
+          null,
+          h("img", { src: absUrl(url), alt: `背景图 ${index + 1}` }),
+          h("button.btn.sm.dgr", {
+            type: "button",
+            text: "移除",
+            on: {
+              click: () => {
+                draft.backgrounds.splice(index, 1);
+                sync();
+              },
+            },
+          }),
+        ),
+      ),
+    );
+    list.hidden = urls.length === 0;
+    if (urls.length > 0) {
+      mount(preview, h("img", { src: absUrl(urls[0]), alt: "背景预览" }));
+    } else {
+      mount(preview, "还没有背景图");
     }
-    if (!/^https?:|^\//.test(url)) {
-      mount(preview, "地址看起来不对");
-      return;
-    }
-    mount(preview, h("img", { src: absUrl(url), alt: "当前背景图" }));
   };
   sync();
-  draft.background.addEventListener("input", sync);
 
-  // 上传：先在本机把图缩到 1920px 再传，几百 KB 就够铺满任何屏幕，
-  // 也不会把几十兆的原图塞进数据库
   const fileInput = h("input", {
     type: "file",
     accept: "image/*",
+    multiple: true,
     style: { display: "none" },
     "aria-hidden": "true",
   });
-  const uploadBtn = h("button.btn.sm.pri", { type: "button", text: "上传背景图" });
+  const uploadBtn = h("button.btn.sm.pri", { type: "button", text: "上传图片（可多选）" });
   uploadBtn.addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", () => {
-    const file = fileInput.files?.[0];
-    if (!file) return;
-    void uploadBackground(file, uploadBtn, reload);
+    const files = Array.from(fileInput.files ?? []);
+    fileInput.value = "";
+    if (files.length === 0) return;
+    void uploadBackgrounds(files, uploadBtn, (urls) => {
+      draft.backgrounds.push(...urls);
+      sync();
+    });
   });
 
-  const isUploaded = data.appearance.background?.startsWith("/api/v1/site/background") ?? false;
+  const urlInput = textarea({
+    rows: 3,
+    placeholder:
+      "每行一个，也可以用逗号分隔。\n" +
+      "https://images.example.com/wall-1.jpg\n" +
+      "https://images.example.com/wall-2.jpg\n" +
+      "/images/2026/10/wall-3.webp",
+  });
+  urlInput.classList.add("background-url-input");
+  const addUrlBtn = h("button.btn.sm", { type: "button", text: "添加地址" });
+  addUrlBtn.addEventListener("click", () => {
+    const raw = urlInput.value.trim();
+    if (!raw) return;
+    // 一次粘贴多行/逗号分隔的多个壁纸地址，逐条校验、去重后追加
+    const pieces = raw
+      .split(/[\n,，;；]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    let added = 0;
+    let invalid = 0;
+    for (const piece of pieces) {
+      if (!/^https?:\/\//.test(piece) && !piece.startsWith("/")) {
+        invalid += 1;
+        continue;
+      }
+      if (!draft.backgrounds.includes(piece)) {
+        draft.backgrounds.push(piece);
+        added += 1;
+      }
+    }
+    if (added === 0 && invalid === 0) {
+      toastError("这些地址已经在列表里了");
+      return;
+    }
+    if (invalid > 0) {
+      toastError(`${invalid} 个地址格式不对，已跳过；地址要以 http(s):// 或 / 开头`);
+    }
+    urlInput.value = "";
+    sync();
+  });
 
-
-  const removeBtn = h("button.btn.sm.dgr", { type: "button", text: "移除背景图" });
-  removeBtn.addEventListener("click", async () => {
+  const clearBtn = h("button.btn.sm.dgr", { type: "button", text: "清空背景" });
+  clearBtn.addEventListener("click", async () => {
+    if (draft.backgrounds.length === 0) return;
     const ok = await confirmDialog({
-      title: "移除背景图",
-      message: "站点会回到没有背景图的样子，已经上传的图片文件不会被删除。",
-      confirmText: "移除",
+      title: "清空背景图",
+      message: "保存后会删除这些背景图引用；上传进库的图会一起清理。",
+      confirmText: "清空",
       danger: true,
     });
-    if (!ok) return;
-    try {
-      await request("/admin/settings", { method: "PUT", json: { appearance: { background: null } } });
-      toastOk("背景图已移除");
-      reload();
-    } catch (err) {
-      toastError(err);
+    if (ok) {
+      draft.backgrounds = [];
+      sync();
     }
+  });
+
+  const intervalField = field(
+    "切换间隔（秒）",
+    draft.backgroundInterval,
+    "轮播/随机图每次换图间隔，3–3600 秒",
+  );
+  const syncMode = (): void => {
+    intervalField.hidden = draft.backgroundMode.value === "single";
+  };
+  draft.backgroundMode.addEventListener("change", syncMode);
+  syncMode();
+  const opacityValue = h("span.mono", { text: `${draft.backgroundOpacity.value}%` });
+  draft.backgroundOpacity.addEventListener("input", () => {
+    opacityValue.textContent = `${draft.backgroundOpacity.value}%`;
+  });
+  const fillExample = h("button.btn.sm.gho", {
+    type: "button",
+    text: "填入示例",
+    title: "把示例地址填进上面的输入框，方便照着改",
+  });
+  fillExample.addEventListener("click", () => {
+    urlInput.value =
+      "https://images.example.com/wall-1.jpg\n" +
+      "https://images.example.com/wall-2.jpg\n" +
+      "/images/2026/10/wall-3.webp";
+    urlInput.focus();
   });
 
   return cardNode(
     cardHead("外观"),
+    h("div.tip", {
+      text:
+        "背景图铺满全屏、固定在内容下方。单图只用第一张；多图轮播按列表顺序切换；" +
+        "随机图 API 使用本站公开图库，取不到时回退到已上传的图。",
+    }),
+    h("div.background-preview-wrap", null, preview, list),
     h(
       "div.row",
       { style: { alignItems: "flex-end" } },
       field(
-        "背景图地址",
-        draft.background,
-        isUploaded
-          ? "当前用的是上传进数据库的那张。也可以在这里换成外链地址。"
-          : "填一个可公开访问的图片地址（本站直链也可以），或直接上传一张。",
+        "背景图 URL（可一次填多个）",
+        urlInput,
+        "也可以直接上传多张；保存设置后生效。",
       ),
-      h("div", { style: { flex: "0 0 200px" } }, preview),
       h(
         "div",
-        {
-          style: {
-            flex: "0 0 auto",
-            paddingBottom: "13px",
-            display: "flex",
-            gap: "8px",
-            // 同上：窄屏换行，别顶出卡片
-            flexWrap: "wrap",
-          },
-        },
+        { style: { display: "flex", gap: "8px", paddingBottom: "13px", flexWrap: "wrap" } },
         uploadBtn,
-        removeBtn,
+        addUrlBtn,
+        clearBtn,
       ),
     ),
     fileInput,
-    h("div.tip", {
-      text: "上传的图先在本机压到 1920px 再存进数据库，不落文件系统，上传完立刻生效。换了地址记得点「保存设置」。",
-    }),
+    h(
+      "div.background-url-example",
+      null,
+      h("b", { text: "多壁纸填写示例" }),
+      h("code", { text: "https://images.example.com/wall-1.jpg" }),
+      h("code", { text: "https://images.example.com/wall-2.jpg" }),
+      h("code", { text: "/images/2026/10/wall-3.webp" }),
+      h("span", {
+        text: "可以一次粘贴多行，或用逗号分隔；添加后在上方列表里预览、删除。轮播模式按列表顺序切换。",
+      }),
+      fillExample,
+    ),
+    h(
+      "div.row",
+      { style: { marginTop: "10px" } },
+      field("展示方式", draft.backgroundMode),
+      intervalField,
+      field("透明度", draft.backgroundOpacity, "0% 完全透明，100% 原图"),
+      opacityValue,
+      field("模糊度（px）", draft.backgroundBlur, "0–40；模糊会同时放大一点避免边缘"),
+    ),
   );
+}
+
+/** 一次上传多张背景图；返回公开地址，由调用方放进草稿。 */
+async function uploadBackgrounds(
+  files: File[],
+  button: HTMLButtonElement,
+  onUrls: (urls: string[]) => void,
+): Promise<void> {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "上传中…";
+  try {
+    const form = new FormData();
+    let count = 0;
+    for (const file of files) {
+      if (file.size > 20 * 1024 * 1024) {
+        toastError(`${file.name} 超过 20 MiB，已跳过`);
+        continue;
+      }
+      const blob = await downscaleImage(file, 1920);
+      form.append("file", blob, "background.jpg");
+      count += 1;
+    }
+    if (count === 0) return;
+    const payload = await request<{ urls: string[] }>("/admin/settings/backgrounds", {
+      method: "POST",
+      form,
+    });
+    onUrls(payload.urls);
+    toastOk(`已上传 ${payload.urls.length} 张背景图，保存设置后生效`);
+  } catch (err) {
+    toastError(err);
+  } finally {
+    button.disabled = false;
+    button.textContent = label ?? "上传图片（可多选）";
+  }
 }
 
 /** 默认头像：同样先在本机缩小再上传，头像用不着大图。 */
@@ -1755,8 +1911,9 @@ async function uploadDefaultAvatar(
   button.disabled = true;
   button.textContent = "处理中…";
   try {
-    // 512px 足够任何显示尺寸；圆角与裁切交给 CSS 的 object-fit: cover
-    const blob = await downscaleImage(file, 512);
+    // 头像先让管理员手动选裁切范围，再上传 512px 方图
+    const blob = await openAvatarCrop(file, 512);
+    if (!blob) return;
     const form = new FormData();
     form.append("file", blob, "default-avatar.jpg");
     const payload = await request<{ ok: boolean; url: string; bytes: number }>(
@@ -1775,38 +1932,6 @@ async function uploadDefaultAvatar(
 }
 
 /** 选好的文件 → 压到 1920px → 上传进库。 */
-async function uploadBackground(
-  file: File,
-  button: HTMLButtonElement,
-  reload: () => void,
-): Promise<void> {
-  if (file.size > 20 * 1024 * 1024) {
-    toastError("背景图不要超过 20 MiB；铺满屏幕用不了太大的图，先压一下再传");
-    return;
-  }
-  button.disabled = true;
-  button.textContent = "处理中…";
-  try {
-    const blob = await downscaleImage(file, 1920);
-    const form = new FormData();
-    // 服务端认 file / image / background 三个字段名，这里用最直白的那个
-    form.append("file", blob, "background.jpg");
-    const payload = await request<{ ok: boolean; url: string; bytes: number }>(
-      "/admin/settings/background",
-      { method: "POST", form },
-    );
-    toastOk(`背景图已上传（${formatBytes(payload.bytes)}）并生效`);
-    // 站名与背景图都来自 /site：重拉一次让品牌文字与背景立刻更新
-    await reloadSiteIdentity();
-    reload();
-  } catch (err) {
-    toastError(err);
-  } finally {
-    button.disabled = false;
-    button.textContent = "上传背景图";
-  }
-}
-
 /**
  * 本机缩放。
  *
@@ -1926,19 +2051,8 @@ async function save(
   reload: () => void,
   draft: SettingsDraft,
   loaded: AdminSettings,
-  rateDraft: RateLimitDraft,
   button: HTMLButtonElement,
 ): Promise<void> {
-  const maxFile = sizeOf(draft.maxFileBytes, "MB");
-  if (maxFile <= 0) {
-    toastError("单文件大小上限填不对：可以写 20 MB、2 GB");
-    return;
-  }
-  const pixels = intOf(draft.maxPixels) * 10000;
-  if (pixels <= 0) {
-    toastError("像素上限填不对：单位是万，填 8000 表示 8000 万像素");
-    return;
-  }
   const apiUrls = draft.musicApiUrls
     .map((url) => url.trim())
     .filter((url) => url.length > 0);
@@ -2007,11 +2121,6 @@ async function save(
     toastError("命名集合最多 50 个");
     return;
   }
-  const rateIssue = validateRateLimit(rateDraft);
-  if (rateIssue) {
-    toastError(rateIssue);
-    return;
-  }
 
   // 邮件段单独判断：只有真的动过才提交。
   // 以前是无条件校验「SMTP 服务器与发信邮箱都要填」，结果是邮件没配好的站
@@ -2026,7 +2135,6 @@ async function save(
 
   const body: {
     site: Record<string, unknown>;
-    upload: Record<string, unknown>;
     session: Record<string, unknown>;
     security: Record<string, unknown>;
     moderation: Record<string, unknown>;
@@ -2054,14 +2162,8 @@ async function save(
       require_login_to_upload: draft.requireLogin,
       register_enabled: draft.registerEnabled,
       email_domains: draft.emailDomains.value.trim(),
-    },
-    upload: {
-      max_file_bytes: maxFile,
-      max_batch_size: intOf(draft.maxBatchSize),
-      max_pixels: pixels,
-      max_width: intOf(draft.maxWidth),
-      max_height: intOf(draft.maxHeight),
-      queue_depth: intOf(draft.queueDepth),
+      maintenance_enabled: draft.maintenanceEnabled,
+      maintenance_message: draft.maintenanceMessage.value.trim(),
     },
     session: {
       idle_minutes: Math.min(525600, intOf(draft.sessionIdle)),
@@ -2091,7 +2193,11 @@ async function save(
     },
     thumb: { client: draft.thumbClient, server_fallback: draft.thumbFallback },
     appearance: {
-      background: draft.background.value.trim() || null,
+      backgrounds: draft.backgrounds,
+      background_opacity: Math.min(1, Math.max(0, Number(draft.backgroundOpacity.value) / 100)),
+      background_blur: Math.min(40, Math.max(0, intOf(draft.backgroundBlur))),
+      background_mode: draft.backgroundMode.value,
+      background_interval: Math.min(3600, Math.max(3, intOf(draft.backgroundInterval))),
       default_avatar: draft.defaultAvatar.value.trim() || null,
     },
     music: {
@@ -2145,8 +2251,6 @@ async function save(
   const timer = window.setTimeout(() => controller.abort(), 20000);
   try {
     await request("/admin/settings", { method: "PUT", json: body, signal: controller.signal });
-    // 频率限制那几张卡片走另外两个接口，跟这一次保存一起提交
-    await saveRateLimit(rateDraft);
     toastOk("设置已保存");
     // 站点身份与歌单都在后台刷新，不让保存按钮等第三方音乐接口。
     // 站名、背景图来自 /site，单文件上限与格式来自 /me。

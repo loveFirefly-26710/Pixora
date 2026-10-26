@@ -594,15 +594,17 @@ function capacityCard(reload: () => void, data: StorageAdmin): HTMLElement {
 
 /** 后端配置：按驱动渲染不同字段，密钥不回显，可测试连接。 */
 function backendsCard(reload: () => void, data: StorageAdmin): HTMLElement {
-  const addBtn = addBackendButton(reload);
   const blocks: Node[] = [];
   if (!data.backends || data.backends.length === 0) {
     blocks.push(emptyState("💾", "还没有登记任何存储后端，先添加一个再上传。", addBackendButton(reload)));
   } else {
     for (const backend of data.backends) blocks.push(backendBlock(reload, backend));
+    blocks.push(
+      h("div", { style: { display: "flex", justifyContent: "center", marginTop: "14px" } }, addBackendButton(reload)),
+    );
   }
   return cardNode(
-    cardHead("后端配置", addBtn),
+    cardHead("后端配置"),
     ...blocks,
     h("div.tip", { text: "远端后端失败时会自动回退本地，并在上传结果里提示。" }),
   );

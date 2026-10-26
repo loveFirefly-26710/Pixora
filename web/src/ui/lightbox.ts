@@ -156,16 +156,32 @@ export function openLightbox(
     offsetX = 0;
     offsetY = 0;
     pullDistance = 0;
-    paint();
+    paint(delta);
   }
 
-  function paint(): void {
+  function paint(slide = 0): void {
     const item = currentItem();
     title.textContent = item.title ?? item.original_name ?? item.short_hash;
     counter.textContent = `${index + 1} / ${items.length}`;
 
+    const previous = image.getAttribute("src");
     image.src = item.url;
     image.alt = item.title ?? item.short_hash;
+    // 切图时轻微横移 + 淡入；不碰缩放/拖动用的 inline transform 结果
+    if (
+      slide !== 0 &&
+      previous &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches &&
+      typeof image.animate === "function"
+    ) {
+      image.animate(
+        [
+          { opacity: 0, transform: `translateX(${slide > 0 ? 28 : -28}px) scale(0.985)` },
+          { opacity: 1, transform: "translateX(0) scale(1)" },
+        ],
+        { duration: 340, easing: "cubic-bezier(.22,1,.36,1)" },
+      );
+    }
 
     side.replaceChildren(
       h("div", { style: { fontWeight: "700", fontSize: "13.5px", marginBottom: "8px" }, text: title.textContent ?? "" }),

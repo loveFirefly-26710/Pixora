@@ -7,6 +7,8 @@
 //! 用 `mimalloc` 换掉系统分配器：图床频繁申请释放缓冲区，glibc 的 malloc
 //! 在长时间运行后容易碎片化，换分配器能把常驻内存再压一截（设计稿的建议）。
 
+#![recursion_limit = "256"]
+
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

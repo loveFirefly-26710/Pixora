@@ -137,7 +137,11 @@ API 客户端：
   "max_width": 0, "max_height": 0,
   "thumb_client": true, "thumb_server_fallback": false,
   "appeal_email": "admin@example.com", "background": null,
-  // 背景音乐是否启用；歌单内容走 /api/v1/music/playlist
+  // 多图背景：公开地址数组；opacity 0–1，blur 0–40，mode single/slideshow/random
+  "backgrounds": ["/api/v1/site/background/abc-0?v=…"], "background_opacity": 0.32,
+  "background_blur": 0, "background_mode": "single", "background_interval": 12,
+  // 维护模式：enabled 时非管理员只读，并由公告公示
+  "maintenance": { "enabled": false, "message": "站点正在维护，暂时只能浏览公开图片。" },  // 背景音乐是否启用；歌单内容走 /api/v1/music/playlist
   "music": { "enabled": true, "source": "api", "autoplay": true, "default_volume": 0.3 },
   // 会话有效期（分钟 / 天）
   "session": { "idle_minutes": 120, "absolute_days": 30 },
@@ -149,6 +153,8 @@ API 客户端：
 
 `terms.required` 表示「当前登录用户是否必须先同意条款」；未登录时为 `false`。
 
+维护模式开启时，`announcement` 会被强制替换成「维护模式」公告（标题、正文和版本都按维护文案生成，正文附加「当前站点处于维护模式（只读），除管理员外不可修改内容」），用于向所有用户公示；`maintenance.enabled` 同时为真。
+
 `plaza_auto_refresh_seconds` 控制广场的自动漫游：`0` 关闭，正数表示每隔多少秒换一批公开图片；服务端把正数钳在 5–3600 秒，默认 5。
 
 管理员还可以在「系统设置 → 首页展示相册」里只选部分公开相册；选中后广场与自动漫游只取这些相册里的公开图片，空选择表示沿用全部公开图片。
@@ -159,9 +165,9 @@ API 客户端：
 公告正文变化会生成新 version。响应 `{ "data": { "ok": true } }`。游客没有账号，
 前端用 sessionStorage / localStorage 兜底。
 
-### `GET /api/v1/site/background` / `GET /api/v1/site/avatar` — 公开
+### `GET /api/v1/site/background` / `GET /api/v1/site/background/{asset}` / `GET /api/v1/site/avatar` — 公开
 
-站点背景图与默认头像本体。没有上传过时返回 404；地址里带 `?v=<更新时间>`，可以长缓存。SVG 资产额外带 `sandbox` CSP，直接打开也不会执行脚本。
+站点背景图与默认头像本体。没有上传过时返回 404；地址里带 `?v=<更新时间>`，可以长缓存。SVG 资产额外带 `sandbox` CSP，直接打开也不会执行脚本。`{asset}` 是多图背景里的单张资产 id，只允许字母数字、`-`、`_`。
 
 ### 收件域名校验（反临时邮箱的第三层）
 
@@ -561,7 +567,8 @@ API 客户端：
 "google": { "ok": true, "status": 400, "error": null }, "github": { "ok": true, "status": 405, "error": null } } }`。
 代理按启动时的顺序解析：`PIXORA_HTTP_PROXY` → `HTTPS_PROXY` → `ALL_PROXY` → Windows
 「Internet 选项」里的系统代理；`proxy_url` 已去掉凭据。能收到 HTTP 响应（含 401/405）就算可达；
-不接受调用方传 URL，避免被当成 SSRF 探针。
+不接受调用方传 URL，避免被当成 SSRF 探针。这里测的是服务器出网；Pixora 不提供代理服务，
+用户设备自己的代理只影响浏览器打开授权页，不会替服务器换 token。
 
 ### `GET /api/v1/tags` — read
 
@@ -1058,6 +1065,8 @@ curl "https://img.example.com/api/v1/random?collection=壁纸&exclude_ids=1,2,3&
 **站点资产（背景图、默认头像）**：两处都是 multipart 上传，字段名 `file`：
 
 - `POST /api/v1/admin/settings/background` → `{ "data": { "url": "/api/v1/site/background?v=…", "bytes": 91234 } }`
+- `POST /api/v1/admin/settings/backgrounds` → 一次上传多张（multipart，字段名 `file`，最多 12 张），
+  响应 `{ "data": { "ok": true, "urls": ["/api/v1/site/background/<id>?v=…"], "csrf_token": "…" } }`
 - `POST /api/v1/admin/settings/avatar` → `{ "data": { "url": "/api/v1/site/avatar?v=…", "bytes": 3210 } }`
 
 上传的字节存进库（`config:background` / `config:default_avatar` 两份资产），`/site` 下发的地址自带
@@ -1129,7 +1138,10 @@ curl "https://img.example.com/api/v1/random?collection=壁纸&exclude_ids=1,2,3&
             "appeal_email": "admin@example.com",
             "disposable_check": true, "mx_check": true, "third_party_check": false,
             "third_party_set": false },
-  "appearance": { "background": null, "default_avatar": null },
+  "appearance": { "background": null, "backgrounds": [],
+                  "background_opacity": 0.32, "background_blur": 0,
+                  "background_mode": "single", "background_interval": 12,
+                  "default_avatar": null },
   "plaza_albums": [ { "id": 7, "name": "旅行", "slug": "travel",
                       "owner_uid": "1001", "owner_email": "user@example.com", "image_count": 236 } ],
   "music": { "enabled": true, "source": "api", "autoplay": false, "default_volume": 0.3,
@@ -1150,7 +1162,10 @@ curl "https://img.example.com/api/v1/random?collection=壁纸&exclude_ids=1,2,3&
 
   `appearance.background` 与 `appearance.default_avatar` 都接受：外链地址、本站上传那张的
   公开地址（`/api/v1/site/background`、`/api/v1/site/avatar`）、或 `null`（清掉，同时删掉
-  库里那份字节）。
+  库里那份字节）。`appearance.backgrounds` 是字符串数组，元素可以是外链、`asset` 或
+  `asset:<id>`；界面上展示的公开地址保存时会自动折回资产标记，不会把刚上传的图删掉。
+  `appearance.background_opacity` 取 0–1，`background_blur` 0–40，`background_mode`
+  为 `single` / `slideshow` / `random`，`background_interval` 3–3600 秒。
 - `POST /api/v1/admin/settings/avatar` → 上传站点默认头像（multipart，字段名 `file`），
   响应 `{ "data": { "ok": true, "url": "…", "bytes": 12345, "csrf_token": "…" } }`。字节存进库（不落文件系统），
   上传完立刻生效：没设过头像的账号（含新注册的）都显示它。

@@ -144,6 +144,12 @@ fn add_user_detail_extras(
         "max_concurrent_uploads": policy.max_concurrent_uploads,
         "max_file_size": policy.max_file_size,
         "max_batch_size": policy.max_batch_size,
+        "max_pixels": policy.max_pixels,
+        "max_width": policy.max_width,
+        "max_height": policy.max_height,
+        "formats": policy.formats,
+        "download_per_minute": policy.download_per_minute,
+        "download_per_day": policy.download_per_day,
         "unlimited": policy.unlimited,
         "custom": policy.custom,
         "note": policy.note,
@@ -151,6 +157,50 @@ fn add_user_detail_extras(
     if let Some(object) = body.as_object_mut() {
         object.insert("limits".into(), limits);
     }
+}
+
+/// 把后台提交的背景图条目归一成存储形态。
+///
+/// 上传图在界面上展示为公开地址，保存时再折回 `asset` / `asset:<id>`；
+/// 这样「保存一次设置」不会把刚上传的图误删。外链与站内相对地址原样保留。
+fn normalize_background_entry(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw == keys::BACKGROUND_ASSET_MARKER {
+        return Some(keys::BACKGROUND_ASSET_MARKER.to_string());
+    }
+    if let Some(id) = raw.strip_prefix("asset:") {
+        return is_asset_id(id).then(|| format!("asset:{id}"));
+    }
+    if raw == keys::BACKGROUND_PUBLIC_PATH {
+        return Some(keys::BACKGROUND_ASSET_MARKER.to_string());
+    }
+    if let Some(rest) = raw.strip_prefix(keys::BACKGROUND_PUBLIC_PREFIX) {
+        let id = rest.split(|ch| ch == '?' || ch == '#').next().unwrap_or("");
+        return is_asset_id(id).then(|| format!("asset:{id}"));
+    }
+    if raw.starts_with("https://") || raw.starts_with("http://") || raw.starts_with('/') {
+        return Some(raw.to_string());
+    }
+    None
+}
+
+fn is_asset_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn background_asset_key(entry: &str) -> Option<String> {
+    if entry == keys::BACKGROUND_ASSET_MARKER {
+        return Some(keys::BACKGROUND_ASSET_KEY.to_string());
+    }
+    let id = entry.strip_prefix("asset:")?;
+    is_asset_id(id).then(|| format!("{}{id}", keys::BACKGROUND_ASSET_PREFIX))
 }
 
 /// `POST /api/v1/admin/users` — 管理端直接建号。
@@ -1240,6 +1290,11 @@ pub async fn ratelimit_get(
 
     finish::<serde_json::Value>(Ok(serde_json::json!({
         "global": policy_json(&global),
+        "global_enabled": state
+            .settings
+            .bool(keys::RATELIMIT_GLOBAL_ENABLED, false)
+            .await
+            .unwrap_or(false),
         // 站点级上传策略（系统设置里那份）：界面上的「单文件上限 / 单批张数 /
         // 队列深度 / 格式白名单」全局值就是它——按用户覆盖时以它为底线
         "upload_policy": {
@@ -1334,6 +1389,15 @@ pub async fn ratelimit_global_put(
             if let Err(err) = state.settings.set_integer(key, value).await {
                 return crate::http::error_response(err);
             }
+        }
+    }
+    if let Some(enabled) = field_opt_bool(&body, "global_enabled") {
+        if let Err(err) = state
+            .settings
+            .set_bool(keys::RATELIMIT_GLOBAL_ENABLED, enabled)
+            .await
+        {
+            return crate::http::error_response(err);
         }
     }
     let actor = auth.user.id;
@@ -1895,6 +1959,14 @@ pub async fn settings_get(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    let appearance = match state.settings.appearance().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
+    let background_urls = match state.settings.background_public_urls().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
     let session = match state.settings.session().await {
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
@@ -1974,6 +2046,8 @@ pub async fn settings_get(
                 .retention_days()
                 .await
                 .unwrap_or(0),
+            "maintenance_enabled": site.maintenance.enabled,
+            "maintenance_message": site.maintenance.message,
         },
         "upload": {
             "max_file_bytes": upload.max_file_bytes,
@@ -2036,7 +2110,15 @@ pub async fn settings_get(
             "third_party_check": mail.third_party_set,
             "third_party_set": mail.third_party_set,
         },
-        "appearance": { "background": background, "default_avatar": default_avatar },
+        "appearance": {
+            "background": background,
+            "backgrounds": background_urls,
+            "background_opacity": appearance.opacity,
+            "background_blur": appearance.blur,
+            "background_mode": appearance.mode,
+            "background_interval": appearance.interval,
+            "default_avatar": default_avatar,
+        },
         "plaza_albums": plaza_albums.iter().map(|row| serde_json::json!({
             "id": row.id,
             "name": row.name,
@@ -2177,7 +2259,7 @@ pub async fn settings_put(
                 return bad_request("公告结束时间必须晚于开始时间");
             }
         }
-        let writes: [(&str, Option<String>); 16] = [
+        let writes: [(&str, Option<String>); 18] = [
             (keys::SITE_NAME, field_opt_str(&site, "name")),
             (keys::SITE_BASE_URL, field_opt_str(&site, "base_url")),
             (
@@ -2258,6 +2340,16 @@ pub async fn settings_put(
             (
                 keys::ANNOUNCEMENT_ENDS_AT,
                 announcement_ends_field.map(|value| value.unwrap_or_default()),
+            ),
+            (
+                keys::SITE_MAINTENANCE_ENABLED,
+                field_opt_bool(&site, "maintenance_enabled").map(|value| value.to_string()),
+            ),
+            (
+                keys::SITE_MAINTENANCE_MESSAGE,
+                site.get("maintenance_message")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.trim().chars().take(200).collect()),
             ),
         ];
         if let Err(resp) = write_settings(&state, &writes, &mut touched).await {
@@ -2650,20 +2742,151 @@ pub async fn settings_put(
 
     if let Some(appearance) = body.get("appearance").and_then(|value| value.as_object()) {
         let appearance = serde_json::Value::Object(appearance.clone());
-        if super::field_present(&appearance, "background") {
-            // 显式给 null 表示清掉背景图（不是「不改」）
-            let value = field_opt_str(&appearance, "background").unwrap_or_default();
+
+        if let Some(value) = appearance
+            .get("background_opacity")
+            .and_then(|value| {
+                value
+                    .as_f64()
+                    .or_else(|| value.as_str().and_then(|raw| raw.trim().parse().ok()))
+            })
+        {
+            let value = value.clamp(0.0, 1.0);
             if let Err(err) = state
                 .settings
-                .set(keys::APPEARANCE_BACKGROUND, &value)
+                .set(keys::APPEARANCE_BACKGROUND_OPACITY, &value.to_string())
                 .await
             {
                 return crate::http::error_response(err);
             }
-            // 不再用上传的那张图时，把库里的字节一起删掉——留着没有引用它的东西
-            if field_opt_str(&appearance, "background").as_deref()
-                != Some(pixora_core::settings::keys::BACKGROUND_ASSET_MARKER)
+            touched.push(keys::APPEARANCE_BACKGROUND_OPACITY.to_string());
+        }
+        if let Some(value) = field_opt_i64(&appearance, "background_blur") {
+            let value = value.clamp(0, 40);
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND_BLUR, &value.to_string())
+                .await
             {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_BLUR.to_string());
+        }
+        if let Some(value) = field_opt_str(&appearance, "background_mode") {
+            let value = match value.trim().to_ascii_lowercase().as_str() {
+                "slideshow" | "random" => value.trim().to_ascii_lowercase(),
+                _ => "single".to_string(),
+            };
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND_MODE, &value)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_MODE.to_string());
+        }
+        if let Some(value) = field_opt_i64(&appearance, "background_interval") {
+            let value = value.clamp(
+                settings_defaults::BACKGROUND_INTERVAL_MIN,
+                settings_defaults::BACKGROUND_INTERVAL_MAX,
+            );
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND_INTERVAL, &value.to_string())
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_INTERVAL.to_string());
+        }
+
+        if super::field_present(&appearance, "backgrounds") {
+            let raw_list = appearance
+                .get("backgrounds")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut entries: Vec<String> = Vec::new();
+            for item in raw_list {
+                if let Some(entry) = item.as_str().and_then(normalize_background_entry) {
+                    if !entries.contains(&entry) {
+                        entries.push(entry);
+                    }
+                }
+            }
+            entries.truncate(60);
+
+            let old_entries = state
+                .settings
+                .appearance()
+                .await
+                .map(|value| value.backgrounds)
+                .unwrap_or_default();
+            let new_assets: std::collections::HashSet<String> =
+                entries.iter().filter_map(|entry| background_asset_key(entry)).collect();
+            for entry in &old_entries {
+                if let Some(key) = background_asset_key(entry) {
+                    if !new_assets.contains(&key) {
+                        if let Err(err) = state.repo.delete_asset(&key).await {
+                            tracing::warn!(error = %err, key, "删除旧背景图资产失败");
+                        }
+                    }
+                }
+            }
+
+            let encoded = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into());
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUNDS, &encoded)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            // 背景列表成为唯一来源；旧版单图字段只在列表为空时作回退。
+            // 列表里不再引用旧上传资产时，把旧资产一起清掉。
+            if !entries.iter().any(|entry| entry == keys::BACKGROUND_ASSET_MARKER) {
+                if let Err(err) = state
+                    .settings
+                    .set(keys::APPEARANCE_BACKGROUND, "")
+                    .await
+                {
+                    return crate::http::error_response(err);
+                }
+                if let Err(err) = state
+                    .repo
+                    .delete_asset(pixora_core::settings::keys::BACKGROUND_ASSET_KEY)
+                    .await
+                {
+                    tracing::warn!(error = %err, "删除旧版背景图资产失败");
+                }
+            }
+            touched.push(keys::APPEARANCE_BACKGROUNDS.to_string());
+        } else if super::field_present(&appearance, "background") {
+            // 兼容旧前端/脚本：只给一张图。提交值如果已经是当前上传图的公开
+            // 地址，就按「继续用这张」处理，不能把资产删掉。
+            let submitted = field_opt_str(&appearance, "background");
+            let current = state
+                .settings
+                .background_public_url()
+                .await
+                .ok()
+                .flatten();
+            let keeps_asset = submitted.as_deref() == Some(keys::BACKGROUND_ASSET_MARKER)
+                || (submitted.is_some() && submitted == current);
+            let stored = if keeps_asset {
+                keys::BACKGROUND_ASSET_MARKER.to_string()
+            } else {
+                submitted.clone().unwrap_or_default()
+            };
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND, &stored)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            if !keeps_asset {
                 if let Err(err) = state
                     .repo
                     .delete_asset(pixora_core::settings::keys::BACKGROUND_ASSET_KEY)
@@ -2674,19 +2897,27 @@ pub async fn settings_put(
             }
             touched.push(keys::APPEARANCE_BACKGROUND.to_string());
         }
+
         if super::field_present(&appearance, "default_avatar") {
-            // 与背景图同一条规矩：显式 null 表示清掉，不再用上传的那张时把字节删了
-            let value = field_opt_str(&appearance, "default_avatar").unwrap_or_default();
+            // 与背景图同一条规矩：显式 null 表示清掉；提交当前公开地址时
+            // 视为「继续用上传的这张」，不能把资产删掉。
+            let submitted = field_opt_str(&appearance, "default_avatar");
+            let current = state.settings.default_avatar_url().await.ok().flatten();
+            let keeps_asset = submitted.as_deref() == Some(pixora_core::settings::keys::AVATAR_ASSET_MARKER)
+                || (submitted.is_some() && submitted == current);
+            let stored = if keeps_asset {
+                pixora_core::settings::keys::AVATAR_ASSET_MARKER.to_string()
+            } else {
+                submitted.clone().unwrap_or_default()
+            };
             if let Err(err) = state
                 .settings
-                .set(pixora_core::settings::keys::SITE_DEFAULT_AVATAR, &value)
+                .set(pixora_core::settings::keys::SITE_DEFAULT_AVATAR, &stored)
                 .await
             {
                 return crate::http::error_response(err);
             }
-            if field_opt_str(&appearance, "default_avatar").as_deref()
-                != Some(pixora_core::settings::keys::AVATAR_ASSET_MARKER)
-            {
+            if !keeps_asset {
                 if let Err(err) = state
                     .repo
                     .delete_asset(pixora_core::settings::keys::AVATAR_ASSET_KEY)
@@ -3063,6 +3294,105 @@ pub async fn avatar_upload(
         .flatten()
         .unwrap_or_default();
     site_asset_response(&headers, url, &stored, &asset)
+}
+
+/// `POST /api/v1/admin/settings/backgrounds` — 一次上传多张背景图。
+///
+/// 每张独立存成 `config:background:<id>`；返回的公开地址由前端放进
+/// `appearance.backgrounds`，保存设置时才真正启用。这样上传多张、删掉一张、
+/// 调整顺序都不必每次都重写设置。
+pub async fn backgrounds_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/settings/backgrounds");
+    let mut files: Vec<Vec<u8>> = Vec::new();
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(err) => {
+                return bad_request(format!("表单解析失败：{err}"));
+            }
+        };
+        let name = field.name().unwrap_or_default().to_ascii_lowercase();
+        if !matches!(name.as_str(), "file" | "image" | "background") {
+            continue;
+        }
+        match field.bytes().await {
+            Ok(chunk) => {
+                if chunk.len() > BACKGROUND_MAX_BYTES {
+                    return bad_request(format!(
+                        "单张背景图不能超过 {} MiB",
+                        BACKGROUND_MAX_BYTES / 1024 / 1024
+                    ));
+                }
+                files.push(chunk.to_vec());
+            }
+            Err(err) => return bad_request(format!("读取背景图失败：{err}")),
+        }
+    }
+    if files.is_empty() {
+        return bad_request("没有收到图片文件（字段名用 file）");
+    }
+    if files.len() > 12 {
+        return bad_request("一次最多上传 12 张背景图");
+    }
+
+    let mut urls: Vec<String> = Vec::new();
+    for (index, bytes) in files.into_iter().enumerate() {
+        let Some(sniffed) = pixora_core::media::sniff(&bytes) else {
+            return bad_request("背景图格式无法识别");
+        };
+        if !sniffed.mime.starts_with("image/") {
+            return bad_request("背景图要是图片");
+        }
+        let stored = if sniffed.mime == "image/svg+xml" {
+            pixora_core::media::sanitize_svg(&bytes)
+        } else {
+            bytes
+        };
+        let id = format!(
+            "{}-{index}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let key = format!("{}{id}", keys::BACKGROUND_ASSET_PREFIX);
+        if let Err(err) = state.repo.put_asset(&key, &stored).await {
+            return crate::http::error_response(err.into());
+        }
+        let version = state
+            .repo
+            .asset_version(&key)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let version: String = version.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        urls.push(format!(
+            "{}{}?v={}",
+            keys::BACKGROUND_PUBLIC_PREFIX,
+            id,
+            version
+        ));
+        state
+            .audit_detail(
+                actions::SETTINGS_CHANGE,
+                Some(auth.user.id),
+                &key,
+                serde_json::json!({ "bytes": stored.len(), "mime": sniffed.mime }),
+                rectx.ip.as_deref(),
+            )
+            .await;
+    }
+
+    finish::<serde_json::Value>(Ok(serde_json::json!({
+        "ok": true,
+        "urls": urls,
+        "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+    })))
 }
 
 /// 收图 → 净化 → 进库 → 写设置标记。返回存下来的字节；出错时返回打包好的响应。

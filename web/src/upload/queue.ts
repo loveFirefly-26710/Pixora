@@ -627,8 +627,31 @@ class UploadQueue {
   /** 已成功（含去重命中）的直链列表，导出清单用。 */
   successLinks(): string[] {
     return this.items
-      .filter((item) => item.status === "done" && item.result?.url)
+      .filter(
+        (item) =>
+          (item.status === "done" || item.status === "skipped") && item.result?.url,
+      )
       .map((item) => item.result!.url);
+  }
+
+  /** 一键清掉已经成功的项，留下失败/等待项方便继续处理。 */
+  clearSucceeded(): number {
+    const before = this.items.length;
+    const keep: QueueItem[] = [];
+    for (const item of this.items) {
+      if (item.status === "done" || item.status === "skipped") {
+        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      } else {
+        keep.push(item);
+      }
+    }
+    this.items = keep;
+    const removed = before - keep.length;
+    if (removed > 0) {
+      this.emit({ kind: "items" });
+      this.emit({ kind: "state" });
+    }
+    return removed;
   }
 
   estimatedRemainingMs(): number {
@@ -670,33 +693,10 @@ class UploadQueue {
       return 0;
     }
 
-    // 单批次最大张数：一次选择收多少张。先按它截断，再按队列容量截断——
-    // 两个上限管的是不同的事，谁先谁后只影响提示语里报哪个数
+    // 不按单批/队列深度截断用户的选择。选择多少就排多少，真正上传由
+    // 客户端并发控制和服务端队列逐步处理；截断会让用户以为没选中的图丢了。
     const batchLimit = effectiveBatchLimit();
-    let overBatch = 0;
-    if (batchLimit > 0 && accepted.length > batchLimit) {
-      overBatch = accepted.length - batchLimit;
-      accepted.length = batchLimit;
-    }
-
-    // 队列深度阈值：算这一批能进来多少张，超出部分直接不收。
-    // 不截断的话，浏览器会老老实实排 900 张，然后第一张预检就被服务端拒掉——
-    // 用户看到的是「上传失败」，而不是「你一次选太多了」
     const depth = effectiveQueueDepth();
-    let skipped = 0;
-    if (depth > 0 && this.items.length + accepted.length > depth) {
-      const room = Math.max(0, depth - this.items.length);
-      skipped = accepted.length - room;
-      accepted.length = room;
-      if (accepted.length === 0) {
-        this.emit({
-          kind: "notice",
-          tone: "warn",
-          text: `队列已有 ${this.items.length} 张（上限 ${depth} 张），请先完成或清空后再添加。`,
-        });
-        return 0;
-      }
-    }
 
     for (const entry of accepted) {
       this.seq += 1;
@@ -727,29 +727,26 @@ class UploadQueue {
       });
     }
 
-    if (overBatch > 0) {
-      this.emit({
-        kind: "notice",
-        tone: "warn",
-        text:
-          `单批次上限 ${batchLimit} 张，本次多选的 ${overBatch} 张未加入。` +
-          "可再次选择以继续上传。",
-      });
-    }
-    if (skipped > 0) {
-      this.emit({
-        kind: "notice",
-        tone: "warn",
-        text:
-          `队列上限为 ${depth} 张（队列深度阈值），超出的 ${skipped} 张未加入。` +
-          "请先完成本批上传，再继续添加。",
-      });
-    }
     if (rejected > 0) {
       this.emit({
         kind: "notice",
         tone: "warn",
         text: `已添加 ${accepted.length} 张；另有 ${rejected} 个非图片文件已忽略。`,
+      });
+    }
+    if (depth > 0 && this.items.length > depth) {
+      this.emit({
+        kind: "notice",
+        tone: "info",
+        text:
+          `已选中 ${this.items.length} 张，超过当前队列深度 ${depth} 张。` +
+          "服务端会按队列逐批处理，请保持页面打开直到全部完成。",
+      });
+    } else if (batchLimit > 0 && accepted.length > batchLimit) {
+      this.emit({
+        kind: "notice",
+        tone: "info",
+        text: `本次选中 ${accepted.length} 张，客户端会拆成多批依次上传，不会丢弃文件。`,
       });
     }
     // 能收下这一批就说明许可又回来了（比如刚登录，或者管理员重新开了游客上传）
@@ -1026,10 +1023,9 @@ class UploadQueue {
     this.preflightBusy = true;
     try {
       const hashes = [...new Set(candidates.map((item) => item.sha256!))];
-      // 分块大小不能超过服务端的单批上限：一次预检请求就是服务端眼里的「一批」，
-      // 切得比它大就会被 400 挡回来
-      const batchLimit = effectiveBatchLimit();
-      const chunkSize = batchLimit > 0 ? Math.min(PREFLIGHT_BATCH, batchLimit) : PREFLIGHT_BATCH;
+      // 预检只是查重，不是入队准入：固定按协议上限内的小批发送，不跟着
+      // 「单批次最大张数」把用户的选择截成几段失败。
+      const chunkSize = PREFLIGHT_BATCH;
       const exist = new Set<string>();
       for (const batch of chunk(hashes, chunkSize)) {
         const result = await request<HashCheck>("/blobs/exists", {

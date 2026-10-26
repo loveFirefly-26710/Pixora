@@ -762,7 +762,7 @@ ENTRYPOINT ["/pixora"]
 | `PIXORA_ACCEL_PREFIX` | 空 | `X-Accel-Redirect` 前缀，让 Nginx 直接发文件 |
 | `PIXORA_WEB_DIR` | 空 | 指向前端产物目录则读盘而不是读嵌入资源（开发用） |
 | `PIXORA_DEV_RETURN_CODES` | 关 | 把邮箱验证码放进响应里（仅本机开发） |
-| `PIXORA_HTTP_PROXY` | 空 | 出网代理覆盖项，用于 OAuth、存储后端等；不填时 Windows 自动读「Internet 选项」里的系统代理，其它平台跟随 `HTTPS_PROXY` / `ALL_PROXY` |
+| `PIXORA_HTTP_PROXY` | 空 | 出网代理覆盖项，用于 OAuth、存储后端等；不填时 Windows 自动读「Internet 选项」里的系统代理，其它平台跟随 `HTTPS_PROXY` / `ALL_PROXY`。Pixora 不提供代理服务，只跟随部署环境已有的代理 |
 | `RUST_LOG` | `info` | 日志级别 |
 
 完整清单与示例见 `deploy/.env.example`。

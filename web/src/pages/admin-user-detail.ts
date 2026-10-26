@@ -741,7 +741,9 @@ function responsiveRow(title: string, value: string, createdAt: string): HTMLEle
 
 function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLElement {
   const user = detail.user;
-  const custom = detail.policy !== null && detail.policy !== undefined;
+  // 只有真的存在用户级覆盖行才算「自定义」；policy 永远是解析后的生效值，
+  // 拿它判断会让每个账号都显示成自定义。
+  const custom = detail.policy_override !== null && detail.policy_override !== undefined;
   const effective = detail.policy ?? detail.limits ?? null;
 
   const apiPerMinute = textInput({ value: String(effective?.api_per_minute ?? ""), mono: true });
@@ -774,9 +776,9 @@ function rateLimitCard(detail: UserDetailPayload, reload: () => void): HTMLEleme
       api_per_minute: Number(apiPerMinute.value),
       upload_per_minute: Number(uploadPerMinute.value),
       upload_per_day: Number(uploadPerDay.value),
-      upload_bytes_per_day: parseQuota(bytesPerDay.value) ?? NaN,
+      upload_bytes_per_day: parseQuota(bytesPerDay.value, "GB") ?? NaN,
       // 单张图片最大大小：空 = 跟随全局默认（0）；填数字按 MB，也可以写 20 MB
-      max_file_size: maxFileSize.value.trim() ? (parseQuota(`${maxFileSize.value} MB`) ?? NaN) : 0,
+      max_file_size: maxFileSize.value.trim() ? (parseQuota(maxFileSize.value, "MB") ?? NaN) : 0,
       download_per_minute: Number(downloadPerMinute.value),
       download_per_day: Number(downloadPerDay.value),
     };
@@ -1119,16 +1121,18 @@ async function restoreUser(user: DetailUser, reload: () => void): Promise<void> 
 /* 小工具                                                              */
 /* ------------------------------------------------------------------ */
 
-/** 配额输入解析：带单位按单位算；不带单位一律按 GB 算。 */
-function parseQuota(input: string): number | null {
+/** 配额输入解析：带单位按单位算；不带单位按调用方给的默认单位算（流量默认 GB，单张默认 MB）。 */
+function parseQuota(input: string, defaultUnit: "B" | "KB" | "MB" | "GB" | "TB" = "GB"): number | null {
   const text = input.trim();
   if (!text) return null;
   const match = text.match(/^([\d.]+)\s*(B|KB|MB|GB|TB)?$/i);
   if (!match) return null;
   const value = Number(match[1]);
   if (!Number.isFinite(value) || value < 0) return null;
-  // 输入框的标签写的是 GB：把「20」当成 20 字节会让管理员一不留神就给用户 20 字节配额
-  const unit = (match[2] ?? "GB").toUpperCase();
+  // 不带单位时按调用方默认单位；流量输入里一串很大的整数按字节理解，
+  // 这样「0.5 GB」和「5368709120」都能写。
+  let unit = (match[2] ?? defaultUnit).toUpperCase();
+  if (!match[2] && defaultUnit === "GB" && value >= 1_000_000) unit = "B";
   const units = ["B", "KB", "MB", "GB", "TB"];
   const index = units.indexOf(unit);
   return Math.round(value * Math.pow(1024, index < 0 ? 0 : index));

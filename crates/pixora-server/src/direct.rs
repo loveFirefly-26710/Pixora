@@ -127,7 +127,8 @@ async fn direct_inner(
     let download_actor = if want_download {
         let actor = download_actor(&state, &headers, peer, viewer.as_ref()).await;
         let limits = download_limits(&state, viewer.as_ref()).await?;
-        state.limits.check_download(&actor, limits).await?;
+        let admin = viewer.as_ref().map(|user| user.is_admin()).unwrap_or(false);
+        state.limits.check_download(&actor, limits, admin).await?;
         Some(actor)
     } else {
         None
@@ -196,7 +197,8 @@ async fn direct_inner(
     // 计数放在真的要把文件发出去之前：限的是「被取走多少」，不是「被请求多少」。
     // 命中条件请求的 304 早在上一步就返回了，那次没传出字节，自然不计数
     if let Some(actor) = download_actor.as_ref() {
-        if let Err(err) = state.limits.record_download(actor).await {
+        let admin = viewer.as_ref().map(|user| user.is_admin()).unwrap_or(false);
+        if let Err(err) = state.limits.record_download(actor, admin).await {
             tracing::debug!(error = %err, "下载计数失败");
         }
     }
