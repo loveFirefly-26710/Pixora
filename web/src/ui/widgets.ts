@@ -208,6 +208,129 @@ export function textarea(options: {
   return el;
 }
 
+/** 带动画的自定义下拉。 */
+export interface AnimSelect {
+  root: HTMLElement;
+  /** 当前值，读写都走这里（与 `<select>` 的用法对齐） */
+  value: string;
+  setValue(next: string): void;
+}
+
+/**
+ * 带展开动画的下拉。
+ *
+ * 原生 select 的展开由系统画，各平台样子都不一样，也做不了动效。
+ * 这里自己画浮层：向下淡入、箭头翻转，选中项左边一道光条。
+ * 键盘照常能用，↑↓ 换选项，Esc 收起。
+ */
+export function animSelect(
+  options: Array<{ value: string; label: string; hint?: string }>,
+  current: string,
+  onChange?: (next: string) => void,
+): AnimSelect {
+  let selected = options.some((item) => item.value === current)
+    ? current
+    : (options[0]?.value ?? "");
+
+  const label = h("span.aselect-label");
+  const caret = h("span.aselect-caret", { text: "▾", "aria-hidden": "true" });
+  const button = h("button.aselect-btn", {
+    type: "button",
+    "aria-haspopup": "listbox",
+    "aria-expanded": "false",
+  });
+  button.append(label, caret);
+
+  const panel = h("div.aselect-panel", { role: "listbox", tabindex: "-1" });
+  const items = options.map((item) => {
+    const node = h(
+      "button.aselect-item",
+      { type: "button", role: "option" },
+      h("span.aselect-item-label", { text: item.label }),
+      item.hint ? h("span.aselect-item-hint", { text: item.hint }) : null,
+    );
+    node.dataset.value = item.value;
+    node.addEventListener("click", () => {
+      pick(item.value);
+      close();
+    });
+    panel.append(node);
+    return node;
+  });
+
+  const root = h("div.aselect", null, button, panel);
+  const api: AnimSelect = {
+    root,
+    get value() {
+      return selected;
+    },
+    set value(next: string) {
+      pick(next);
+    },
+    setValue(next: string) {
+      pick(next);
+    },
+  };
+
+  function paint(): void {
+    const hit = options.find((item) => item.value === selected);
+    label.textContent = hit?.label ?? "";
+    for (const item of items) {
+      item.classList.toggle("on", item.dataset.value === selected);
+      item.setAttribute("aria-selected", String(item.dataset.value === selected));
+    }
+  }
+
+  function pick(next: string): void {
+    if (!options.some((item) => item.value === next)) return;
+    const changed = next !== selected;
+    selected = next;
+    paint();
+    if (changed) onChange?.(next);
+  }
+
+  function open(): void {
+    // 关掉别的下拉：同一屏可能有多个
+    for (const other of document.querySelectorAll<HTMLElement>(".aselect.is-open")) {
+      if (other !== root) other.classList.remove("is-open");
+    }
+    root.classList.add("is-open");
+    button.setAttribute("aria-expanded", "true");
+    panel.focus({ preventScroll: true });
+  }
+
+  function close(): void {
+    root.classList.remove("is-open");
+    button.setAttribute("aria-expanded", "false");
+  }
+
+  button.addEventListener("click", () => {
+    if (root.classList.contains("is-open")) close();
+    else open();
+  });
+  panel.addEventListener("keydown", (event) => {
+    const key = (event as KeyboardEvent).key;
+    if (key === "Escape") {
+      event.preventDefault();
+      close();
+      button.focus();
+      return;
+    }
+    if (key !== "ArrowDown" && key !== "ArrowUp") return;
+    event.preventDefault();
+    const index = options.findIndex((item) => item.value === selected);
+    const step = key === "ArrowDown" ? 1 : -1;
+    const next = options[(index + step + options.length) % options.length];
+    if (next) pick(next.value);
+  });
+  document.addEventListener("click", (event) => {
+    if (!root.contains(event.target as Node)) close();
+  });
+
+  paint();
+  return api;
+}
+
 /** 开关行：左侧标题与说明，右侧按钮。 */
 export function switchRow(
   title: string,

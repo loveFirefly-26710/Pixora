@@ -291,6 +291,32 @@ function userMenu(user: NonNullable<ReturnType<typeof getState>["user"]>): HTMLE
  */
 const warnedAvatars = new Set<string>();
 
+/**
+ * 站点默认头像。配了合集就从里面随机挑一张，挑中的记在 sessionStorage，
+ * 同一个会话里翻页不变。换个会话再挑，没设头像的账号不至于全顶着一张图。
+ */
+function siteDefaultAvatar(): string {
+  const site = getState().site;
+  const pool = (site?.default_avatars ?? [])
+    .map((item) => absUrl(item).trim())
+    .filter(Boolean);
+  if (pool.length === 1) return pool[0];
+  if (pool.length > 1) {
+    const key = "pixora.default-avatar";
+    try {
+      const saved = sessionStorage.getItem(key);
+      if (saved && pool.includes(saved)) return saved;
+      const picked = pool[Math.floor(Math.random() * pool.length)];
+      sessionStorage.setItem(key, picked);
+      return picked;
+    } catch {
+      // 隐私模式下 sessionStorage 可能直接抛错：退回当次随机
+      return pool[Math.floor(Math.random() * pool.length)];
+    }
+  }
+  return absUrl(site?.default_avatar).trim();
+}
+
 /** 站点没配默认头像、或配的地址加载失败时，落回这张随包发布的图。 */
 function builtinAvatarNode(size: "md" | "sm"): HTMLElement {
   return h("img.avatar-img", { class: size === "sm" ? "sm" : "", src: BUILTIN_AVATAR, alt: "" });
@@ -304,7 +330,7 @@ function builtinAvatarNode(size: "md" | "sm"): HTMLElement {
  */
 function avatarFallbackNode(size: "md" | "sm"): HTMLElement {
   // 站点默认头像可能是后端上传的那张（站内相对路径），同源直接用
-  const site = absUrl(getState().site?.default_avatar).trim();
+  const site = siteDefaultAvatar();
   if (!site) return builtinAvatarNode(size);
   return h("img.avatar-img", {
     class: size === "sm" ? "sm" : "",
@@ -350,7 +376,7 @@ export function avatarNode(size: "md" | "sm"): HTMLElement {
  * 所有没设头像的账号立刻跟着换。三级都空不了，所以调用方拿到的永远是一张图。
  */
 export function avatarUrl(user: { avatar?: string | null } | null): string {
-  const siteDefault = absUrl(getState().site?.default_avatar).trim();
+  const siteDefault = siteDefaultAvatar();
   if (!user) return siteDefault || BUILTIN_AVATAR;
   // 自己的头像有两种形态：外链原样用；传进图库的那种存的是站内相对路径
   // （`/images/xxx.png`），同源部署直接用。

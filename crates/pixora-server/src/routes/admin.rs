@@ -203,6 +203,50 @@ fn background_asset_key(entry: &str) -> Option<String> {
     is_asset_id(id).then(|| format!("{}{id}", keys::BACKGROUND_ASSET_PREFIX))
 }
 
+/// 背景条目规范化：只留认识的形态，去重，限长。
+/// 写入和「哪些资产还要留」都按这份结果算，两边不会打架。
+fn normalized_background_entries(raw_list: &[serde_json::Value]) -> Vec<String> {
+    let mut entries: Vec<String> = Vec::new();
+    for item in raw_list {
+        if let Some(entry) = item.as_str().and_then(normalize_background_entry) {
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+    }
+    entries.truncate(60);
+    entries
+}
+
+/// 写一组背景条目，顺手清掉不再被引用的上传资产。
+///
+/// 桌面端和移动端各调一次，`old_entries` 要传对应那一组的旧值，
+/// 不然清手机端的时候会把桌面端正在用的图删掉。
+async fn write_background_entries(
+    state: &Arc<AppState>,
+    key: &str,
+    raw_list: &[serde_json::Value],
+    old_entries: &[String],
+) -> Result<(), Response> {
+    let entries = normalized_background_entries(raw_list);
+    let new_assets: std::collections::HashSet<String> =
+        entries.iter().filter_map(|entry| background_asset_key(entry)).collect();
+    for entry in old_entries {
+        if let Some(asset_key) = background_asset_key(entry) {
+            if !new_assets.contains(&asset_key) {
+                if let Err(err) = state.repo.delete_asset(&asset_key).await {
+                    tracing::warn!(error = %err, key = asset_key, "删除旧背景图资产失败");
+                }
+            }
+        }
+    }
+    let encoded = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into());
+    if let Err(err) = state.settings.set(key, &encoded).await {
+        return Err(crate::http::error_response(err));
+    }
+    Ok(())
+}
+
 /// `POST /api/v1/admin/users` — 管理端直接建号。
 ///
 /// 邮箱直接标记为已验证：管理员手输的地址不需要再走一遍验证邮件。
@@ -851,6 +895,19 @@ pub async fn backend_create(
         Err(err) => return crate::http::error_response(err),
     };
 
+    // 同一份配置只让登记一次。本地磁盘加两次、S3 同一个桶加两次，
+    // 界面上是两个后端，写进去的却是同一个地方。
+    match state.storage.find_duplicate_backend(&driver, &config).await {
+        Ok(Some(existing)) => {
+            return crate::http::error_response(AppError::Conflict(format!(
+                "已经有一个配置完全相同的「{}」后端（#{}）。同一份配置重复添加只会让存储分布对不上，改它就行。",
+                existing.label, existing.id
+            )));
+        }
+        Ok(None) => {}
+        Err(err) => return crate::http::error_response(err),
+    }
+
     let created = match state
         .repo
         .create_backend(&NewBackend {
@@ -888,9 +945,45 @@ pub async fn backend_create(
     )))
 }
 
+/// `POST /api/v1/admin/storage/backends/dedupe` — 合并重复的后端实例。
+///
+/// 以前能把同一份配置加两次（比如两个「本地磁盘」），都指向同一个落点，
+/// 实体却记在不同的 `backend_id` 下；有实体的后端又不让删，管理员就卡住了。
+/// 这里把同驱动、同配置的行并成一行，记录改归属，行删掉，物理文件不动。
+pub async fn backend_dedupe(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    method: Method,
+    peer: PeerAddr,
+) -> Response {
+    let (rectx, auth) = admin_guard!(state, headers, method, peer, "/admin/storage/backends");
+
+    let (merged, moved) = match state.storage.dedupe_backends().await {
+        Ok(result) => result,
+        Err(err) => return crate::http::error_response(err),
+    };
+
+    let actor = auth.user.id;
+    state
+        .audit_detail(
+            actions::STORAGE_CHANGE,
+            Some(actor),
+            "backend:dedupe",
+            serde_json::json!({ "merged": merged, "moved": moved }),
+            rectx.ip.as_deref(),
+        )
+        .await;
+
+    finish::<serde_json::Value>(Ok(serde_json::json!({
+        "ok": true,
+        "merged": merged,
+        "moved": moved,
+        "csrf_token": cookie_value(&headers, CSRF_COOKIE),
+    })))
+}
+
 /// 后端行的对外载荷：配置里的敏感字段只回显布尔，并按契约第 11 章带上 `csrf_token`。
-fn backend_payload(view: &BackendView, csrf_token: Option<String>) -> serde_json::Value {
-    let mut body = serde_json::to_value(view).unwrap_or_else(|_| serde_json::json!({}));
+fn backend_payload(view: &BackendView, csrf_token: Option<String>) -> serde_json::Value {    let mut body = serde_json::to_value(view).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(object) = body.as_object_mut() {
         object.insert(
             "csrf_token".into(),
@@ -1967,6 +2060,19 @@ pub async fn settings_get(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    let background_urls_mobile = match state.settings.background_public_urls_mobile().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
+    let default_avatars = match state.settings.default_avatar_urls().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
+    let default_avatar_album = state
+        .settings
+        .default_avatar_album()
+        .await
+        .unwrap_or(None);
     let session = match state.settings.session().await {
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
@@ -2113,11 +2219,25 @@ pub async fn settings_get(
         "appearance": {
             "background": background,
             "backgrounds": background_urls,
+            "backgrounds_mobile": background_urls_mobile,
             "background_opacity": appearance.opacity,
             "background_blur": appearance.blur,
             "background_mode": appearance.mode,
             "background_interval": appearance.interval,
+            // 随机图来源：plaza / collection / custom
+            "background_random_source": appearance.random_source,
+            "background_random_collection": appearance.random_collection,
+            "background_random_api": appearance.random_api,
+            "background_random_albums": appearance.random_albums,
+            // 移动端单独的一套；来源为空表示没单独设过，跟桌面端一致
+            "background_random_source_mobile": appearance.random_source_mobile,
+            "background_random_collection_mobile": appearance.random_collection_mobile,
+            "background_random_albums_mobile": appearance.random_albums_mobile,
+            "background_random_api_mobile": appearance.random_api_mobile,
             "default_avatar": default_avatar,
+            // 头像合集（已解析成可访问地址）与「用某个公开相册当头像池」
+            "default_avatars": default_avatars,
+            "default_avatar_album": default_avatar_album,
         },
         "plaza_albums": plaza_albums.iter().map(|row| serde_json::json!({
             "id": row.id,
@@ -2807,42 +2927,23 @@ pub async fn settings_put(
                 .and_then(|value| value.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let mut entries: Vec<String> = Vec::new();
-            for item in raw_list {
-                if let Some(entry) = item.as_str().and_then(normalize_background_entry) {
-                    if !entries.contains(&entry) {
-                        entries.push(entry);
-                    }
-                }
-            }
-            entries.truncate(60);
-
             let old_entries = state
                 .settings
                 .appearance()
                 .await
                 .map(|value| value.backgrounds)
                 .unwrap_or_default();
-            let new_assets: std::collections::HashSet<String> =
-                entries.iter().filter_map(|entry| background_asset_key(entry)).collect();
-            for entry in &old_entries {
-                if let Some(key) = background_asset_key(entry) {
-                    if !new_assets.contains(&key) {
-                        if let Err(err) = state.repo.delete_asset(&key).await {
-                            tracing::warn!(error = %err, key, "删除旧背景图资产失败");
-                        }
-                    }
-                }
-            }
-
-            let encoded = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into());
-            if let Err(err) = state
-                .settings
-                .set(keys::APPEARANCE_BACKGROUNDS, &encoded)
-                .await
+            if let Err(resp) = write_background_entries(
+                &state,
+                keys::APPEARANCE_BACKGROUNDS,
+                &raw_list,
+                &old_entries,
+            )
+            .await
             {
-                return crate::http::error_response(err);
+                return resp;
             }
+            let entries: Vec<String> = normalized_background_entries(&raw_list);
             // 背景列表成为唯一来源；旧版单图字段只在列表为空时作回退。
             // 列表里不再引用旧上传资产时，把旧资产一起清掉。
             if !entries.iter().any(|entry| entry == keys::BACKGROUND_ASSET_MARKER) {
@@ -2896,6 +2997,211 @@ pub async fn settings_put(
                 }
             }
             touched.push(keys::APPEARANCE_BACKGROUND.to_string());
+        }
+
+        // 移动端背景：单独一组，空数组就是「跟桌面端一样」。
+        // 与桌面端共用同一套上传资产清理逻辑，两边不会互相删图。
+        if super::field_present(&appearance, "backgrounds_mobile") {
+            let raw_list = appearance
+                .get("backgrounds_mobile")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let old_entries = state
+                .settings
+                .appearance()
+                .await
+                .map(|value| value.backgrounds_mobile)
+                .unwrap_or_default();
+            if let Err(resp) = write_background_entries(
+                &state,
+                keys::APPEARANCE_BACKGROUNDS_MOBILE,
+                &raw_list,
+                &old_entries,
+            )
+            .await
+            {
+                return resp;
+            }
+            touched.push(keys::APPEARANCE_BACKGROUNDS_MOBILE.to_string());
+        }
+
+        // 随机图来源：plaza / collection / custom
+        if let Some(value) = field_opt_str(&appearance, "background_random_source") {
+            let source = match value.trim().to_ascii_lowercase().as_str() {
+                "collection" => "collection",
+                "custom" => "custom",
+                _ => "plaza",
+            };
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND_RANDOM_SOURCE, source)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_RANDOM_SOURCE.to_string());
+        }
+        if let Some(value) = field_opt_str(&appearance, "background_random_collection") {
+            if let Err(err) = state
+                .settings
+                .set(
+                    keys::APPEARANCE_BACKGROUND_RANDOM_COLLECTION,
+                    value.trim(),
+                )
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_RANDOM_COLLECTION.to_string());
+        }
+        // 移动端那一套，跟桌面端各存各的
+        if super::field_present(&appearance, "background_random_source_mobile") {
+            let raw = field_opt_str(&appearance, "background_random_source_mobile")
+                .unwrap_or_default();
+            let source = match raw.trim().to_ascii_lowercase().as_str() {
+                "collection" => "collection",
+                "custom" => "custom",
+                _ => "plaza",
+            };
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND_RANDOM_SOURCE_MOBILE, source)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_RANDOM_SOURCE_MOBILE.to_string());
+        }
+        if let Some(value) = field_opt_str(&appearance, "background_random_collection_mobile") {
+            if let Err(err) = state
+                .settings
+                .set(
+                    keys::APPEARANCE_BACKGROUND_RANDOM_COLLECTION_MOBILE,
+                    value.trim(),
+                )
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_RANDOM_COLLECTION_MOBILE.to_string());
+        }
+        if super::field_present(&appearance, "background_random_albums_mobile") {
+            let ids: Vec<i64> = appearance
+                .get("background_random_albums_mobile")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_i64())
+                        .filter(|id| *id > 0)
+                        .take(200)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let encoded = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into());
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND_RANDOM_ALBUMS_MOBILE, &encoded)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_RANDOM_ALBUMS_MOBILE.to_string());
+        }
+        if super::field_present(&appearance, "background_random_api_mobile") {
+            let value = field_opt_str(&appearance, "background_random_api_mobile").unwrap_or_default();
+            let value = value.trim();
+            if !value.is_empty() && !(value.starts_with("http://") || value.starts_with("https://")) {
+                return bad_request("移动端自定义随机图 API 必须以 http(s):// 开头");
+            }
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND_RANDOM_API_MOBILE, value)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_RANDOM_API_MOBILE.to_string());
+        }
+
+        // 手选的公开相册：与命名集合二选一，存成 JSON 数组
+        if super::field_present(&appearance, "background_random_albums") {
+            let ids: Vec<i64> = appearance
+                .get("background_random_albums")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_i64())
+                        .filter(|id| *id > 0)
+                        .take(200)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let encoded = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into());
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND_RANDOM_ALBUMS, &encoded)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_RANDOM_ALBUMS.to_string());
+        }
+        if super::field_present(&appearance, "background_random_api") {
+            let value = field_opt_str(&appearance, "background_random_api").unwrap_or_default();
+            let value = value.trim();
+            // 只接受 http(s)：这条地址会被服务端代取，别的协议没有意义也不安全
+            if !value.is_empty() && !(value.starts_with("http://") || value.starts_with("https://")) {
+                return bad_request("自定义随机图 API 必须以 http(s):// 开头");
+            }
+            if let Err(err) = state
+                .settings
+                .set(keys::APPEARANCE_BACKGROUND_RANDOM_API, value)
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::APPEARANCE_BACKGROUND_RANDOM_API.to_string());
+        }
+
+        // 头像合集：与背景图同一套条目格式，复用同一套资产清理
+        if super::field_present(&appearance, "default_avatars") {
+            let raw_list = appearance
+                .get("default_avatars")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let old_entries = state
+                .settings
+                .default_avatar_entries()
+                .await
+                .unwrap_or_default();
+            if let Err(resp) = write_background_entries(
+                &state,
+                keys::SITE_DEFAULT_AVATARS,
+                &raw_list,
+                &old_entries,
+            )
+            .await
+            {
+                return resp;
+            }
+            touched.push(keys::SITE_DEFAULT_AVATARS.to_string());
+        }
+        // 头像池相册：0 / 缺省表示不用相册
+        if super::field_present(&appearance, "default_avatar_album") {
+            let album = field_opt_i64(&appearance, "default_avatar_album").unwrap_or(0);
+            let album = if album > 0 { album } else { 0 };
+            if let Err(err) = state
+                .settings
+                .set(keys::SITE_DEFAULT_AVATAR_ALBUM, &album.to_string())
+                .await
+            {
+                return crate::http::error_response(err);
+            }
+            touched.push(keys::SITE_DEFAULT_AVATAR_ALBUM.to_string());
         }
 
         if super::field_present(&appearance, "default_avatar") {

@@ -255,4 +255,17 @@ impl Repo {
             )
             .await
     }
+
+    /// 把实体从一个后端挪到另一个后端（只改记录，不动物理文件）。
+    ///
+    /// 用在「合并重复后端」上：两份配置指向同一个落点时，把记录并到保留的那一行，
+    /// 再删掉多余的行，文件一份都不用搬。
+    pub async fn reassign_blobs_backend(&self, from: i64, to: i64) -> Result<u64> {
+        self.db
+            .execute(
+                "UPDATE blobs SET backend_id = ? WHERE backend_id = ?",
+                crate::args::Args::new().int(to).int(from),
+            )
+            .await
+    }
 }

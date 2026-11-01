@@ -49,14 +49,21 @@ export interface SiteInfo {
   background: string | null;
   /** 多图背景的公开地址；有它时优先于 background */
   backgrounds?: string[];
+  /** 移动端背景；空数组表示沿用桌面端那一组 */
+  backgrounds_mobile?: string[];
   background_opacity?: number;
   background_blur?: number;
   background_mode?: "single" | "slideshow" | "random";
   background_interval?: number;
+  /** 随机图来源：本站广场 / 公开相册合集 / 自定义 API（地址不下发） */
+  background_random_source?: "plaza" | "collection" | "custom";
+  background_random_collection?: string;
   /** 维护模式：开启后非管理员只读 */
   maintenance?: { enabled: boolean; message: string };
   /** 站点默认头像：账号自己没设头像时用它，没配过是 null */
   default_avatar?: string | null;
+  /** 默认头像合集：前端每次会话随机取一张 */
+  default_avatars?: string[];
   /** 支持的登录方式：登录页、注册页与账号安全页都读它 */
   login_methods?: LoginMethods;
   installed: boolean;
@@ -419,8 +426,12 @@ export interface StorageAdmin {
    * bytes 是仍被引用的实体字节（原图 + 缩略图，每个实体只算一次）。
    */
   distribution: { driver: string; label: string; count: number; bytes: number }[];
+  /** 按用户拆的在用占用，字节降序（存储占比饼图） */
+  user_usage?: { user_id: number; email: string; count: number; bytes: number }[];
   /** 回收站里还没过保留期的那部分 */
   binned: { count: number; bytes: number };
+  /** 回收站按用户拆（谁的回收站还没清） */
+  binned_users?: { user_id: number; email: string; count: number; bytes: number }[];
   /** 已经没人引用、等后台回收的实体 */
   pending: { count: number; bytes: number };
   totals: { count: number; bytes: number; dedup_saved_bytes: number };
@@ -658,11 +669,26 @@ export interface AdminSettings {
   appearance: {
     background: string | null;
     backgrounds?: string[];
+    backgrounds_mobile?: string[];
     background_opacity?: number;
     background_blur?: number;
     background_mode?: "single" | "slideshow" | "random";
     background_interval?: number;
+    background_random_source?: "plaza" | "collection" | "custom";
+    background_random_collection?: string;
+    background_random_api?: string;
+    /** 手选的公开相册 id；非空时优先于命名集合 */
+    background_random_albums?: number[];
+    /** 移动端单独的一套，跟桌面端互不影响 */
+    background_random_source_mobile?: "plaza" | "collection" | "custom";
+    background_random_collection_mobile?: string;
+    background_random_albums_mobile?: number[];
+    background_random_api_mobile?: string;
     default_avatar: string | null;
+    /** 默认头像合集（已解析成可访问地址） */
+    default_avatars?: string[];
+    /** 用哪个公开相册当头像池；0 表示不用 */
+    default_avatar_album?: number | null;
   };
   /** 管理后台挑「首页展示相册」用的公开相册清单 */
   plaza_albums?: Array<{

@@ -743,6 +743,10 @@ export async function render(ctx: PageContext): Promise<void> {
 
   // 搜索只在顶栏那一个输入框里（页面里不再重复），标签筛选也交给它——
   // 后端的关键词匹配本来就同时命中标题与标签
+  //
+  // 工具条常驻。以前搜索框和「搜索 / 重置」跟着标签云一起 hidden，
+  // 标签接口慢一拍或者返回空的时候整行就空了，只剩右边的列数和排序，
+  // 得刷新页面才回来。
   const tagRow = h("div.flexline.plaza-toolbar");
   // 已存在的公开标签：给搜索与筛选一个看得见的参考，不再让人凭记忆猜标签
   const tagsRow = h("div.plaza-tags");
@@ -839,11 +843,8 @@ export async function render(ctx: PageContext): Promise<void> {
     const filtered = needle
       ? merged.filter((tag) => tag.name.toLowerCase().includes(needle))
       : merged;
+    // 标签云没有内容时只藏标签云；搜索框与按钮始终留在原位。
     tagsRow.hidden = merged.length === 0;
-    tagSearchForm.hidden = merged.length === 0;
-    tagReset.hidden = merged.length === 0;
-    tagSearch.hidden = merged.length === 0;
-    tagSearchButton.hidden = merged.length === 0;
     tagSearchButton.classList.remove("is-dirty");
 
     const chips: Node[] = [

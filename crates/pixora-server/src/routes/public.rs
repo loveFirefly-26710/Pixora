@@ -87,6 +87,30 @@ pub async fn site(
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
     };
+    // 头像合集：管理员可以传一组图，或直接用一个公开相册当头像池。
+    // 配了相册就以相册里的公开图为准（每次请求随机取一批，前端再从中挑一张）。
+    let default_avatars = match state.settings.default_avatar_album().await {
+        Ok(Some(album_id)) => {
+            let mut filter = RandomFilter::default();
+            filter.public_only = true;
+            filter.album_ids = vec![album_id];
+            match state.repo.random_images(&filter, 40).await {
+                Ok(items) if !items.is_empty() => {
+                    let mut urls = Vec::with_capacity(items.len());
+                    for view in &items {
+                        urls.push(state.direct_url(&view.sha256, &view.ext, true).await);
+                    }
+                    urls
+                }
+                // 相册被删/转私有：退回上传的那组，别把头像整个弄没
+                _ => state.settings.default_avatar_urls().await.unwrap_or_default(),
+            }
+        }
+        _ => match state.settings.default_avatar_urls().await {
+            Ok(value) => value,
+            Err(err) => return crate::http::error_response(err),
+        },
+    };
     let terms = match terms_summary(&state, auth.as_ref()).await {
         Ok(value) => value,
         Err(err) => return crate::http::error_response(err),
@@ -181,16 +205,23 @@ pub async fn site(
         "background": background,
         // 多图背景与展示参数；旧前端只读 background，新前端优先读 backgrounds
         "backgrounds": site.background_urls,
+        // 移动端单独一组；空数组表示沿用桌面端
+        "backgrounds_mobile": site.background_urls_mobile,
         "background_opacity": site.background_opacity,
         "background_blur": site.background_blur,
         "background_mode": site.background_mode,
         "background_interval": site.background_interval,
+        // 随机图从哪来。地址只给「用哪个来源」，第三方 API 的具体地址不出库
+        "background_random_source": site.background_random_source,
+        "background_random_collection": site.background_random_collection,
         "maintenance": {
             "enabled": site.maintenance.enabled,
             "message": site.maintenance.message,
         },
         // 站点默认头像：账号自己没设头像时前端回落到它，再没有就回落到内置翼标
         "default_avatar": default_avatar,
+        // 头像合集：前端每次会话从里面随机取一张，让没设头像的账号也有变化
+        "default_avatars": default_avatars,
         // 本站支持哪些登录方式：登录页/注册页照着它渲染按钮，
         // 没启用的（或凭据没配全的）不出现——摆一个点了报错的按钮最糟
         "login_methods": state.login_methods().await.unwrap_or_default(),
@@ -351,6 +382,215 @@ pub async fn site_avatar(State(state): State<Arc<AppState>>, headers: HeaderMap)
         "默认头像",
     )
     .await
+}
+
+/// `GET /api/v1/site/backgrounds/random` — 公开。站点背景用的随机图。
+///
+/// 前端只调这一个地址，具体取哪里由后台配置决定。`plaza` 取广场公开图，
+/// 筛选口径跟 `/random?scope=plaza` 一样；`collection` 取管理员命名的公开
+/// 相册合集；`custom` 取管理员填的第三方 API，由服务端代取，地址不出现在
+/// `/site` 里，也不受对方 CORS 限制。
+pub async fn background_random(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let count = params
+        .get("count")
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(16)
+        .min(24);
+
+    let appearance = match state.settings.appearance().await {
+        Ok(value) => value,
+        Err(err) => return crate::http::error_response(err),
+    };
+    // 两端可以各配一套；移动端没单独设过就用桌面端那份
+    let mobile = params
+        .get("device")
+        .map(|value| value.trim().eq_ignore_ascii_case("mobile"))
+        .unwrap_or(false);
+    let (source, collection, albums, api) = appearance.random_for(mobile);
+
+    if source == "custom" {
+        if api.trim().is_empty() {
+            return crate::http::error_response(AppError::bad_request(
+                "自定义随机图 API 还没填地址",
+            ));
+        }
+        return match fetch_custom_backgrounds(&state, &api, count).await {
+            Ok(urls) if !urls.is_empty() => finish::<serde_json::Value>(Ok(serde_json::json!(urls))),
+            Ok(_) => crate::http::error_response(AppError::not_found("随机图")),
+            Err(err) => crate::http::error_response(err),
+        };
+    }
+
+    let mut filter = RandomFilter::default();
+    filter.public_only = true;
+
+    // 合集可能压根没建、被删了，或者里面的相册后来全转成了私有。
+    // 这几种情况都退回广场随机图，不能因为一个名字失效就让壁纸空着。
+    let mut used_collection = false;
+    if source == "collection" {
+        // 手选的相册优先。两种挑法各存一份，管理员在界面上切换时不用重选
+        let mut ids: Vec<i64> = albums.clone();
+        let name = collection.trim();
+        if ids.is_empty() && !name.is_empty() {
+            let collections = match state.settings.plaza_collections().await {
+                Ok(value) => value,
+                Err(err) => return crate::http::error_response(err),
+            };
+            if let Some(picked) = collections.get(name) {
+                ids = picked.clone();
+            }
+        }
+        if !ids.is_empty() {
+            let allowed = match state.repo.list_public_albums().await {
+                Ok(albums) => albums
+                    .into_iter()
+                    .map(|album| album.id)
+                    .collect::<std::collections::HashSet<_>>(),
+                Err(err) => return crate::http::error_response(err.into()),
+            };
+            let ids: Vec<i64> = ids.into_iter().filter(|id| allowed.contains(id)).collect();
+            if !ids.is_empty() {
+                filter.album_ids = ids;
+                used_collection = true;
+            }
+        }
+        if !used_collection {
+            tracing::warn!(
+                collection = %collection,
+                albums = albums.len(),
+                mobile,
+                "背景随机图的合集或相册不可用，退回广场随机图"
+            );
+        }
+    }
+
+    if !used_collection {
+        // 与广场同一个口径：管理员挑过展示范围时只从那些相册里取
+        let site = match state.settings.site(state.config.base_url.as_deref()).await {
+            Ok(site) => site,
+            Err(err) => return crate::http::error_response(err),
+        };
+        if !site.plaza_album_ids.is_empty() {
+            let allowed = match state.repo.list_public_albums().await {
+                Ok(albums) => albums
+                    .into_iter()
+                    .map(|album| album.id)
+                    .collect::<std::collections::HashSet<_>>(),
+                Err(err) => return crate::http::error_response(err.into()),
+            };
+            filter.album_ids = site
+                .plaza_album_ids
+                .iter()
+                .copied()
+                .filter(|id| allowed.contains(id))
+                .collect();
+        }
+    }
+
+    let picked = match state.repo.random_images(&filter, count).await {
+        Ok(items) => items,
+        Err(err) => return crate::http::error_response(err.into()),
+    };
+    if picked.is_empty() {
+        return crate::http::error_response(AppError::not_found("随机图"));
+    }
+    let mut urls: Vec<String> = Vec::with_capacity(picked.len());
+    for view in &picked {
+        urls.push(state.direct_url(&view.sha256, &view.ext, false).await);
+    }
+    finish::<serde_json::Value>(Ok(serde_json::json!(urls)))
+}
+
+/// 代取管理员填的随机图 API，从返回内容里挑出图片地址。
+///
+/// 直接返回图片（302 跟到图片上）、字符串数组、对象数组（`url` / `imgurl` /
+/// `image` / `src`）都认。认不出来就当空结果，前端用已上传的背景图兜底。
+async fn fetch_custom_backgrounds(
+    state: &Arc<AppState>,
+    api: &str,
+    count: i64,
+) -> Result<Vec<String>, AppError> {
+    let api = api.trim();
+    if !(api.starts_with("https://") || api.starts_with("http://")) {
+        return Err(AppError::bad_request("自定义随机图 API 必须以 http(s):// 开头"));
+    }
+    let response = state
+        .http
+        .get(api)
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+        .map_err(|err| AppError::bad_request(format!("随机图 API 请求失败：{err}")))?;
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    // 直接返回图片的接口（302 跟随后落在图片上）：最终地址就是背景图
+    if content_type.starts_with("image/") {
+        return Ok(vec![response.url().to_string()]);
+    }
+
+    let text = response
+        .text()
+        .await
+        .map_err(|err| AppError::bad_request(format!("随机图 API 返回内容读取失败：{err}")))?;
+    // 兜底上限：第三方接口返回一整本相册时，没必要全读进内存
+    if text.len() > 2 * 1024 * 1024 {
+        return Err(AppError::bad_request("随机图 API 返回内容过大"));
+    }
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|err| AppError::bad_request(format!("随机图 API 没有返回 JSON：{err}")))?;
+
+    let mut urls: Vec<String> = Vec::new();
+    collect_image_urls(&value, &mut urls, count as usize);
+    Ok(urls)
+}
+
+/// 从任意 JSON 结构里挑出像图片地址的字符串，最多 `limit` 个。
+fn collect_image_urls(value: &serde_json::Value, out: &mut Vec<String>, limit: usize) {
+    if out.len() >= limit {
+        return;
+    }
+    match value {
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            if (text.starts_with("https://") || text.starts_with("http://") || text.starts_with('/'))
+                && !out.iter().any(|item| item == text)
+            {
+                out.push(text.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_image_urls(item, out, limit);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // 先认约定的几个键，没有再退到「任意字符串字段」
+            for key in ["url", "imgurl", "image", "src", "img", "data", "images", "list"] {
+                if let Some(item) = map.get(key) {
+                    collect_image_urls(item, out, limit);
+                }
+            }
+            if out.is_empty() {
+                for item in map.values() {
+                    collect_image_urls(item, out, limit);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 站点资产（背景图 / 默认头像）共用的发法：ETag + 一天缓存 + nosniff。

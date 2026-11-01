@@ -28,10 +28,14 @@ Thumbs.db
 *.log
 /tmp/
 
+# 本地助手的工作记录（不是项目内容）
+/.workbuddy-ai/
+
 # 前端
 /web/node_modules/
-# web/dist 是构建产物，但故意提交：单二进制的编译依赖它存在（rust-embed 在编译期读它），
-# 留一份在仓库里能让 `cargo build` 在全新克隆上直接可用。改了前端记得 `npm run build`。
+# 构建产物不入库：CI、Dockerfile 都会先 `npm run build` 再编 Rust。
+# 本地新克隆第一次编译前也要先构建一次，否则 build.rs 会拦下来并提示怎么补。
+/web/dist/
 
 # 排查用的大图（scripts 与冒烟测试自己生成，不入库）
 /probe.png

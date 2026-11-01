@@ -145,11 +145,38 @@ pub mod keys {
     /// `single` / `slideshow` / `random`
     pub const APPEARANCE_BACKGROUND_MODE: &str = "appearance.background_mode";
     pub const APPEARANCE_BACKGROUND_INTERVAL: &str = "appearance.background_interval";
+    /// 移动端背景图：结构同 `APPEARANCE_BACKGROUNDS`，为空时沿用桌面端那一组
+    pub const APPEARANCE_BACKGROUNDS_MOBILE: &str = "appearance.backgrounds_mobile";
+    /// 随机图来源：`plaza`（本站广场随机图）/ `collection`（公开相册合集）/ `custom`（自定义 API）
+    pub const APPEARANCE_BACKGROUND_RANDOM_SOURCE: &str = "appearance.background_random_source";
+    /// 随机图来源为 `collection` 时用的合集名（取自首页展示范围里的命名集合）
+    pub const APPEARANCE_BACKGROUND_RANDOM_COLLECTION: &str =
+        "appearance.background_random_collection";
+    /// 随机图来源为 `custom` 时管理员填的 API 地址
+    pub const APPEARANCE_BACKGROUND_RANDOM_API: &str = "appearance.background_random_api";
+    /// 随机图来源为 `collection` 时手动勾选的公开相册（JSON 数组）。
+    /// 非空时优先于命名集合——两种挑法各存一份，切回来不用重选。
+    pub const APPEARANCE_BACKGROUND_RANDOM_ALBUMS: &str =
+        "appearance.background_random_albums";
+    /// 移动端的随机图来源。留空表示没单独设过，取桌面端那一套
+    pub const APPEARANCE_BACKGROUND_RANDOM_SOURCE_MOBILE: &str =
+        "appearance.background_random_source_mobile";
+    pub const APPEARANCE_BACKGROUND_RANDOM_COLLECTION_MOBILE: &str =
+        "appearance.background_random_collection_mobile";
+    pub const APPEARANCE_BACKGROUND_RANDOM_ALBUMS_MOBILE: &str =
+        "appearance.background_random_albums_mobile";
+    pub const APPEARANCE_BACKGROUND_RANDOM_API_MOBILE: &str =
+        "appearance.background_random_api_mobile";
     /// 多图上传的资产键前缀；完整键是 `config:background:<id>`
     pub const BACKGROUND_ASSET_PREFIX: &str = "config:background:";
     pub const BACKGROUND_PUBLIC_PREFIX: &str = "/api/v1/site/background/";
     /// 站点默认头像：没设过头像的账号（含新注册的）用它。外链或上传的那张
     pub const SITE_DEFAULT_AVATAR: &str = "site.default_avatar";
+    /// 默认头像合集：JSON 数组，元素与背景图同一套写法（外链 / `asset:<id>`）。
+    /// 有值时优先于单张，前端每次会话随机取一张。
+    pub const SITE_DEFAULT_AVATARS: &str = "site.default_avatars";
+    /// 用某个公开相册里的图片当头像池（相册 id）。与合集二选一，合集优先
+    pub const SITE_DEFAULT_AVATAR_ALBUM: &str = "site.default_avatar_album";
     /// 维护模式：开启后除管理员外只读
     pub const SITE_MAINTENANCE_ENABLED: &str = "site.maintenance_enabled";
     pub const SITE_MAINTENANCE_MESSAGE: &str = "site.maintenance_message";
@@ -307,10 +334,16 @@ pub struct SiteSettings {
     pub email_domains: RegisterDomains,
     /// 背景图公开地址（已经解析成浏览器能直接用的地址）
     pub background_urls: Vec<String>,
+    /// 移动端背景图（空 = 沿用 `background_urls`）
+    pub background_urls_mobile: Vec<String>,
     pub background_opacity: f64,
     pub background_blur: i64,
     pub background_mode: String,
     pub background_interval: i64,
+    /// 随机图来源：plaza / collection / custom
+    pub background_random_source: String,
+    /// 合集名（来源为 collection 时有效）
+    pub background_random_collection: String,
     pub maintenance: MaintenanceSettings,
 }
 
@@ -365,11 +398,47 @@ impl AnnouncementSettings {
 /// 外观配置（背景图部分）。`backgrounds` 是存储形态，公开地址要再解析。
 #[derive(Debug, Clone, Default)]
 pub struct AppearanceSettings {
+    /// 桌面端背景图（存储形态：外链、`asset` 或 `asset:<id>`）
     pub backgrounds: Vec<String>,
+    /// 移动端背景图。空数组表示沿用桌面端那一组
+    pub backgrounds_mobile: Vec<String>,
     pub opacity: f64,
     pub blur: i64,
     pub mode: String,
     pub interval: i64,
+    /// 随机图来源：plaza / collection / custom
+    pub random_source: String,
+    /// 合集名（random_source = collection 时有效）
+    pub random_collection: String,
+    /// 自定义随机图 API 地址（random_source = custom 时有效）
+    pub random_api: String,
+    /// 手动勾选的公开相册（random_source = collection 时有效，优先于命名集合）
+    pub random_albums: Vec<i64>,
+    /// 移动端的随机图来源。没设过按 plaza 算，跟桌面端互不影响
+    pub random_source_mobile: String,
+    pub random_collection_mobile: String,
+    pub random_albums_mobile: Vec<i64>,
+    pub random_api_mobile: String,
+}
+
+impl AppearanceSettings {
+    /// 某一端实际生效的随机图配置。两端各一份，谁也不跟谁走。
+    pub fn random_for(&self, mobile: bool) -> (String, String, Vec<i64>, String) {
+        if mobile {
+            return (
+                self.random_source_mobile.clone(),
+                self.random_collection_mobile.clone(),
+                self.random_albums_mobile.clone(),
+                self.random_api_mobile.clone(),
+            );
+        }
+        (
+            self.random_source.clone(),
+            self.random_collection.clone(),
+            self.random_albums.clone(),
+            self.random_api.clone(),
+        )
+    }
 }
 
 /// 维护模式配置。
@@ -718,7 +787,10 @@ impl Settings {
     pub async fn site(&self, env_base_url: Option<&str>) -> Result<SiteSettings> {
         let appearance = self.appearance().await?;
         let maintenance = self.maintenance().await?;
-        let background_urls = self.background_public_urls().await?;
+        let background_urls = self.resolve_background_urls(&appearance.backgrounds).await?;
+        let background_urls_mobile = self
+            .resolve_background_urls(&appearance.backgrounds_mobile)
+            .await?;
         Ok(SiteSettings {
             name: self.string(keys::SITE_NAME, defaults::SITE_NAME).await?,
             // 设置里的地址优先于环境变量？不：环境变量是运维真相，
@@ -761,10 +833,13 @@ impl Settings {
                 self.raw(keys::REGISTER_EMAIL_DOMAINS).await?.as_deref(),
             ),
             background_urls,
+            background_urls_mobile,
             background_opacity: appearance.opacity,
             background_blur: appearance.blur,
             background_mode: appearance.mode,
             background_interval: appearance.interval,
+            background_random_source: appearance.random_source,
+            background_random_collection: appearance.random_collection,
             maintenance,
         })
     }
@@ -1120,6 +1195,15 @@ impl Settings {
                 }
             }
         }
+        // 移动端是独立的一组；留空表示「跟桌面端一样」，由解析层决定回退，
+        // 而不是在这里把桌面端的图复制一份（复制之后改桌面端就带不动手机端了）
+        let mut backgrounds_mobile: Vec<String> = self
+            .raw(keys::APPEARANCE_BACKGROUNDS_MOBILE)
+            .await?
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .unwrap_or_default();
+        backgrounds_mobile.retain(|item| !item.trim().is_empty());
+        backgrounds_mobile.truncate(60);
         let opacity = self
             .string(
                 keys::APPEARANCE_BACKGROUND_OPACITY,
@@ -1152,12 +1236,79 @@ impl Settings {
                 defaults::BACKGROUND_INTERVAL_MIN,
                 defaults::BACKGROUND_INTERVAL_MAX,
             );
+        let random_source = self
+            .string(keys::APPEARANCE_BACKGROUND_RANDOM_SOURCE, "plaza")
+            .await?
+            .trim()
+            .to_ascii_lowercase();
+        let random_source = match random_source.as_str() {
+            "collection" | "custom" => random_source,
+            _ => "plaza".to_string(),
+        };
+        let random_collection = self
+            .string(keys::APPEARANCE_BACKGROUND_RANDOM_COLLECTION, "")
+            .await?
+            .trim()
+            .to_string();
+        let random_api = self
+            .string(keys::APPEARANCE_BACKGROUND_RANDOM_API, "")
+            .await?
+            .trim()
+            .to_string();
+        let random_albums: Vec<i64> = self
+            .raw(keys::APPEARANCE_BACKGROUND_RANDOM_ALBUMS)
+            .await?
+            .and_then(|raw| serde_json::from_str::<Vec<i64>>(&raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|id| *id > 0)
+            .take(200)
+            .collect();
+        // 移动端：来源留空表示没单独设过
+        let random_source_mobile = self
+            .string(keys::APPEARANCE_BACKGROUND_RANDOM_SOURCE_MOBILE, "")
+            .await?
+            .trim()
+            .to_ascii_lowercase();
+        // 没设过就按广场随机图算。这里不做「跟桌面端一样」，两端各配各的
+        let random_source_mobile = match random_source_mobile.as_str() {
+            "collection" | "custom" => random_source_mobile,
+            _ => "plaza".to_string(),
+        };
+        let random_collection_mobile = self
+            .string(keys::APPEARANCE_BACKGROUND_RANDOM_COLLECTION_MOBILE, "")
+            .await?
+            .trim()
+            .to_string();
+        let random_api_mobile = self
+            .string(keys::APPEARANCE_BACKGROUND_RANDOM_API_MOBILE, "")
+            .await?
+            .trim()
+            .to_string();
+        let random_albums_mobile: Vec<i64> = self
+            .raw(keys::APPEARANCE_BACKGROUND_RANDOM_ALBUMS_MOBILE)
+            .await?
+            .and_then(|raw| serde_json::from_str::<Vec<i64>>(&raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|id| *id > 0)
+            .take(200)
+            .collect();
         Ok(AppearanceSettings {
             backgrounds,
+            backgrounds_mobile,
             opacity,
             blur,
             mode,
             interval,
+            random_source,
+            random_collection,
+            random_api,
+            random_albums,
+            random_source_mobile,
+            random_collection_mobile,
+            random_albums_mobile,
+            random_api_mobile,
         })
     }
 
@@ -1174,8 +1325,20 @@ impl Settings {
     /// 背景图公开地址列表。上传图走本站地址并带版本号；外链原样返回。
     pub async fn background_public_urls(&self) -> Result<Vec<String>> {
         let appearance = self.appearance().await?;
+        self.resolve_background_urls(&appearance.backgrounds).await
+    }
+
+    /// 移动端背景图公开地址。没单独配过就返回空数组，由前端回落到桌面端那一组。
+    pub async fn background_public_urls_mobile(&self) -> Result<Vec<String>> {
+        let appearance = self.appearance().await?;
+        self.resolve_background_urls(&appearance.backgrounds_mobile)
+            .await
+    }
+
+    /// 存储形态的背景条目 → 浏览器能直接用的地址。
+    async fn resolve_background_urls(&self, entries: &[String]) -> Result<Vec<String>> {
         let mut urls: Vec<String> = Vec::new();
-        for entry in appearance.backgrounds {
+        for entry in entries {
             let resolved = if entry == keys::BACKGROUND_ASSET_MARKER {
                 self.background_public_url().await?
             } else if let Some(id) = entry.strip_prefix("asset:") {
@@ -1237,6 +1400,47 @@ impl Settings {
             keys::BACKGROUND_PUBLIC_PATH,
             version
         )))
+    }
+
+    /// 默认头像合集的存储形态（`asset:<id>` / 外链），保存时用来判断
+    /// 哪些上传资产已经不再被引用。
+    pub async fn default_avatar_entries(&self) -> Result<Vec<String>> {
+        Ok(self
+            .raw(keys::SITE_DEFAULT_AVATARS)
+            .await?
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| !item.trim().is_empty())
+            .collect())
+    }
+
+    /// 默认头像合集的对外地址列表（存储形态 → 浏览器可用地址）。
+    ///
+    /// 合集为空时退回单张那张；单张也没有就返回空数组，前端用内置翼标。
+    pub async fn default_avatar_urls(&self) -> Result<Vec<String>> {
+        let entries: Vec<String> = self
+            .raw(keys::SITE_DEFAULT_AVATARS)
+            .await?
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| !item.trim().is_empty())
+            .take(60)
+            .collect();
+        if !entries.is_empty() {
+            return self.resolve_background_urls(&entries).await;
+        }
+        Ok(match self.default_avatar_url().await? {
+            Some(url) => vec![url],
+            None => Vec::new(),
+        })
+    }
+
+    /// 头像池用的公开相册 id（没配就是 `None`）。
+    pub async fn default_avatar_album(&self) -> Result<Option<i64>> {
+        let id = self.integer(keys::SITE_DEFAULT_AVATAR_ALBUM, 0).await?;
+        Ok((id > 0).then_some(id))
     }
 
     /// 站点默认头像的对外地址。

@@ -58,7 +58,8 @@ impl Repo {
     /// 按令牌哈希找会话。鉴权中间件每次请求都会走这里。
     pub async fn find_session_by_hash(&self, token_hash: &str) -> Result<Option<Session>> {
         let sql = format!(
-            "SELECT {} FROM sessions WHERE token_hash = ? AND revoked_at IS NULL",
+            "SELECT {} FROM sessions WHERE token_hash = ? AND revoked_at IS NULL \
+               AND deleted_at IS NULL",
             Session::COLUMNS
         );
         let row = self
@@ -102,7 +103,7 @@ impl Repo {
     /// 历史一起取回来；`limit` 兜住那些长期不清理的账号。
     pub async fn list_all_sessions(&self, user_id: i64, limit: i64) -> Result<Vec<Session>> {
         let sql = format!(
-            "SELECT {} FROM sessions WHERE user_id = ? \
+            "SELECT {} FROM sessions WHERE user_id = ? AND deleted_at IS NULL \
              ORDER BY last_seen_at DESC, id DESC LIMIT ?",
             Session::COLUMNS
         );
@@ -131,22 +132,40 @@ impl Repo {
             .await
     }
 
-    /// 彻底删除一条会话记录（用户清历史 / 管理员清理）。
+    /// 删除一条会话记录，延迟删除。
     ///
-    /// 与「下线」不同：下线只写 `revoked_at`，记录还在；这里是删行。
+    /// 写 `deleted_at` 与 `revoked_at` 之后 cookie 当场失效，列表里也查不到，
+    /// 用户看到的就是删掉了。行留在库里给管理员查，保留期满由
+    /// `purge_stale_sessions` 清掉。
+    ///
+    /// `user_id` 为 `None` 是管理员操作，删除人记成 `admin`。
     pub async fn delete_session(&self, id: i64, user_id: Option<i64>) -> Result<u64> {
+        let now = now_ts();
+        let actor = if user_id.is_some() { "user" } else { "admin" };
         match user_id {
             Some(user_id) => {
                 self.db
                     .execute(
-                        "DELETE FROM sessions WHERE id = ? AND user_id = ?",
-                        Args::new().int(id).int(user_id),
+                        "UPDATE sessions SET deleted_at = ?, deleted_by = ?, \
+                                revoked_at = COALESCE(revoked_at, ?) \
+                          WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+                        Args::new()
+                            .text(&now)
+                            .text(actor)
+                            .text(&now)
+                            .int(id)
+                            .int(user_id),
                     )
                     .await
             }
             None => {
                 self.db
-                    .execute("DELETE FROM sessions WHERE id = ?", Args::new().int(id))
+                    .execute(
+                        "UPDATE sessions SET deleted_at = ?, deleted_by = ?, \
+                                revoked_at = COALESCE(revoked_at, ?) \
+                          WHERE id = ? AND deleted_at IS NULL",
+                        Args::new().text(&now).text(actor).text(&now).int(id),
+                    )
                     .await
             }
         }
@@ -350,11 +369,19 @@ impl Repo {
     ///
     /// 以前只要 `revoked_at IS NOT NULL` 就删，登录历史实际上活不过一次 GC；
     /// 现在已下线的记录也按保留期留一阵，用户能在「登录历史」里看到。
+    ///
+    /// 用户删掉的行（`deleted_at`）也按这个保留期清理。保留期内管理员还能
+    /// 在会话记录里查到哪台设备什么时候被谁删的。
     pub async fn purge_stale_sessions(&self, older_than: DateTime<Utc>) -> Result<u64> {
         self.db
             .execute(
-                "DELETE FROM sessions                   WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR last_seen_at < ?",
-                Args::new().text(ts(older_than)).text(ts(older_than)),
+                "DELETE FROM sessions WHERE (revoked_at IS NOT NULL AND revoked_at < ?) \
+                    OR (deleted_at IS NOT NULL AND deleted_at < ?) \
+                    OR last_seen_at < ?",
+                Args::new()
+                    .text(ts(older_than))
+                    .text(ts(older_than))
+                    .text(ts(older_than)),
             )
             .await
     }

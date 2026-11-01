@@ -44,6 +44,8 @@ impl Repo {
             pending_bytes,
             average_size: self.average_blob_size().await?,
             drivers: self.blob_stats_by_driver().await?,
+            users: self.user_storage_stats(false, 12).await?,
+            binned_users: self.user_storage_stats(true, 12).await?,
             mimes: self.blob_stats_by_mime(8).await?,
             trend: self.upload_trend(30).await?,
             hourly: self.upload_hourly_today().await?,

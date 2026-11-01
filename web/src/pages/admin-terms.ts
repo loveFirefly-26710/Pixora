@@ -13,7 +13,7 @@
  */
 
 import { ApiError, request } from "../core/api";
-import { h, mount } from "../core/dom";
+import { h, keepScroll, mount } from "../core/dom";
 import { formatDate, formatDateTime, formatNumber, fromLocalInput, toLocalInput } from "../core/format";
 import { confirmDialog, openModal } from "../core/modal";
 import type { PageContext } from "../core/router";
@@ -141,10 +141,15 @@ function suggestVersion(rows: AdminTermsRow[]): string {
 }
 
 export async function render(ctx: PageContext): Promise<void> {
-  const root = h("div.pad");
-  mount(ctx.outlet, root);
-  root.append(loadingBlock("正在读取条款版本…"));
+  // 发布、删除版本之后都会重画，位置要留着
+  const restoreScroll = keepScroll();
   const reload = (): void => void render(ctx);
+  const root = h("div.pad");
+  const firstPaint = !ctx.outlet.hasChildNodes();
+  if (firstPaint) {
+    mount(ctx.outlet, root);
+    root.append(loadingBlock("正在读取条款版本…"));
+  }
 
   try {
     const rows = await request<AdminTermsRow[]>("/admin/terms");
@@ -155,9 +160,12 @@ export async function render(ctx: PageContext): Promise<void> {
       state.editing = draft;
       state.editingId = draft.id;
     }
+    // 重画时先把新内容拼在这棵还没上屏的树里，拼完再整体换上去
     paintPage(root, state);
+    if (!firstPaint) mount(ctx.outlet, root);
+    restoreScroll();
   } catch (err) {
-    mount(root, errorBlock(err, reload));
+    mount(ctx.outlet, h("div.pad", null, errorBlock(err, reload)));
   }
 }
 

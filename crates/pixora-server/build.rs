@@ -8,6 +8,19 @@
 //! 这里显式声明依赖：目录里任何文件变化都触发重编。
 
 fn main() {
+    // dist 不在仓库里（构建产物不入库），新克隆直接 cargo build 会撞上
+    // rust-embed 那句「folder does not exist」，看不出该干什么。这里先给一句人话。
+    let embed = std::env::var_os("CARGO_FEATURE_EMBED_WEB").is_some();
+    let dist = std::path::Path::new("../../web/dist");
+    if embed && !dist.join("index.html").exists() {
+        panic!(
+            "找不到前端产物 {}：\n\
+             先构建前端（cd web && npm ci && npm run build），\n\
+             或者加 --no-default-features 编译，运行时用 PIXORA_WEB_DIR 指向源码目录。",
+            dist.display()
+        );
+    }
+
     // 只有「产物真的被嵌进二进制」的构建才需要盯着 dist：
     // release 走 rust-embed 的编译期嵌入，dist 变了就必须重编；
     // debug 版是运行时读盘（rust-embed 在没有 debug-embed 时的行为），
@@ -15,7 +28,6 @@ fn main() {
     if cfg!(debug_assertions) {
         return;
     }
-    let dist = std::path::Path::new("../../web/dist");
     println!("cargo:rerun-if-changed={}", dist.display());
     if let Ok(entries) = std::fs::read_dir(dist) {
         for entry in entries.flatten() {

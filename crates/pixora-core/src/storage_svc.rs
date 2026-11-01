@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pixora_repo::{model::StorageBackend, Repo};
+use pixora_repo::{model::StorageBackend, repo::backends::NewBackend, Repo};
 use pixora_storage::names as driver_names;
 use pixora_storage::{
     CapacityProbe, DatabaseDriver, FsKind, GitHubDriver, LocalDriver, S3Config, S3Driver,
@@ -102,13 +102,37 @@ impl StorageService {
 
     /// 按库里的后端配置重建注册表。
     pub async fn reload(&self) -> Result<()> {
-        let backends = self.repo.list_backends().await?;
+        let mut backends = self.repo.list_backends().await?;
         self.registry.clear();
 
         // 本地后端的显示名统一成「本地磁盘」。历史上它有几种写法
         // （空、驱动名、早期的占位名），后台列表里显示成 `local` 会让人
         // 以为这里配的是别的东西
         self.normalize_local_labels().await;
+
+        // 全新实例先把本地后端登记进库，再走正常装配。
+        // 以前这里直接装一个游离的 local 驱动，后台「后端配置」就是空的，
+        // 管理员既看不到文件写在哪，也改不了它的显示名。
+        if backends.is_empty() {
+            match self
+                .repo
+                .create_backend(&NewBackend {
+                    driver: driver_names::LOCAL.to_string(),
+                    label: pixora_storage::names::label(driver_names::LOCAL).to_string(),
+                    config: "{}".to_string(),
+                    is_default: true,
+                    enabled: true,
+                    capacity_mode: "auto".to_string(),
+                    capacity_total: None,
+                })
+                .await
+            {
+                Ok(created) => backends = vec![created],
+                Err(err) => {
+                    tracing::warn!(error = %err, "登记默认本地后端失败，退回游离驱动");
+                }
+            }
+        }
 
         if backends.is_empty() {
             return self.install_local_fallback().await;
@@ -140,6 +164,23 @@ impl StorageService {
         match default_key {
             Some(key) => self.registry.set_default(&key),
             None => {
+                // 库里一行都没标默认（老数据，或者重复添加时把标记写丢了）。
+                // 拿同驱动的第一行顶上，别另外装游离的 local，
+                // 否则后台会显示一个不在列表里的默认后端。
+                if let Some(backend) = backends
+                    .iter()
+                    .find(|item| item.driver == driver_names::LOCAL)
+                {
+                    let key =
+                        pixora_storage::registry::instance_key(&backend.driver, Some(backend.id));
+                    if self.registry.get(&key).is_some() {
+                        if let Err(err) = self.repo.set_default_backend(backend.id).await {
+                            tracing::warn!(backend_id = backend.id, error = %err, "补写默认后端失败");
+                        }
+                        self.registry.set_default(&key);
+                        return Ok(());
+                    }
+                }
                 let local_key = pixora_storage::registry::instance_key(driver_names::LOCAL, None);
                 if self.registry.get(&local_key).is_none() {
                     self.install_local_fallback().await?;
@@ -630,9 +671,87 @@ impl StorageService {
             .map_err(|err| AppError::internal(err.to_string()))?)
     }
 
+    /// 配置指纹，用来判断两份配置是不是同一个后端。
+    ///
+    /// 比较之前先解密。密文每次都不一样，直接比字符串会把同一份配置认成两份。
+    /// 空值全部丢掉，本地磁盘和数据库内这两种驱动本来就没有配置项，
+    /// 第二份实例一定重复。
+    pub fn config_fingerprint(&self, driver: &str, config: &serde_json::Value) -> String {
+        let plain = self.decrypt_config(config).unwrap_or_else(|_| config.clone());
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(object) = plain.as_object() {
+            let mut keys: Vec<&String> = object.keys().collect();
+            keys.sort();
+            for key in keys {
+                let value = &object[key];
+                let text = match value {
+                    serde_json::Value::String(text) => text.trim().to_string(),
+                    other => other.to_string(),
+                };
+                if text.is_empty() || text == "null" {
+                    continue;
+                }
+                // 末尾斜杠不影响落点，`img` 和 `img/` 算同一个
+                parts.push(format!("{key}={}", text.trim_end_matches('/')));
+            }
+        }
+        format!("{}|{}", driver.to_ascii_lowercase(), parts.join("\u{1f}"))
+    }
+
+    /// 找一份配置完全相同的已有后端。新建前用它挡掉「同一个磁盘加两次」。
+    pub async fn find_duplicate_backend(
+        &self,
+        driver: &str,
+        config: &serde_json::Value,
+    ) -> Result<Option<StorageBackend>> {
+        let target = self.config_fingerprint(driver, config);
+        for backend in self.repo.list_backends().await? {
+            if backend.driver != driver {
+                continue;
+            }
+            if self.config_fingerprint(driver, &backend.config) == target {
+                return Ok(Some(backend));
+            }
+        }
+        Ok(None)
+    }
+
+    /// 合并重复后端。同驱动、同配置的多行只留一行，其余行的实体记录并过去。
+    ///
+    /// 返回（合并掉的实例数，被并走的实体数）。物理文件不用动，
+    /// 这些行本来就指向同一个落点，`blobs.backend_id` 只是记录归属。
+    pub async fn dedupe_backends(&self) -> Result<(usize, u64)> {
+        let backends = self.repo.list_backends().await?;
+        let mut kept: Vec<(String, i64)> = Vec::new(); // (指纹, 保留的后端 id)
+        let mut merged = 0usize;
+        let mut moved = 0u64;
+
+        for backend in &backends {
+            let fingerprint = self.config_fingerprint(&backend.driver, &backend.config);
+            if let Some((_, keep_id)) = kept.iter().find(|(key, _)| *key == fingerprint) {
+                // 默认标记优先留在被保留的那一行上
+                if backend.is_default && *keep_id != backend.id {
+                    let _ = self.repo.set_default_backend(*keep_id).await;
+                }
+                moved += self.repo.reassign_blobs_backend(backend.id, *keep_id).await?;
+                if let Err(err) = self.repo.delete_backend(backend.id).await {
+                    tracing::warn!(backend_id = backend.id, error = %err, "合并重复后端失败");
+                    continue;
+                }
+                merged += 1;
+                continue;
+            }
+            kept.push((fingerprint, backend.id));
+        }
+
+        if merged > 0 {
+            self.reload().await?;
+        }
+        Ok((merged, moved))
+    }
+
     /// 把密文字段替换成掩码，用于把配置回显给管理界面。
-    pub fn mask_config(config: &serde_json::Value) -> serde_json::Value {
-        let mut out = serde_json::Map::new();
+    pub fn mask_config(config: &serde_json::Value) -> serde_json::Value {        let mut out = serde_json::Map::new();
         if let Some(object) = config.as_object() {
             for (key, value) in object {
                 if SECRET_FIELDS.contains(&key.as_str()) {

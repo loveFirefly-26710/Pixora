@@ -13,7 +13,7 @@
  */
 
 import { ApiError, request } from "../core/api";
-import { h, mount } from "../core/dom";
+import { h, keepScroll, mount } from "../core/dom";
 import {
   VISIBILITY_SCOPE_LABEL,
   formatDateTime,
@@ -110,16 +110,22 @@ function txt(value: string): Node {
 }
 
 export async function render(ctx: PageContext): Promise<void> {
-  const root = h("div.pad");
-  mount(ctx.outlet, root);
-  root.append(loadingBlock("正在读取 IP 规则…"));
+  // 增删规则、保存策略之后都会重画，位置要留着
+  const restoreScroll = keepScroll();
   const reload = (): void => void render(ctx);
+  const firstPaint = !ctx.outlet.hasChildNodes();
+  if (firstPaint) {
+    const boot = h("div.pad");
+    mount(ctx.outlet, boot);
+    boot.append(loadingBlock("正在读取 IP 规则…"));
+  }
 
   try {
     const data = await request<IpAdmin>("/admin/ip");
-    mount(root, ...view(reload, data));
+    mount(ctx.outlet, h("div.pad", null, ...view(reload, data)));
+    restoreScroll();
   } catch (err) {
-    mount(root, errorBlock(err, reload));
+    mount(ctx.outlet, h("div.pad", null, errorBlock(err, reload)));
   }
 }
 

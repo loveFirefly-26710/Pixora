@@ -11,7 +11,7 @@
  */
 
 import { ApiError, request } from "../core/api";
-import { h, mount } from "../core/dom";
+import { h, keepScroll, mount } from "../core/dom";
 import { formatBytes, formatNumber, parseSize, percent, toGigabytes } from "../core/format";
 import { promptDialog } from "../core/modal";
 import type { PageContext } from "../core/router";
@@ -112,10 +112,15 @@ function unitInput(input: HTMLInputElement, unit: string): HTMLElement {
 }
 
 export async function render(ctx: PageContext): Promise<void> {
-  const root = h("div.pad");
-  mount(ctx.outlet, root);
-  root.append(loadingBlock("正在读取配额配置…"));
+  // 保存后会用回传值就地重画，先记住位置
+  const restoreScroll = keepScroll();
   const reload = (): void => void render(ctx);
+  const firstPaint = !ctx.outlet.hasChildNodes();
+  if (firstPaint) {
+    const boot = h("div.pad");
+    mount(ctx.outlet, boot);
+    boot.append(loadingBlock("正在读取配额配置…"));
+  }
 
   try {
     // 探测信息在存储页，但「为什么要求手填总额」得在这里讲，所以顺带拉一次；
@@ -128,11 +133,12 @@ export async function render(ctx: PageContext): Promise<void> {
     // 保存接口会把保存后的整页生效值回传，就地用它重画：页面显示的一定是
     // 服务端确认过的数字，不再是一次额外的 GET 之后的猜测
     const paint = (fresh: QuotaAdmin): void => {
-      mount(root, ...view(reload, paint, fresh, storage, rate));
+      mount(ctx.outlet, h("div.pad", null, ...view(reload, paint, fresh, storage, rate)));
+      restoreScroll();
     };
     paint(quota);
   } catch (err) {
-    mount(root, errorBlock(err, reload));
+    mount(ctx.outlet, h("div.pad", null, errorBlock(err, reload)));
   }
 }
 

@@ -12,11 +12,11 @@
  * 后两条由同一个「保存设置」按钮触发。
  */
 
-import { ApiError, request } from "../core/api";
+import { ApiError, request, requestPage } from "../core/api";
 import { absUrl } from "../core/config";
-import { h, mount } from "../core/dom";
+import { h, keepScroll, mount } from "../core/dom";
 import { formatBytes, formatNumber } from "../core/format";
-import { confirmDialog, promptDialog } from "../core/modal";
+import { confirmDialog, openModal, promptDialog } from "../core/modal";
 import { openMailTemplates } from "./mail-templates";
 import { loginMethodsCard } from "./login-methods-card";
 import type { PageContext } from "../core/router";
@@ -24,12 +24,13 @@ import { toastError, toastOk } from "../core/toast";
 import { currentUser, loadMe, loadSite } from "../core/state";
 import { reloadMusic, syncMusicDefaults } from "../core/music";
 import { openAnnouncementModal } from "../ui/announcement";
-import { openAvatarCrop } from "../ui/avatar-crop";
 import { BUILTIN_AVATAR } from "../ui/brand";
 import { refreshNav } from "../ui/shell";
-import type { AdminSettings, MusicPlaylist, RateLimitAdmin } from "../core/types";
+import type { AdminSettings, ImageItem, MusicPlaylist, RateLimitAdmin } from "../core/types";
 import { rateLogsButton, type RateLimitDraft } from "./ratelimit-cards";
+import type { AnimSelect } from "../ui/widgets";
 import {
+  animSelect,
   badge,
   card,
   cardHead,
@@ -185,14 +186,22 @@ interface SettingsDraft {
   disposableCheck: boolean;
   mxCheck: boolean;
   thirdPartyCheck: boolean;
-  /** 背景图列表（外链或上传后的公开地址） */
+  /** 桌面端背景图（上传后的公开地址） */
   backgrounds: string[];
-  backgroundMode: HTMLSelectElement;
+  /** 移动端背景图；空数组表示沿用桌面端 */
+  backgroundsMobile: string[];
+  backgroundMode: AnimSelect;
+  /** 桌面端随机图配置 */
+  randomDesktop: RandomSourceDraft;
+  /** 移动端随机图配置；来源为空表示跟桌面端一致 */
+  randomMobile: RandomSourceDraft;
   backgroundOpacity: HTMLInputElement;
   backgroundBlur: HTMLInputElement;
   backgroundInterval: HTMLInputElement;
-  /** 站点默认头像地址（外链或上传那张的公开地址） */
-  defaultAvatar: HTMLInputElement;
+  /** 默认头像合集（上传后的公开地址） */
+  defaultAvatars: string[];
+  /** 用哪个公开相册当头像池；"0" 表示不用 */
+  defaultAvatarAlbum: HTMLSelectElement;
   /** 格式白名单改一处就提交一次，这里只是当前选中态 */
   formats: string[];
 }
@@ -254,17 +263,25 @@ function unitInput(input: HTMLInputElement, unit: string): HTMLElement {
 }
 
 export async function render(ctx: PageContext): Promise<void> {
-  const root = h("div.pad");
-  mount(ctx.outlet, root);
-  root.append(loadingBlock("正在读取系统设置…"));
+  // 保存设置走的就是这个函数，先把滚动位置记下来
+  const restoreScroll = keepScroll();
   const reload = (): void => void render(ctx);
+  // 只有第一次进页面才摆加载占位。重画的时候旧内容还撑着页面高度，
+  // 先清空的话文档会矮到一屏以内，滚动位置就被浏览器夹回顶部了
+  const firstPaint = !ctx.outlet.hasChildNodes();
+  if (firstPaint) {
+    const boot = h("div.pad");
+    mount(ctx.outlet, boot);
+    boot.append(loadingBlock("正在读取系统设置…"));
+  }
 
   try {
     // 频率限制与上传策略已经移到「存储策略」页，这里只拉站点设置
     const data = await request<AdminSettings>("/admin/settings");
-    mount(root, ...view(reload, data));
+    mount(ctx.outlet, h("div.pad", null, ...view(reload, data)));
+    restoreScroll();
   } catch (err) {
-    mount(root, errorBlock(err, reload));
+    mount(ctx.outlet, h("div.pad", null, errorBlock(err, reload)));
   }
 }
 
@@ -384,14 +401,17 @@ function view(reload: () => void, data: AdminSettings): Node[] {
     mxCheck: data.mail.mx_check,
     thirdPartyCheck: data.mail.third_party_check,
     backgrounds: [...(data.appearance.backgrounds ?? [])],
-    backgroundMode: select(
+    backgroundsMobile: [...(data.appearance.backgrounds_mobile ?? [])],
+    backgroundMode: animSelect(
       [
-        { value: "single", label: "单图" },
-        { value: "slideshow", label: "多图轮播" },
-        { value: "random", label: "本站随机图 API" },
+        { value: "single", label: "单图", hint: "只用第一张，适合一张主视觉" },
+        { value: "slideshow", label: "多图轮播", hint: "按顺序淡入淡出" },
+        { value: "random", label: "随机图 API", hint: "每次换一批，来源可配" },
       ],
       data.appearance.background_mode ?? "single",
     ),
+    randomDesktop: randomDraft(data, "desktop"),
+    randomMobile: randomDraft(data, "mobile"),
     backgroundOpacity: (() => {
       const input = h("input", {
         type: "range",
@@ -417,7 +437,8 @@ function view(reload: () => void, data: AdminSettings): Node[] {
       min: "3",
       max: "3600",
     }),
-    defaultAvatar: textInput({ value: data.appearance.default_avatar ?? "", mono: true, name: "default-avatar" }),
+    defaultAvatars: [...(data.appearance.default_avatars ?? [])],
+    defaultAvatarAlbum: select([{ value: "0", label: "不用相册" }], "0"),
     formats: [...(data.upload.formats ?? [])],
     maxWidth: textInput({ value: String(data.upload.max_width ?? 0), type: "number", mono: true }),
     maxHeight: textInput({ value: String(data.upload.max_height ?? 0), type: "number", mono: true }),
@@ -512,6 +533,9 @@ function view(reload: () => void, data: AdminSettings): Node[] {
       "站点、缩略图策略、会话、内容审核、防盗链、邮件、登录方式与外观。" +
         "上传策略、接口/上传/下载频率在「存储策略」；路径类配置由环境变量注入。",
     ),
+    // 保存与超限日志常驻顶部：这一页有十几张卡片，改完站点名再滑到底部
+    // 才能保存是纯粹的浪费。粘性条在滚动时跟着顶栏走，改哪张卡都能就地保存。
+    settingsActionBar(draft, data, reload),
     // 卡片流：按高度自己排，短卡片不再被撑成长卡片那样高（见 components.css）
     h(
       "div.cardflow",
@@ -530,23 +554,41 @@ function view(reload: () => void, data: AdminSettings): Node[] {
       loginMethodsHost,
       appearanceCard(reload, draft, data),
     ),
-    h(
-      "div.flexline",
-      { style: { justifyContent: "flex-end", marginTop: "16px" } },
-      rateLogsButton(),
-      h("button.btn.pri", {
-        type: "button",
-        text: "保存设置",
-        on: {
-          click: (event) => void save(reload, draft, data, event.target as HTMLButtonElement),
-        },
-      }),
-    ),
     note(
       "w",
       "上传配额、注册默认配额、容量阈值在「配额与容量」；上传策略、接口/上传/下载频率在「存储策略」。",
     ),
   ];
+}
+
+/**
+ * 顶部操作栏，放保存设置和查看超限日志。
+ *
+ * 用 sticky 贴在顶栏下面，这一页有十几张卡片，滚到哪都能直接保存。
+ */
+function settingsActionBar(
+  draft: SettingsDraft,
+  data: AdminSettings,
+  reload: () => void,
+): HTMLElement {
+  const saveBtn = h("button.btn.pri", { type: "button", text: "保存设置" });
+  saveBtn.addEventListener("click", (event) =>
+    void save(reload, draft, data, event.target as HTMLButtonElement),
+  );
+  return h(
+    "div.settings-bar",
+    null,
+    h(
+      "div.settings-bar-main",
+      null,
+      h("b", { text: "系统设置" }),
+      h("span.settings-bar-sub", {
+        text: "改完哪张卡都能直接保存。格式白名单和登录方式有自己的保存按钮。",
+      }),
+    ),
+    h("span.spacer"),
+    h("div.settings-bar-actions", null, rateLogsButton("", true), saveBtn),
+  );
 }
 
 /** 首页展示范围：从全站公开相册里勾选；一个都不选就沿用「全部公开图片」。 */
@@ -626,7 +668,7 @@ function plazaAlbumsCard(draft: SettingsDraft, data: AdminSettings): HTMLElement
     },
   });
 
-  return cardNode(
+  const node = cardNode(
     cardHead("首页展示相册"),
     h("div.tip", {
       text: "只从「公开相册」里挑。选中的相册里，图片自身也必须是公开的才会出现在广场；相册后来改回私有会自动失效。",
@@ -641,6 +683,9 @@ function plazaAlbumsCard(draft: SettingsDraft, data: AdminSettings): HTMLElement
       }),
     ),
   );
+  // 外观卡片里的「去新建合集」按这个 id 找过来
+  node.id = "plaza-collections";
+  return node;
 }
 
 /** 命名集合编辑器：每个集合从公开相册里勾选，不再手写 JSON。 */
@@ -1572,145 +1617,14 @@ function mailCard(draft: SettingsDraft): HTMLElement {
 /**
  * 默认头像：没设过头像的账号（含新注册的）都用它。
  *
- * 与背景图同一条路：可以填地址，也可以直接上传（存进库、带版本号）。
- * 留空就是内置的萤火翼标头像——所以这一栏空着也是「有效设置」，不是没配置。
- * 这一栏自带保存按钮：换了头像要立刻看到效果，不必回页面底部点「保存设置」。
+ * 两种来源：
+ *   - 上传一组图（合集），前端每次会话随机取一张——同一批人看到的头像不完全一样，
+ *     比所有人顶着同一张图自然；
+ *   - 直接选一个公开相册当头像池，图片跟着相册走，不用再单独传。
+ * 两边都空就是内置的萤火翼标头像——空着也是「有效设置」，不是没配置。
  */
-function defaultAvatarCard(reload: () => void, draft: SettingsDraft, data: AdminSettings): HTMLElement {
-  const isUploaded = (data.appearance.default_avatar ?? "").startsWith("/api/v1/site/avatar");
-  const preview = h("div.avatar-preview");
-  const sync = (): void => {
-    const url = absUrl(draft.defaultAvatar.value.trim()) || BUILTIN_AVATAR;
-    mount(preview, h("img", { src: url, alt: "当前默认头像" }));
-  };
-  sync();
-  draft.defaultAvatar.addEventListener("input", sync);
-
-  const fileInput = h("input", {
-    type: "file",
-    accept: "image/*",
-    style: { display: "none" },
-    "aria-hidden": "true",
-  });
-  const uploadBtn = h("button.btn.sm.pri", { type: "button", text: "上传默认头像" });
-  uploadBtn.addEventListener("click", () => fileInput.click());
-  fileInput.addEventListener("change", () => {
-    const file = fileInput.files?.[0];
-    if (file) void uploadDefaultAvatar(file, uploadBtn, reload);
-  });
-
-  const saveBtn = h("button.btn.sm", { type: "button", text: "保存地址" });
-  saveBtn.addEventListener("click", async () => {
-    const value = draft.defaultAvatar.value.trim();
-    saveBtn.disabled = true;
-    saveBtn.textContent = "保存中…";
-    try {
-      await request("/admin/settings", {
-        method: "PUT",
-        json: { appearance: { default_avatar: value || null } },
-      });
-      toastOk(value ? "默认头像地址已生效" : "已清空，改用内置的萤火翼标头像");
-      await reloadSiteIdentity();
-      reload();
-    } catch (err) {
-      toastError(err);
-    } finally {
-      saveBtn.disabled = false;
-      saveBtn.textContent = "保存地址";
-    }
-  });
-
-  const removeBtn = h("button.btn.sm.dgr", { type: "button", text: "移除默认头像" });
-  removeBtn.disabled = !(data.appearance.default_avatar ?? "").trim();
-  removeBtn.addEventListener("click", async () => {
-    const ok = await confirmDialog({
-      title: "移除默认头像",
-      message: "清掉之后，没设过头像的账号显示内置的萤火翼标头像；账号自己设过的头像不受影响。",
-      confirmText: "移除",
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await request("/admin/settings", { method: "PUT", json: { appearance: { default_avatar: null } } });
-      toastOk("默认头像已移除");
-      await reloadSiteIdentity();
-      reload();
-    } catch (err) {
-      toastError(err);
-    }
-  });
-
-  return cardNode(
-    cardHead("默认头像"),
-    h(
-      "div.row",
-      { style: { alignItems: "flex-end" } },
-      field(
-        "默认头像地址",
-        draft.defaultAvatar,
-        "没设过头像的账号（含新注册的）都用它；留空就是内置的萤火翼标头像。也可以直接上传一张。",
-      ),
-      h("div", { style: { flex: "0 0 76px", paddingBottom: "13px" } }, preview),
-      h(
-        "div",
-        {
-          style: {
-            flex: "0 0 auto",
-            paddingBottom: "13px",
-            display: "flex",
-            gap: "8px",
-            // 窄屏三个按钮一行放不下：换行，别顶出卡片
-            flexWrap: "wrap",
-          },
-        },
-        saveBtn,
-        uploadBtn,
-        removeBtn,
-      ),
-    ),
-    fileInput,
-    h("div.tip", {
-      text:
-        (isUploaded ? "当前用的是上传进数据库的那张，也可以在这里换成外链地址。" : "") +
-        "上传的图先在本机缩到 512px 再存进数据库，圆角与裁切由前端完成。",
-    }),
-  );
-}
-
-/** 外观：背景图支持单图、多张轮播和本站随机图 API。 */
-function appearanceCard(_reload: () => void, draft: SettingsDraft, _data: AdminSettings): HTMLElement {
-  const list = h("div.background-list");
-  const preview = h("div.ph.background-preview");
-  const sync = (): void => {
-    const urls = draft.backgrounds;
-    list.replaceChildren(
-      ...urls.map((url, index) =>
-        h(
-          "div.background-thumb",
-          null,
-          h("img", { src: absUrl(url), alt: `背景图 ${index + 1}` }),
-          h("button.btn.sm.dgr", {
-            type: "button",
-            text: "移除",
-            on: {
-              click: () => {
-                draft.backgrounds.splice(index, 1);
-                sync();
-              },
-            },
-          }),
-        ),
-      ),
-    );
-    list.hidden = urls.length === 0;
-    if (urls.length > 0) {
-      mount(preview, h("img", { src: absUrl(urls[0]), alt: "背景预览" }));
-    } else {
-      mount(preview, "还没有背景图");
-    }
-  };
-  sync();
-
+function defaultAvatarCard(_reload: () => void, draft: SettingsDraft, data: AdminSettings): HTMLElement {
+  const pool = h("div.avatar-pool");
   const fileInput = h("input", {
     type: "file",
     accept: "image/*",
@@ -1718,148 +1632,660 @@ function appearanceCard(_reload: () => void, draft: SettingsDraft, _data: AdminS
     style: { display: "none" },
     "aria-hidden": "true",
   });
-  const uploadBtn = h("button.btn.sm.pri", { type: "button", text: "上传图片（可多选）" });
+  const uploadBtn = h("button.btn.sm.pri", { type: "button", text: "上传头像（可多选）" });
   uploadBtn.addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", () => {
     const files = Array.from(fileInput.files ?? []);
     fileInput.value = "";
     if (files.length === 0) return;
     void uploadBackgrounds(files, uploadBtn, (urls) => {
-      draft.backgrounds.push(...urls);
+      draft.defaultAvatars.push(...urls);
       sync();
     });
   });
 
-  const urlInput = textarea({
-    rows: 3,
-    placeholder:
-      "每行一个，也可以用逗号分隔。\n" +
-      "https://images.example.com/wall-1.jpg\n" +
-      "https://images.example.com/wall-2.jpg\n" +
-      "/images/2026/10/wall-3.webp",
+  const sync = (): void => {
+    pool.replaceChildren(
+      ...draft.defaultAvatars.map((url, index) =>
+        h(
+          "div.avatar-pool-item",
+          null,
+          h("img", { src: absUrl(url), alt: `默认头像 ${index + 1}` }),
+          h("button.avatar-pool-x", {
+            type: "button",
+            text: "×",
+            "aria-label": `移除第 ${index + 1} 张`,
+            on: {
+              click: () => {
+                draft.defaultAvatars.splice(index, 1);
+                sync();
+              },
+            },
+          }),
+        ),
+      ),
+      uploadBtn,
+    );
+    if (draft.defaultAvatars.length === 0) {
+      pool.prepend(
+        h("div.avatar-pool-empty", null, h("img", { src: BUILTIN_AVATAR, alt: "内置默认头像" })),
+      );
+    }
+  };
+  sync();
+
+  const albumOptions = [
+    { value: "0", label: "不用相册，只用上面上传的图" },
+    ...(data.plaza_albums ?? []).map((album) => ({
+      value: String(album.id),
+      label: `${album.name} · ${album.owner_email}（${album.image_count} 张）`,
+    })),
+  ];
+  draft.defaultAvatarAlbum = select(
+    albumOptions,
+    String(data.appearance.default_avatar_album ?? 0),
+  );
+
+  return cardNode(
+    cardHead("默认头像"),
+    h("div.tip", {
+      text:
+        "没设过头像的账号用这里的图，新注册的也算。传多张就随机挑一张，打开页面时换。" +
+        "也可以直接选一个公开相册当头像池。都不配就用内置的萤火翼标。",
+    }),
+    pool,
+    fileInput,
+    h(
+      "div.row",
+      { style: { marginTop: "10px" } },
+      field(
+        "用公开相册当头像池",
+        draft.defaultAvatarAlbum,
+        "相册里的公开图会轮流当默认头像。相册转成私有就退回上面上传的那组",
+      ),
+    ),
+    h("div.tip", {
+      text: "上传的图先在本机缩到 512px 再存进数据库，圆角与裁切由前端完成。改完点右上角「保存设置」生效。",
+    }),
+  );
+}
+
+/** 从接口数据拼一端的随机图草稿。 */
+function randomDraft(data: AdminSettings, which: "desktop" | "mobile"): RandomSourceDraft {
+  const mobile = which === "mobile";
+  const options = [
+    { value: "plaza", label: "本站广场随机图", hint: "取公开图片，无需额外配置" },
+    { value: "collection", label: "公开相册合集", hint: "只在选定的公开相册里取" },
+    { value: "custom", label: "自定义 API 地址", hint: "服务端代取，地址不外泄" },
+  ];
+  const albums = mobile
+    ? (data.appearance.background_random_albums_mobile ?? [])
+    : (data.appearance.background_random_albums ?? []);
+  return {
+    source: animSelect(
+      options,
+      (mobile
+        ? data.appearance.background_random_source_mobile
+        : data.appearance.background_random_source) ?? "plaza",
+    ),
+    collection: select(
+      Object.keys(data.site.plaza_collections ?? {}).map((name) => ({ value: name, label: name })),
+      (mobile
+        ? data.appearance.background_random_collection_mobile
+        : data.appearance.background_random_collection) ?? "",
+    ),
+    // 手选相册优先，存过就默认停在「手动选相册」
+    albumMode: albums.length > 0 ? "albums" : "collection",
+    albums: new Set(albums),
+    api: textInput({
+      value:
+        (mobile
+          ? data.appearance.background_random_api_mobile
+          : data.appearance.background_random_api) ?? "",
+      mono: true,
+      placeholder: "https://api.example.com/random.php?format=json",
+    }),
+  };
+}
+
+/** 一端（桌面 / 移动）的随机图配置草稿。 */
+interface RandomSourceDraft {
+  source: AnimSelect;
+  collection: HTMLSelectElement;
+  /** 合集来源下：按命名集合还是手选相册 */
+  albumMode: "collection" | "albums";
+  albums: Set<number>;
+  api: HTMLInputElement;
+}
+
+/**
+ * 一端的随机图配置。
+ *
+ * 移动端多一个「跟桌面端一样」：选它就不写自己的来源，服务端按桌面端那份走，
+ * 以前只配过一套的站点升级后不会突然没图。
+ */
+function randomSourceEditor(draft: RandomSourceDraft, data: AdminSettings): { node: HTMLElement } {
+  const collectionNames = Object.keys(data.site.plaza_collections ?? {});
+  const albums = data.plaza_albums ?? [];
+
+  // 一个合集都没建的时候，空下拉框只会让人以为界面坏了
+  const collectionEmpty = h(
+    "div.bg-collection-empty",
+    null,
+    h("b", { text: "还没有命名集合" }),
+    h("span", {
+      text: "合集在「首页展示相册」那张卡里建：勾几个公开相册，起个名字，再回来这里选。",
+    }),
+    h("button.btn.sm", {
+      type: "button",
+      text: "去新建合集",
+      on: {
+        click: () => {
+          const target = document.getElementById("plaza-collections");
+          if (!target) return;
+          target.scrollIntoView({ behavior: "smooth", block: "start" });
+          target.classList.add("is-flash");
+          window.setTimeout(() => target.classList.remove("is-flash"), 1600);
+        },
+      },
+    }),
+  );
+
+  const collectionField = field(
+    "命名集合",
+    collectionNames.length > 0 ? draft.collection : collectionEmpty,
+    collectionNames.length > 0
+      ? "在「首页展示相册」里命名的集合中选；只取其中的公开相册"
+      : undefined,
+  );
+  const albumField = field(
+    "公开相册",
+    albumPicker(draft.albums, albums),
+    "勾几个公开相册，随机图只从这些相册里取；相册转私有后自动跳过",
+  );
+  const apiField = field(
+    "API 地址",
+    draft.api,
+    "服务端去取。直接返回图片、字符串数组、或者带 url 字段的对象都能认",
+  );
+
+  // 合集来源下两种挑法：按命名集合，或者自己勾几个公开相册
+  const pickMode = h(
+    "div.bg-pick-mode",
+    null,
+    h("button.chip", { type: "button", text: "按命名集合" }),
+    h("button.chip", { type: "button", text: "手动选相册" }),
+  );
+  const pickChips = [...pickMode.querySelectorAll<HTMLButtonElement>("button.chip")];
+  const syncPick = (): void => {
+    const manual = draft.albumMode === "albums";
+    pickChips[0]?.classList.toggle("on", !manual);
+    pickChips[1]?.classList.toggle("on", manual);
+    collectionField.hidden = manual;
+    albumField.hidden = !manual;
+  };
+  pickChips[0]?.addEventListener("click", () => {
+    draft.albumMode = "collection";
+    syncPick();
   });
-  urlInput.classList.add("background-url-input");
-  const addUrlBtn = h("button.btn.sm", { type: "button", text: "添加地址" });
-  addUrlBtn.addEventListener("click", () => {
-    const raw = urlInput.value.trim();
-    if (!raw) return;
-    // 一次粘贴多行/逗号分隔的多个壁纸地址，逐条校验、去重后追加
-    const pieces = raw
-      .split(/[\n,，;；]+/)
-      .map((item) => item.trim())
-      .filter(Boolean);
-    let added = 0;
-    let invalid = 0;
-    for (const piece of pieces) {
-      if (!/^https?:\/\//.test(piece) && !piece.startsWith("/")) {
-        invalid += 1;
-        continue;
-      }
-      if (!draft.backgrounds.includes(piece)) {
-        draft.backgrounds.push(piece);
-        added += 1;
-      }
-    }
-    if (added === 0 && invalid === 0) {
-      toastError("这些地址已经在列表里了");
-      return;
-    }
-    if (invalid > 0) {
-      toastError(`${invalid} 个地址格式不对，已跳过；地址要以 http(s):// 或 / 开头`);
-    }
-    urlInput.value = "";
-    sync();
+  pickChips[1]?.addEventListener("click", () => {
+    draft.albumMode = "albums";
+    syncPick();
   });
 
-  const clearBtn = h("button.btn.sm.dgr", { type: "button", text: "清空背景" });
-  clearBtn.addEventListener("click", async () => {
-    if (draft.backgrounds.length === 0) return;
-    const ok = await confirmDialog({
-      title: "清空背景图",
-      message: "保存后会删除这些背景图引用；上传进库的图会一起清理。",
-      confirmText: "清空",
-      danger: true,
-    });
-    if (ok) {
-      draft.backgrounds = [];
-      sync();
-    }
-  });
+  const collectionPanel = h("div.bg-collection-panel", null, pickMode, collectionField, albumField);
+  const node = h(
+    "div.bg-random-device",
+    null,
+    field("随机图来源", draft.source.root, "随机模式下每次换图从哪儿取"),
+    collectionPanel,
+    apiField,
+  );
+
+  const sync = (): void => {
+    const source = draft.source.value;
+    collectionPanel.hidden = source !== "collection";
+    apiField.hidden = source !== "custom";
+    if (source === "collection") syncPick();
+  };
+  draft.source.root.addEventListener("click", () => window.setTimeout(sync, 0));
+  syncPick();
+  sync();
+
+  return { node };
+}
+
+/**
+ * 外观：桌面端和移动端各一组背景图，编辑方式一样。
+ *
+ * 移动端可以留空，留空就是跟桌面端共用。随机图的来源也在这里选，
+ * 第三方 API 的地址由服务端去取，不会写进 `/site` 的响应里。
+ */
+function appearanceCard(_reload: () => void, draft: SettingsDraft, _data: AdminSettings): HTMLElement {
+  const albums = _data.plaza_albums ?? [];
+  const desktop = backgroundGroup(draft, "desktop", albums);
+  const mobile = backgroundGroup(draft, "mobile", albums);
 
   const intervalField = field(
     "切换间隔（秒）",
     draft.backgroundInterval,
     "轮播/随机图每次换图间隔，3–3600 秒",
   );
-  const syncMode = (): void => {
-    intervalField.hidden = draft.backgroundMode.value === "single";
+
+  // 两端各有一套随机图配置，面板里用 chip 切换
+  const desktopRandom = randomSourceEditor(draft.randomDesktop, _data);
+  const mobileRandom = randomSourceEditor(draft.randomMobile, _data);
+
+  const deviceChips = h(
+    "div.bg-pick-mode",
+    null,
+    h("button.chip", { type: "button", text: "桌面端" }),
+    h("button.chip", { type: "button", text: "移动端" }),
+  );
+  const deviceButtons = [...deviceChips.querySelectorAll<HTMLButtonElement>("button.chip")];
+  let randomDevice: "desktop" | "mobile" = "desktop";
+  const syncDevice = (): void => {
+    const mobile = randomDevice === "mobile";
+    deviceButtons[0]?.classList.toggle("on", !mobile);
+    deviceButtons[1]?.classList.toggle("on", mobile);
+    desktopRandom.node.hidden = mobile;
+    mobileRandom.node.hidden = !mobile;
   };
-  draft.backgroundMode.addEventListener("change", syncMode);
+  deviceButtons[0]?.addEventListener("click", () => {
+    randomDevice = "desktop";
+    syncDevice();
+  });
+  deviceButtons[1]?.addEventListener("click", () => {
+    randomDevice = "mobile";
+    syncDevice();
+  });
+
+  const randomPanel = h(
+    "div.bg-random-panel",
+    null,
+    deviceChips,
+    desktopRandom.node,
+    mobileRandom.node,
+  );
+  syncDevice();
+
+  const syncMode = (): void => {
+    const mode = draft.backgroundMode.value;
+    intervalField.hidden = mode === "single";
+    randomPanel.hidden = mode !== "random";
+  };
+  draft.backgroundMode.root.addEventListener("click", () => window.setTimeout(syncMode, 0));
   syncMode();
-  const opacityValue = h("span.mono", { text: `${draft.backgroundOpacity.value}%` });
+
+  // 百分比直接写在标签里。单独放在行尾会被挤到下一列的标签上
+  const opacityLabel = h("label.f", { text: `透明度 ${draft.backgroundOpacity.value}%` });
   draft.backgroundOpacity.addEventListener("input", () => {
-    opacityValue.textContent = `${draft.backgroundOpacity.value}%`;
-  });
-  const fillExample = h("button.btn.sm.gho", {
-    type: "button",
-    text: "填入示例",
-    title: "把示例地址填进上面的输入框，方便照着改",
-  });
-  fillExample.addEventListener("click", () => {
-    urlInput.value =
-      "https://images.example.com/wall-1.jpg\n" +
-      "https://images.example.com/wall-2.jpg\n" +
-      "/images/2026/10/wall-3.webp";
-    urlInput.focus();
+    opacityLabel.textContent = `透明度 ${draft.backgroundOpacity.value}%`;
   });
 
   return cardNode(
     cardHead("外观"),
     h("div.tip", {
       text:
-        "背景图铺满全屏、固定在内容下方。单图只用第一张；多图轮播按列表顺序切换；" +
-        "随机图 API 使用本站公开图库，取不到时回退到已上传的图。",
+        "背景图铺满全屏，固定在内容下面。单图只用第一张，多图轮播按顺序换，" +
+        "随机图每次取一批，取不到就用已上传的。两端各用各的，哪端没配就没有壁纸。",
     }),
-    h("div.background-preview-wrap", null, preview, list),
+    desktop.node,
+    mobile.node,
+    // 自适应栅格：窄卡片里每个字段都还有能读的宽度，不会被压成一列小方块
     h(
-      "div.row",
-      { style: { alignItems: "flex-end" } },
-      field(
-        "背景图 URL（可一次填多个）",
-        urlInput,
-        "也可以直接上传多张；保存设置后生效。",
-      ),
-      h(
-        "div",
-        { style: { display: "flex", gap: "8px", paddingBottom: "13px", flexWrap: "wrap" } },
-        uploadBtn,
-        addUrlBtn,
-        clearBtn,
-      ),
-    ),
-    fileInput,
-    h(
-      "div.background-url-example",
-      null,
-      h("b", { text: "多壁纸填写示例" }),
-      h("code", { text: "https://images.example.com/wall-1.jpg" }),
-      h("code", { text: "https://images.example.com/wall-2.jpg" }),
-      h("code", { text: "/images/2026/10/wall-3.webp" }),
-      h("span", {
-        text: "可以一次粘贴多行，或用逗号分隔；添加后在上方列表里预览、删除。轮播模式按列表顺序切换。",
-      }),
-      fillExample,
-    ),
-    h(
-      "div.row",
-      { style: { marginTop: "10px" } },
-      field("展示方式", draft.backgroundMode),
+      "div.fldgrid",
+      { style: { marginTop: "12px" } },
+      field("展示方式", draft.backgroundMode.root),
       intervalField,
-      field("透明度", draft.backgroundOpacity, "0% 完全透明，100% 原图"),
-      opacityValue,
+      h(
+        "div.fld",
+        null,
+        opacityLabel,
+        draft.backgroundOpacity,
+        h("div.tip", { text: "0% 完全透明，100% 原图" }),
+      ),
       field("模糊度（px）", draft.backgroundBlur, "0–40；模糊会同时放大一点避免边缘"),
     ),
+    randomPanel,
   );
+}
+
+/**
+ * 从相册里挑背景图。
+ *
+ * 背景图只能上传的话，已经在相册里的图就得再传一遍。这里按相册翻缩略图，
+ * 点几张直接加进那一组；地址用同源的相对路径，换域名不会失效。
+ */
+function openAlbumPicker(
+  albums: NonNullable<AdminSettings["plaza_albums"]>,
+  onPick: (urls: string[]) => void,
+): void {
+  if (albums.length === 0) {
+    toastError("站里还没有公开相册，先去「我的相册」建一个");
+    return;
+  }
+
+  const albumSelect = select(
+    albums.map((album) => ({
+      value: String(album.id),
+      label: `${album.name}（${album.image_count} 张）`,
+    })),
+    String(albums[0]?.id ?? ""),
+  );
+  const grid = h("div.bg-pick-grid");
+  const selected = new Set<string>();
+  const counter = h("span.bg-pick-count", { text: "已选 0 张" });
+  const confirm = h("button.btn.pri", { type: "button", text: "加入背景" });
+  confirm.disabled = true;
+
+  // 站内图片用相对路径存，换域名之后壁纸不会跟着挂掉
+  const localUrl = (raw: string): string => {
+    try {
+      const parsed = new URL(raw, location.origin);
+      return parsed.origin === location.origin ? `${parsed.pathname}${parsed.search}` : raw;
+    } catch {
+      return raw;
+    }
+  };
+
+  const repaint = (): void => {
+    counter.textContent = `已选 ${selected.size} 张`;
+    confirm.disabled = selected.size === 0;
+    confirm.textContent = selected.size > 0 ? `加入背景（${selected.size}）` : "加入背景";
+  };
+
+  async function loadImages(): Promise<void> {
+    mount(grid, h("div.bg-pick-loading", null, spinner(), "正在读取相册…"));
+    try {
+      const page = await requestPage<ImageItem>("/images", {
+        query: { album_id: Number(albumSelect.value), page: 1, per_page: 60 },
+      });
+      if (page.items.length === 0) {
+        mount(grid, h("div.tip", { text: "这个相册里还没有图片。" }));
+        return;
+      }
+      mount(
+        grid,
+        ...page.items.map((item) => {
+          const url = localUrl(item.url);
+          const tile = h("button.bg-pick-item", {
+            type: "button",
+            title: item.title ?? item.original_name ?? "",
+          });
+          tile.append(
+            h("img", { src: absUrl(item.thumb_url ?? item.url), alt: "", loading: "lazy" }),
+          );
+          if (selected.has(url)) tile.classList.add("on");
+          tile.addEventListener("click", () => {
+            if (selected.has(url)) {
+              selected.delete(url);
+              tile.classList.remove("on");
+            } else {
+              selected.add(url);
+              tile.classList.add("on");
+            }
+            repaint();
+          });
+          return tile;
+        }),
+      );
+      if (page.meta.total_pages > 1) {
+        grid.append(
+          h("div.tip", {
+            text: `只列了前 ${page.items.length} 张（共 ${page.meta.total} 张），挑完这批可以再选一次。`,
+          }),
+        );
+      }
+    } catch (err) {
+      mount(grid, qtip("err", "加载失败", String(err)));
+    }
+  }
+
+  albumSelect.addEventListener("change", () => void loadImages());
+  confirm.addEventListener("click", () => {
+    if (selected.size === 0) return;
+    onPick([...selected]);
+    handle.close();
+  });
+
+  const handle = openModal({
+    title: "从相册选择背景图",
+    wide: true,
+    body: [
+      field("相册", albumSelect, "只列公开相册；私有的图不该出现在站点背景上"),
+      grid,
+      h("div.flexline", null, counter),
+    ],
+    footer: [
+      h("button.btn", { type: "button", text: "取消", on: { click: () => handle.close() } }),
+      confirm,
+    ],
+  });
+  void loadImages();
+}
+
+/**
+ * 随机图手选相册：公开相册的勾选清单。
+ *
+ * 只列公开相册——私有的图不该出现在站点背景上，列表里也不该出现。
+ * 勾选状态直接写进草稿的 Set，保存时一起提交。
+ */
+function albumPicker(
+  picked: Set<number>,
+  albums: NonNullable<AdminSettings["plaza_albums"]>,
+): HTMLElement {
+  const wrap = h("div.bg-album-picker");
+  if (albums.length === 0) {
+    wrap.append(
+      h("div.tip", {
+        text: "站里还没有公开相册。先去「我的相册」建一个，把可见性设成公开，再回来勾。",
+      }),
+    );
+    return wrap;
+  }
+
+  const summary = h("div.bg-album-summary");
+  const paint = (): void => {
+    summary.textContent =
+      picked.size > 0 ? `已选 ${picked.size} 个相册` : "还没勾相册";
+  };
+
+  for (const album of albums) {
+    const box = h("input", { type: "checkbox", checked: picked.has(album.id) });
+    box.addEventListener("change", () => {
+      if (box.checked) picked.add(album.id);
+      else picked.delete(album.id);
+      paint();
+    });
+    wrap.append(
+      h(
+        "label.bg-album-row",
+        null,
+        box,
+        h(
+          "span",
+          null,
+          h("b", { text: album.name }),
+          h("small", { text: `${album.owner_email} · ${album.image_count} 张` }),
+        ),
+      ),
+    );
+  }
+  wrap.append(summary);
+  paint();
+  return wrap;
+}
+
+/**
+ * 一组背景图的编辑区，大预览加一条缩略图，末尾是上传入口。
+ *
+ * 地址输入框已经去掉了，壁纸只能上传（选文件或者拖进来）。传完直接进预览，
+ * 删就在缩略图上点叉。
+ */
+function backgroundGroup(
+  draft: SettingsDraft,
+  which: "desktop" | "mobile",
+  albums: NonNullable<AdminSettings["plaza_albums"]>,
+): { node: HTMLElement } {
+  const urls = which === "desktop" ? draft.backgrounds : draft.backgroundsMobile;
+  const title = which === "desktop" ? "桌面端背景" : "移动端背景";
+  const note =
+    which === "desktop"
+      ? "上传后按列表顺序使用；单图模式只用第一张。"
+      : "手机和平板（1023px 以下）用这一组；没配就是没有壁纸。";
+
+  const preview = h("div.ph.bg-preview", { class: which === "mobile" ? "is-mobile" : "" });
+  const strip = h("div.bg-strip");
+  const fileInput = h("input", {
+    type: "file",
+    accept: "image/*",
+    multiple: true,
+    style: { display: "none" },
+    "aria-hidden": "true",
+  });
+
+  const uploadBtn = h("button.bg-add", { type: "button" });
+  uploadBtn.append(
+    h("span.bg-add-plus", { text: "＋" }),
+    h("span.bg-add-label", { text: "上传图片" }),
+  );
+  uploadBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    const files = Array.from(fileInput.files ?? []);
+    fileInput.value = "";
+    if (files.length === 0) return;
+    void uploadBackgrounds(files, uploadBtn as unknown as HTMLButtonElement, (added) => {
+      urls.push(...added);
+      sync();
+    });
+  });
+
+  // 已经在相册里的图不必再传一遍
+  const albumBtn = h("button.bg-add", { type: "button" });
+  albumBtn.append(
+    h("span.bg-add-plus", { text: "▤" }),
+    h("span.bg-add-label", { text: "从相册选" }),
+  );
+  albumBtn.addEventListener("click", () => {
+    openAlbumPicker(albums, (picked) => {
+      for (const url of picked) {
+        if (!urls.includes(url)) urls.push(url);
+      }
+      sync();
+      toastOk(`已加入 ${picked.length} 张，保存设置后生效`);
+    });
+  });
+
+  const clearBtn = h("button.btn.sm.gho", {
+    type: "button",
+    text: "清空这一组",
+    on: {
+      click: async () => {
+        if (urls.length === 0) return;
+        const ok = await confirmDialog({
+          title: `清空${title}`,
+          message: "保存后会删除这些背景图引用；上传进库的图会一起清理。",
+          confirmText: "清空",
+          danger: true,
+        });
+        if (!ok) return;
+        urls.length = 0;
+        sync();
+      },
+    },
+  });
+
+  const sync = (): void => {
+    if (urls.length > 0) {
+      mount(preview, h("img", { src: absUrl(urls[0]), alt: `${title}预览` }));
+    } else {
+      mount(
+        preview,
+        h(
+          "div.bg-empty",
+          null,
+          h("b", { text: which === "mobile" ? "移动端没有背景" : "还没有背景图" }),
+          h("span", {
+            text:
+              which === "mobile"
+                ? "这一组留空，手机上就不显示壁纸，也不会拿桌面端的图顶上。"
+                : "点右侧「上传图片」，或把图片拖进这一块。",
+          }),
+        ),
+      );
+    }
+
+    strip.replaceChildren(
+      ...urls.map((url, index) =>
+        h(
+          "div.bg-thumb",
+          { title: `第 ${index + 1} 张` },
+          h("img", { src: absUrl(url), alt: `背景图 ${index + 1}` }),
+          h("button.bg-thumb-x", {
+            type: "button",
+            text: "×",
+            "aria-label": `移除第 ${index + 1} 张`,
+            on: {
+              click: () => {
+                urls.splice(index, 1);
+                sync();
+              },
+            },
+          }),
+        ),
+      ),
+      uploadBtn,
+      albumBtn,
+    );
+  };
+  sync();
+
+  const node = h(
+    "div.bg-group",
+    null,
+    h(
+      "div.bg-group-head",
+      null,
+      h("b", { text: title }),
+      h("span.bg-group-note", { text: note }),
+      h("span.spacer"),
+      h("span.bg-count", { text: "" }),
+      clearBtn,
+    ),
+    h("div.bg-group-body", null, preview, strip),
+    fileInput,
+  );
+
+  // 拖拽上传：整块都能接，拖进来时给一圈高亮
+  node.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    node.classList.add("is-dragover");
+  });
+  node.addEventListener("dragleave", () => node.classList.remove("is-dragover"));
+  node.addEventListener("drop", (event) => {
+    event.preventDefault();
+    node.classList.remove("is-dragover");
+    const files = Array.from(event.dataTransfer?.files ?? []).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    if (files.length === 0) return;
+    void uploadBackgrounds(files, uploadBtn as unknown as HTMLButtonElement, (added) => {
+      urls.push(...added);
+      sync();
+    });
+  });
+
+  // 数量跟着草稿走：每次 sync 后刷新一次
+  const count = node.querySelector<HTMLElement>(".bg-count");
+  const paintCount = (): void => {
+    if (count) count.textContent = urls.length > 0 ? `${urls.length} 张` : "未设置";
+  };
+  paintCount();
+  const observer = new MutationObserver(() => paintCount());
+  observer.observe(strip, { childList: true });
+
+  return { node };
 }
 
 /** 一次上传多张背景图；返回公开地址，由调用方放进草稿。 */
@@ -1868,9 +2294,13 @@ async function uploadBackgrounds(
   button: HTMLButtonElement,
   onUrls: (urls: string[]) => void,
 ): Promise<void> {
-  const label = button.textContent;
+  // 上传按钮有两种形态：普通按钮（改文案）与缩略图条里的虚线方块（只加忙碌态，
+  // 文案换掉会把里面的「＋」一起冲掉）
+  const isTile = button.classList.contains("bg-add");
+  const label = isTile ? "" : button.textContent;
   button.disabled = true;
-  button.textContent = "上传中…";
+  button.classList.add("is-busy");
+  if (!isTile) button.textContent = "上传中…";
   try {
     const form = new FormData();
     let count = 0;
@@ -1894,40 +2324,8 @@ async function uploadBackgrounds(
     toastError(err);
   } finally {
     button.disabled = false;
-    button.textContent = label ?? "上传图片（可多选）";
-  }
-}
-
-/** 默认头像：同样先在本机缩小再上传，头像用不着大图。 */
-async function uploadDefaultAvatar(
-  file: File,
-  button: HTMLButtonElement,
-  reload: () => void,
-): Promise<void> {
-  if (file.size > 20 * 1024 * 1024) {
-    toastError("头像图片不要超过 20 MiB，先压一下再传");
-    return;
-  }
-  button.disabled = true;
-  button.textContent = "处理中…";
-  try {
-    // 头像先让管理员手动选裁切范围，再上传 512px 方图
-    const blob = await openAvatarCrop(file, 512);
-    if (!blob) return;
-    const form = new FormData();
-    form.append("file", blob, "default-avatar.jpg");
-    const payload = await request<{ ok: boolean; url: string; bytes: number }>(
-      "/admin/settings/avatar",
-      { method: "POST", form },
-    );
-    toastOk(`默认头像已上传（${formatBytes(payload.bytes)}）并生效`);
-    await reloadSiteIdentity();
-    reload();
-  } catch (err) {
-    toastError(err);
-  } finally {
-    button.disabled = false;
-    button.textContent = "上传默认头像";
+    button.classList.remove("is-busy");
+    if (!isTile) button.textContent = label ?? "上传图片";
   }
 }
 
@@ -2122,6 +2520,33 @@ async function save(
     return;
   }
 
+  // 随机图来源是合集时，两种挑法都得有东西可挑，否则存下去壁纸一直是空的
+  if (draft.backgroundMode.value === "random") {
+    const sides: Array<[string, RandomSourceDraft]> = [
+      ["桌面端", draft.randomDesktop],
+      ["移动端", draft.randomMobile],
+    ];
+    for (const [label, side] of sides) {
+      if (side.source.value !== "collection") continue;
+      if (side.albumMode === "albums") {
+        if (side.albums.size === 0) {
+          toastError(`${label}选了「相册合集」，但一个相册都没勾。勾几个公开相册，或者切成「按命名集合」。`);
+          return;
+        }
+        continue;
+      }
+      const picked = side.collection.value.trim();
+      if (!picked) {
+        toastError(`${label}选了「相册合集」，但还没选合集。先在下面选一个，或者去「首页展示相册」里新建。`);
+        return;
+      }
+      if (!plazaCollections.has(picked)) {
+        toastError(`${label}的合集「${picked}」已经不在了，重新选一个`);
+        return;
+      }
+    }
+  }
+
   // 邮件段单独判断：只有真的动过才提交。
   // 以前是无条件校验「SMTP 服务器与发信邮箱都要填」，结果是邮件没配好的站
   // 连广场列数、上传上限这类无关设置都保存不了——报错还指向邮件字段，莫名其妙。
@@ -2194,11 +2619,21 @@ async function save(
     thumb: { client: draft.thumbClient, server_fallback: draft.thumbFallback },
     appearance: {
       backgrounds: draft.backgrounds,
+      backgrounds_mobile: draft.backgroundsMobile,
       background_opacity: Math.min(1, Math.max(0, Number(draft.backgroundOpacity.value) / 100)),
       background_blur: Math.min(40, Math.max(0, intOf(draft.backgroundBlur))),
       background_mode: draft.backgroundMode.value,
       background_interval: Math.min(3600, Math.max(3, intOf(draft.backgroundInterval))),
-      default_avatar: draft.defaultAvatar.value.trim() || null,
+      background_random_source: draft.randomDesktop.source.value,
+      background_random_collection: draft.randomDesktop.collection.value,
+      background_random_albums: [...draft.randomDesktop.albums],
+      background_random_api: draft.randomDesktop.api.value.trim(),
+      background_random_source_mobile: draft.randomMobile.source.value,
+      background_random_collection_mobile: draft.randomMobile.collection.value,
+      background_random_albums_mobile: [...draft.randomMobile.albums],
+      background_random_api_mobile: draft.randomMobile.api.value.trim(),
+      default_avatars: draft.defaultAvatars,
+      default_avatar_album: Number(draft.defaultAvatarAlbum.value) || 0,
     },
     music: {
       enabled: draft.musicEnabled,

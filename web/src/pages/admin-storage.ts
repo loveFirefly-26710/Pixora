@@ -10,7 +10,7 @@
  */
 
 import { ApiError, request } from "../core/api";
-import { h, mount } from "../core/dom";
+import { h, keepScroll, mount } from "../core/dom";
 import { formatBytes, formatNumber, toGigabytes } from "../core/format";
 import { confirmDialog, openModal } from "../core/modal";
 import type { PageContext } from "../core/router";
@@ -152,15 +152,22 @@ function addBackendButton(reload: () => void): HTMLButtonElement {
 }
 
 export async function render(ctx: PageContext): Promise<void> {
-  const root = h("div.pad");
-  mount(ctx.outlet, root);
-  root.append(loadingBlock("正在读取存储配置…"));
+  // 切换默认后端、合并重复、保存配置之后都会重画，位置要留着
+  const restoreScroll = keepScroll();
   const reload = (): void => void render(ctx);
+  const firstPaint = !ctx.outlet.hasChildNodes();
+  if (firstPaint) {
+    const boot = h("div.pad");
+    mount(ctx.outlet, boot);
+    boot.append(loadingBlock("正在读取存储配置…"));
+  }
+
   try {
     const data = await request<StorageAdmin>("/admin/storage");
-    mount(root, ...view(reload, data));
+    mount(ctx.outlet, h("div.pad", null, ...view(reload, data)));
+    restoreScroll();
   } catch (err) {
-    mount(root, errorBlock(err, reload));
+    mount(ctx.outlet, h("div.pad", null, errorBlock(err, reload)));
   }
 }
 
@@ -385,6 +392,82 @@ function defaultDriverCard(reload: () => void, data: StorageAdmin): HTMLElement 
   );
 }
 
+/** 用户存储占比的配色。与驱动色点分开：饼图讲「谁占的」，不是「存在哪」。 */
+const USER_COLORS = [
+  "#0e8f71",
+  "#2563eb",
+  "#7c3aed",
+  "#d97706",
+  "#dc2626",
+  "#0891b2",
+  "#65a30d",
+  "#db2777",
+];
+
+/**
+ * 用户存储占比的环形图。
+ *
+ * 没引图表库，一张图不值当多几十 KB。扇形就是同一个圆上的
+ * stroke-dasharray，按周长折算比例，不用碰弧长公式。
+ */
+function userShareChart(rows: Array<{ email: string; bytes: number }>): HTMLElement {
+  const positive = rows.filter((row) => row.bytes > 0);
+  const top = positive.slice(0, 7);
+  const restBytes = positive.slice(7).reduce((sum, row) => sum + row.bytes, 0);
+  if (restBytes > 0) top.push({ email: "其他用户", bytes: restBytes });
+  const total = top.reduce((sum, row) => sum + row.bytes, 0);
+
+  const wrap = h("div.user-share");
+  if (total <= 0) {
+    wrap.append(h("div.tip", { text: "还没有图片，暂时画不出占比。" }));
+    return wrap;
+  }
+
+  const ring = h("div.user-share-ring");
+  const radius = 48;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+  const slices = top
+    .map((row, index) => {
+      const length = (row.bytes / total) * circumference;
+      const dash = `<circle class="slice" cx="60" cy="60" r="${radius}" fill="none" stroke="${
+        USER_COLORS[index % USER_COLORS.length]
+      }" stroke-width="16" stroke-dasharray="${length.toFixed(2)} ${(circumference - length).toFixed(
+        2,
+      )}" stroke-dashoffset="${(-offset).toFixed(2)}" transform="rotate(-90 60 60)"></circle>`;
+      offset += length;
+      return dash;
+    })
+    .join("");
+  ring.innerHTML = `<svg viewBox="0 0 120 120" role="img" aria-label="用户存储占比">${slices}</svg>`;
+  ring.append(
+    h(
+      "div.user-share-center",
+      null,
+      h("b", { text: formatBytes(total) }),
+      h("span", { text: "合计占用" }),
+    ),
+  );
+
+  const legend = h("div.user-share-legend");
+  top.forEach((row, index) => {
+    const percent = ((row.bytes / total) * 100).toFixed(1);
+    legend.append(
+      h(
+        "div.user-share-item",
+        null,
+        h("span.dot", { style: { background: USER_COLORS[index % USER_COLORS.length] } }),
+        h("span.user-share-mail", { text: row.email, title: row.email }),
+        h("span.user-share-num", { text: `${percent}%` }),
+        h("span.user-share-bytes", { text: formatBytes(row.bytes) }),
+      ),
+    );
+  });
+
+  wrap.append(ring, legend);
+  return wrap;
+}
+
 /** 存储分布：各驱动张数与占用，底下一行总计（含去重省下的量）。 */
 function distributionCard(reload: () => void, data: StorageAdmin): HTMLElement {
   const body = h("div", { style: { fontSize: "13px", lineHeight: "2.2" } });
@@ -430,6 +513,31 @@ function distributionCard(reload: () => void, data: StorageAdmin): HTMLElement {
         }),
       ),
     );
+    // 谁没清回收站：管理员最常问的就是这一句。默认收起，点开看明细
+    const binnedUsers = (data.binned_users ?? []).filter((row) => row.bytes > 0);
+    if (binnedUsers.length > 0) {
+      const list = h("div.binned-users", { hidden: true });
+      for (const row of binnedUsers) {
+        list.append(
+          h(
+            "div.binned-user-row",
+            null,
+            h("span.binned-user-mail", { text: row.email, title: row.email }),
+            h("span.binned-user-num", { text: formatBytes(row.bytes) }),
+            h("span.binned-user-count", { text: `${formatNumber(row.count)} 个实体` }),
+          ),
+        );
+      }
+      const toggle = h("button.btn.sm.gho.binned-toggle", {
+        type: "button",
+        text: `按用户查看（${binnedUsers.length}）`,
+      });
+      toggle.addEventListener("click", () => {
+        list.hidden = !list.hidden;
+        toggle.classList.toggle("on", !list.hidden);
+      });
+      body.append(h("div.binned-users-wrap", null, toggle, list));
+    }
   }
 
   // 已经没人引用的实体：等后台回收的那部分。给一个「现在就跑一轮」的入口，
@@ -480,6 +588,15 @@ function distributionCard(reload: () => void, data: StorageAdmin): HTMLElement {
   return card(
     "存储分布",
     body,
+    // 用户占比：盘被谁占了。放在驱动分布后面，两种分布一起看
+    h(
+      "div.user-share-wrap",
+      null,
+      h("div.user-share-title", { text: "用户存储占比" }),
+      userShareChart(
+        (data.user_usage ?? []).map((row) => ({ email: row.email, bytes: row.bytes })),
+      ),
+    ),
     h("div", {
       style: {
         marginTop: "10px",
@@ -598,6 +715,59 @@ function backendsCard(reload: () => void, data: StorageAdmin): HTMLElement {
   if (!data.backends || data.backends.length === 0) {
     blocks.push(emptyState("💾", "还没有登记任何存储后端，先添加一个再上传。", addBackendButton(reload)));
   } else {
+    // 重复检测：同驱动 + 同配置（掩码后的配置也能比——非敏感字段是原值，
+    // 敏感字段是「配没配」的布尔）。历史上允许重复添加，这里给一条清理入口
+    const seen = new Map<string, number>();
+    let duplicated = 0;
+    for (const backend of data.backends) {
+      const key = `${backend.driver}|${JSON.stringify(backend.config ?? {})}`;
+      const hit = seen.get(key) ?? 0;
+      if (hit > 0) duplicated += 1;
+      seen.set(key, hit + 1);
+    }
+    if (duplicated > 0) {
+      const mergeBtn = h("button.btn.sm.pri", { type: "button", text: "合并重复后端" });
+      mergeBtn.addEventListener("click", async () => {
+        const ok = await confirmDialog({
+          title: "合并重复的后端",
+          message:
+            `有 ${duplicated} 个后端的配置跟别人完全一样。合并会把它们的实体记录并到留下的那一行，` +
+            "多余的行删掉。物理文件不用动，这些行本来就指向同一个落点。",
+          confirmText: "合并",
+        });
+        if (!ok) return;
+        mergeBtn.disabled = true;
+        mergeBtn.textContent = "合并中…";
+        try {
+          const payload = await request<{ merged: number; moved: number }>(
+            "/admin/storage/backends/dedupe",
+            { method: "POST" },
+          );
+          toastOk(
+            payload.merged > 0
+              ? `已合并 ${payload.merged} 个重复后端，${formatNumber(payload.moved)} 个实体改归属`
+              : "没有需要合并的后端",
+          );
+          reload();
+        } catch (err) {
+          toastError(err);
+          mergeBtn.disabled = false;
+          mergeBtn.textContent = "合并重复后端";
+        }
+      });
+      blocks.push(
+        qtip(
+          "warn",
+          `有 ${duplicated} 个后端与别的后端配置完全相同`,
+          h(
+            "span",
+            null,
+            "同一份配置登记了两次，存储分布会各算一半，实体还可能挂在两个 id 下。合并之后只留一行。",
+            h("div", { style: { marginTop: "8px" } }, mergeBtn),
+          ),
+        ),
+      );
+    }
     for (const backend of data.backends) blocks.push(backendBlock(reload, backend));
     blocks.push(
       h("div", { style: { display: "flex", justifyContent: "center", marginTop: "14px" } }, addBackendButton(reload)),

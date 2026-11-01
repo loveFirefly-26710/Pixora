@@ -208,18 +208,24 @@ a:hover {
 
 /* ---------- 顶栏 ---------- */
 
+/* 顶栏改成浮起来的圆角条，左右各留 10px，不再铺满整行 */
 .navbar {
   min-height: 64px;
-  padding: 11px 24px;
+  margin: 8px 10px 0;
+  padding: 11px 18px;
   gap: 18px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(4, 12, 14, 0.72);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(4, 12, 14, 0.84);
   backdrop-filter: blur(20px) saturate(1.1);
   -webkit-backdrop-filter: blur(20px) saturate(1.1);
+  box-shadow: var(--shadow-soft);
+  position: sticky;
+  top: 8px;
 }
 
 :root[data-theme="light"] .navbar {
-  background: rgba(250, 255, 252, 0.8);
+  background: rgba(250, 255, 252, 0.9);
 }
 
 .logo {
@@ -509,21 +515,24 @@ a:hover {
 
 /* ---------- 侧栏与移动底栏 ---------- */
 
+/* 侧栏也独立成块，跟内容区隔开 10px */
 .sidebar {
   width: 220px;
   flex: 0 0 220px;
   background: var(--surface);
-  border-right: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-soft);
   backdrop-filter: blur(20px);
-  padding: 14px 10px 40px;
-  min-height: calc(100vh - var(--nav-h));
+  padding: 12px 8px 24px;
+  min-height: calc(100vh - var(--nav-offset) - 16px);
 }
 
 @media (min-width: 1024px) {
   .sidebar {
     position: sticky;
-    top: var(--nav-h);
-    max-height: calc(100vh - var(--nav-h));
+    top: var(--nav-offset);
+    max-height: calc(100vh - var(--nav-offset));
     overflow: auto;
   }
 }
@@ -592,16 +601,23 @@ a:hover {
   text-transform: uppercase;
 }
 
+/* 手机底栏跟着一起浮起来，圆角与顶栏对齐 */
 .tabbar {
-  height: calc(var(--tabbar-h) + var(--safe-bottom));
-  border-top: 1px solid var(--border);
-  background: rgba(4, 12, 14, 0.88);
+  left: 10px;
+  right: 10px;
+  bottom: calc(8px + var(--safe-bottom));
+  height: var(--tabbar-h);
+  padding-bottom: 0;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(4, 12, 14, 0.9);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
+  box-shadow: var(--shadow);
 }
 
 :root[data-theme="light"] .tabbar {
-  background: rgba(250, 255, 252, 0.9);
+  background: rgba(250, 255, 252, 0.94);
 }
 
 .tabbar .it {
@@ -1959,9 +1975,17 @@ tr.pick td {
 }
 
 .plaza-toolbar {
-  margin: 4px 0 18px;
-  padding: 4px 0 14px;
-  border-bottom: 1px solid var(--border);
+  margin: 4px 0 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  /* 工具条下面就是壁纸：给一层不透明底板，亮色壁纸下按钮和输入框也不会
+     「看不见」。backdrop-filter 只在支持时兜一层柔化，不支持也不影响可读性 */
+  background: var(--surface);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+  position: relative;
+  z-index: 1;
 }
 
 .plaza-toolbar .f {
@@ -2107,120 +2131,8 @@ tr.pick td {
 }
 
 /* 外观：背景图预览与多图列表 */
-.background-preview-wrap {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  margin: 12px 0 14px;
-}
-
-.background-preview {
-  flex: 0 0 240px;
-  height: 130px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface-2);
-  color: var(--faint);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-}
-
-.background-preview img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.background-list {
-  display: flex;
-  flex: 1;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.background-url-example {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 8px 0 4px;
-  padding: 10px 12px;
-  border: 1px dashed var(--border);
-  border-radius: 10px;
-  background: var(--surface-2);
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-}
-
-.background-url-example b {
-  color: var(--text);
-  font-family: var(--font-body);
-  font-size: 12px;
-}
-
-.background-url-example code {
-  color: var(--primary);
-  background: transparent;
-  font-size: 11.5px;
-}
-
-.background-url-example span {
-  margin-top: 2px;
-  font-family: var(--font-body);
-  font-size: 11.5px;
-  color: var(--faint);
-}
-
-.background-url-example .btn {
-  align-self: flex-start;
-  margin-top: 4px;
-}
-
-.background-url-input {
-  min-height: 78px;
-  resize: vertical;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.background-thumb {
-  position: relative;
-  width: 104px;
-  height: 70px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface-2);
-}
-
-.background-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.background-thumb .btn {
-  position: absolute;
-  right: 4px;
-  bottom: 4px;
-  padding: 2px 6px;
-  font-size: 10px;
-  background: color-mix(in srgb, var(--bg) 75%, transparent);
-}
-
-@media (max-width: 640px) {
-  .background-preview-wrap {
-    flex-direction: column;
-  }
-  .background-preview {
-    flex-basis: auto;
-    width: 100%;
-  }
-}
+/* 背景图编辑区的新样式在 components.css（.bg-group / .bg-preview / .bg-add）；
+   旧的地址输入框、缩略图条与示例框已经删掉，别再把它们加回来。 */
 
 /* 头像裁剪弹窗 */
 .avatar-crop-stage {
@@ -3669,6 +3581,32 @@ tr.pick td {
   }
 }
 
+/*
+ * 平板（768–1024）单独兜一遍顶栏的实时模糊。
+ *
+ * 手机端早就关掉了（见上面 767 那段），平板这一段一直漏着：安卓平板的
+ * VIA 浏览器滚动时会对 sticky 顶栏反复重采样背后的壁纸，表现为上下疯狂
+ * 抖动；桌面浏览器与移动端 Edge 都不会。关掉 backdrop-filter 改用接近
+ * 不透明的底色，观感几乎不变，但不再每帧重算。
+ */
+@media (min-width: 768px) and (max-width: 1024px) {
+  .navbar {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: color-mix(in srgb, var(--bg) 94%, transparent);
+  }
+
+  .sidebar {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  body.has-site-bg .card {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
 @media (max-width: 640px) {
   .navbar {
     padding: 9px 12px;
@@ -4174,7 +4112,7 @@ tr.pick td {
 .music-panel {
   position: fixed;
   z-index: 60;
-  top: calc(var(--nav-h) + var(--music-panel-gap));
+  top: calc(var(--nav-offset) + var(--music-panel-gap));
   right: var(--music-panel-gap);
   display: flex;
   flex-direction: column;
@@ -4829,7 +4767,7 @@ tr.pick td {
 /* 横屏手机/矮窗口：抽屉占满顶栏以下的空间，别让固定的底栏把播放控件挤掉。 */
 @media (max-width: 1024px) and (max-height: 520px) {
   .music-panel {
-    top: calc(var(--nav-h) + 8px);
+    top: calc(var(--nav-offset) + 2px);
     right: 8px;
     left: 8px;
     bottom: calc(8px + var(--safe-bottom));
@@ -4896,4 +4834,37 @@ tr.pick td {
   .ambient {
     display: none !important;
   }
+}
+
+/* ============================================================
+   圆角布局的收尾：卡片阴影 + 壁纸下的可读性
+   ============================================================ */
+
+/* 卡片带一点阴影，跟浮起来的顶栏、侧栏是一套 */
+.card {
+  box-shadow: var(--shadow-soft);
+}
+
+/*
+ * 配了壁纸时卡片底色抬到接近不透明。
+ *
+ * 原来 .card 用半透明 surface，壁纸一花就透上来，用户管理那种密集表格
+ * 基本读不出行。没配壁纸的时候保持原来的通透。
+ */
+body.has-site-bg .card,
+body.has-site-bg .table-wrap,
+body.has-site-bg .qtip,
+body.has-site-bg .plaza-toolbar,
+body.has-site-bg .sidebar {
+  background: color-mix(in srgb, var(--surface-solid) 94%, transparent);
+}
+
+/* 表格行再兜一层，有些表格直接挂在页面上，不在 .card 里。
+   用 :where() 压掉特异性，免得盖掉 tr.pick 的选中底色。 */
+body.has-site-bg :where(tbody tr) {
+  background: color-mix(in srgb, var(--surface-solid) 92%, transparent);
+}
+
+body.has-site-bg :where(tbody tr:hover) {
+  background: color-mix(in srgb, var(--surface-solid) 97%, var(--primary-soft));
 }

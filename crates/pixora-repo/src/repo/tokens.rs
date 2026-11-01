@@ -67,9 +67,13 @@ impl Repo {
     }
 
     /// 用户的令牌列表。含已撤销的行——安全页要展示「哪个令牌什么时候被撤的」。
+    ///
+    /// 但**不含已删除的**：用户点了删除之后，界面上就该像没了一样。
+    /// 行还在库里（`deleted_at` 有值），留给管理员做审计，保留期满由后台清理。
     pub async fn list_api_tokens(&self, user_id: i64) -> Result<Vec<ApiToken>> {
         let sql = format!(
-            "SELECT {} FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC, id DESC",
+            "SELECT {} FROM api_tokens WHERE user_id = ? AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id DESC",
             ApiToken::COLUMNS
         );
         let rows = self.db.fetch_all(&sql, Args::new().int(user_id)).await?;
@@ -110,23 +114,50 @@ impl Repo {
             .await
     }
 
-    /// 物理删除一个令牌。撤销只是留痕，删除是「不想再在这张表里看到它」——
-    /// 已经撤销或过期的令牌才有必要删，但接口不做这个前置判断：
-    /// 删掉的令牌立即无法通过鉴权（行都没了），效果上等于撤销 + 清记录。
+    /// 删除一个令牌，延迟删除。
+    ///
+    /// 打上 `deleted_at` 和 `revoked_at`，鉴权立刻失效，列表里也查不到。
+    /// 行留到保留期满，由后台任务物理删除（[`Repo::purge_deleted_tokens`]），
+    /// 中间这段时间管理员可以查。库里本来就只有哈希和展示片段，没有明文。
     pub async fn delete_api_token(&self, id: i64, user_id: i64) -> Result<u64> {
+        let now = now_ts();
         self.db
             .execute(
-                "DELETE FROM api_tokens WHERE id = ? AND user_id = ?",
-                Args::new().int(id).int(user_id),
+                "UPDATE api_tokens SET deleted_at = ?, deleted_by = 'user', \
+                        revoked_at = COALESCE(revoked_at, ?) \
+                  WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+                Args::new().text(&now).text(&now).int(id).int(user_id),
             )
             .await
     }
 
-    /// 有效令牌数（上限校验用）。已撤销的不计；到期与否由服务层另行判断。
+    /// 物理清理保留期已过的已删除令牌。只有后台任务会调它。
+    pub async fn purge_deleted_tokens(&self, before: DateTime<Utc>) -> Result<u64> {
+        self.db
+            .execute(
+                "DELETE FROM api_tokens WHERE deleted_at IS NOT NULL AND deleted_at < ?",
+                Args::new().text(ts(before)),
+            )
+            .await
+    }
+
+    /// 管理员视角：某个用户被删掉的令牌（含保留期内的行）。
+    pub async fn list_deleted_tokens(&self, user_id: i64) -> Result<Vec<ApiToken>> {
+        let sql = format!(
+            "SELECT {} FROM api_tokens WHERE user_id = ? AND deleted_at IS NOT NULL \
+             ORDER BY deleted_at DESC, id DESC LIMIT 200",
+            ApiToken::COLUMNS
+        );
+        let rows = self.db.fetch_all(&sql, Args::new().int(user_id)).await?;
+        rows.iter().map(ApiToken::from_row).collect()
+    }
+
+    /// 有效令牌数（上限校验用）。已撤销、已删除的都不计；到期与否由服务层另行判断。
     pub async fn count_api_tokens(&self, user_id: i64) -> Result<i64> {
         self.db
             .count(
-                "SELECT COUNT(*) AS total FROM api_tokens WHERE user_id = ? AND revoked_at IS NULL",
+                "SELECT COUNT(*) AS total FROM api_tokens \
+                  WHERE user_id = ? AND revoked_at IS NULL AND deleted_at IS NULL",
                 Args::new().int(user_id),
             )
             .await

@@ -6,7 +6,7 @@
  */
 
 import { request } from "../core/api";
-import { h, mount } from "../core/dom";
+import { h, keepScroll, mount } from "../core/dom";
 import { formatBytes, parseSize } from "../core/format";
 import type { PageContext } from "../core/router";
 import { currentUser } from "../core/state";
@@ -25,15 +25,32 @@ import {
 import { cardHead, cardNode, field, spinner, textInput } from "../ui/widgets";
 
 export async function render(ctx: PageContext): Promise<void> {
-  const root = h("div.pad");
-  mount(ctx.outlet, root);
+  // 保存后会重画这一页，先记住滚动位置
+  const restoreScroll = keepScroll();
   const user = currentUser();
   if (!user || user.role !== "admin") {
-    root.append(h("div.card", null, h("div.tip", { text: "需要管理员权限。" })));
+    mount(
+      ctx.outlet,
+      h("div.pad", null, h("div.card", null, h("div.tip", { text: "需要管理员权限。" }))),
+    );
     return;
   }
-  const loading = h("div.card", { style: { display: "flex", gap: "8px", alignItems: "center" } }, spinner(), "正在读取策略…");
-  root.append(loading);
+  // 首次进页面才有加载占位。重画时旧内容先留着，页面高度不会塌
+  if (!ctx.outlet.hasChildNodes()) {
+    mount(
+      ctx.outlet,
+      h(
+        "div.pad",
+        null,
+        h(
+          "div.card",
+          { style: { display: "flex", gap: "8px", alignItems: "center" } },
+          spinner(),
+          "正在读取策略…",
+        ),
+      ),
+    );
+  }
   let data: AdminSettings;
   let rate: RateLimitAdmin;
   try {
@@ -42,10 +59,12 @@ export async function render(ctx: PageContext): Promise<void> {
       request<RateLimitAdmin>("/admin/ratelimit"),
     ]);
   } catch (err) {
-    root.replaceChildren(h("div.card", null, h("div.tip", { text: String(err) })));
+    mount(
+      ctx.outlet,
+      h("div.pad", null, h("div.card", null, h("div.tip", { text: String(err) }))),
+    );
     return;
   }
-  root.replaceChildren();
 
   const maxFile = textInput({ value: formatBytes(data.upload.max_file_bytes), mono: true });
   const maxBatch = textInput({ value: String(data.upload.max_batch_size), type: "number", mono: true });
@@ -174,8 +193,10 @@ export async function render(ctx: PageContext): Promise<void> {
     }
   });
 
-  root.append(
-    h("div.view-head", null, h("h1.view-title", { text: "存储策略" })),
-    ...nodes,
+  // 数据齐了一次性换上，中途不换占位
+  mount(
+    ctx.outlet,
+    h("div.pad", null, h("div.view-head", null, h("h1.view-title", { text: "存储策略" })), ...nodes),
   );
+  restoreScroll();
 }

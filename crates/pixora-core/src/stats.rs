@@ -67,8 +67,12 @@ pub struct StoragePayload {
     pub capacity: StorageCapacityView,
     pub paths: PathsView,
     pub distribution: Vec<DriverDistribution>,
+    /// 按用户拆的在用占用，降序（存储占比饼图）
+    pub user_usage: Vec<UserUsageView>,
     /// 回收站里还没过保留期的那部分（单独一行展示）
     pub binned: StorageTotals,
+    /// 回收站按用户拆（谁的回收站还没清）
+    pub binned_users: Vec<UserUsageView>,
     /// 已经没人引用、等后台回收的那部分（单独一行展示）
     pub pending: StorageTotals,
     pub totals: StorageTotals,
@@ -156,6 +160,16 @@ pub struct StorageTotals {
     pub count: i64,
     pub bytes: i64,
     pub dedup_saved_bytes: i64,
+}
+
+/// 单个用户的占用。饼图与「回收站谁没清」共用一份。
+#[derive(Debug, Clone, Serialize)]
+pub struct UserUsageView {
+    pub user_id: i64,
+    pub email: String,
+    /// 实体条数（原图 + 缩略图）
+    pub count: i64,
+    pub bytes: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -375,6 +389,8 @@ impl AppState {
                 bytes: stats.binned_bytes,
                 dedup_saved_bytes: 0,
             },
+            user_usage: stats.users.iter().map(user_usage_view).collect(),
+            binned_users: stats.binned_users.iter().map(user_usage_view).collect(),
             pending: StorageTotals {
                 count: stats.pending_count,
                 bytes: stats.pending_bytes,
@@ -561,9 +577,18 @@ impl AppState {
     }
 }
 
+/// 用户占用行 → 面板行。邮箱只给管理员看，前台不会出现这一份数据。
+fn user_usage_view(row: &pixora_repo::model::UserStorageStat) -> UserUsageView {
+    UserUsageView {
+        user_id: row.user_id,
+        email: row.email.clone(),
+        count: row.count,
+        bytes: row.bytes,
+    }
+}
+
 /// 后端行 → 面板行。配置里的敏感字段只回显「配没配」。
-fn backend_view(backend: &pixora_repo::model::StorageBackend) -> BackendView {
-    BackendView {
+fn backend_view(backend: &pixora_repo::model::StorageBackend) -> BackendView {    BackendView {
         id: backend.id,
         driver: backend.driver.clone(),
         label: backend.label.clone(),
@@ -960,14 +985,25 @@ mod tests {
 
         let payload = state.storage_admin_payload().await.expect("存储面板");
         assert_eq!(payload.default_driver, "local", "装配阶段兜底的是本地驱动");
-        assert_eq!(payload.backends.len(), 1);
-        assert_eq!(payload.backends[0].label, "GitHub 仓库");
+        // 全新实例会先把「正在用的本地后端」自动登记一行，再加上刚建的 GitHub
+        assert_eq!(payload.backends.len(), 2, "本地后端应被自动登记");
+        let local = payload
+            .backends
+            .iter()
+            .find(|backend| backend.driver == "local")
+            .expect("本地后端");
+        assert!(local.is_default, "正在使用的本地后端要标成默认");
+        let github = payload
+            .backends
+            .iter()
+            .find(|backend| backend.label == "GitHub 仓库")
+            .expect("GitHub 仓库");
         assert_eq!(
-            payload.backends[0].config["token"],
+            github.config["token"],
             serde_json::Value::Bool(true),
             "敏感字段只能回显布尔"
         );
-        assert_eq!(payload.backends[0].config["owner"], "example-org");
+        assert_eq!(github.config["owner"], "example-org");
         assert!(payload.paths.upload_prefix.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
         assert!(payload.paths.layout.contains("{uid}"), "{}", payload.paths.layout);
         assert!(payload.paths.layout.contains("{hash}.{ext}"), "{}", payload.paths.layout);

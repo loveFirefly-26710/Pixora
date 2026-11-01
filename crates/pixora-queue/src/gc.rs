@@ -227,6 +227,17 @@ pub async fn purge_expired(state: &Arc<AppState>) -> pixora_core::Result<()> {
         0
     };
 
+    // 用户删掉的 API 令牌，保留期跟登录历史一致。删除当时就失效了，
+    // 这里只是把过了保留期的行真正从库里清掉。
+    let tokens = if retention_days > 0 {
+        state
+            .repo
+            .purge_deleted_tokens(now - chrono::Duration::days(retention_days))
+            .await?
+    } else {
+        0
+    };
+
     // 过期验证码
     let codes = state
         .repo
@@ -281,9 +292,10 @@ pub async fn purge_expired(state: &Arc<AppState>) -> pixora_core::Result<()> {
     // 没有任何引用的空标签
     let tags = state.repo.purge_unused_tags().await.unwrap_or(0);
 
-    if sessions + codes + ip_rules + counters + jobs + mails + audits + tags + tombstones > 0 {
+    if sessions + tokens + codes + ip_rules + counters + jobs + mails + audits + tags + tombstones > 0 {
         tracing::info!(
             sessions,
+            tokens,
             codes,
             ip_rules,
             counters,

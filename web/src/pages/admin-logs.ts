@@ -11,7 +11,7 @@
  */
 
 import { ApiError, requestPage } from "../core/api";
-import { h, mount } from "../core/dom";
+import { h, keepScroll, mount } from "../core/dom";
 import { formatDateTime } from "../core/format";
 import { navigate, type PageContext } from "../core/router";
 import {
@@ -125,7 +125,10 @@ export async function render(ctx: PageContext): Promise<void> {
 
   async function load(page: number): Promise<void> {
     const filter = current();
-    mount(body, loadingBlock("正在读取系统日志…"));
+    // 查下一页、换筛选都走这里，已有内容时别摆占位，页面高度一塌就跳回顶部
+    const restoreScroll = keepScroll();
+    const first = !body.hasChildNodes();
+    if (first) mount(body, loadingBlock("正在读取系统日志…"));
     mount(foot);
     try {
       const result = await requestPage<AccountLogRow>("/admin/logs", {
@@ -138,6 +141,7 @@ export async function render(ctx: PageContext): Promise<void> {
       });
       if (result.items.length === 0) {
         mount(body, emptyState("📄", "还没有系统日志记录。"));
+        restoreScroll();
         return;
       }
       mount(
@@ -156,6 +160,7 @@ export async function render(ctx: PageContext): Promise<void> {
         ),
       );
       mount(foot, pagination(result.meta, (next) => void load(next)) ?? "");
+      restoreScroll();
     } catch (err) {
       mount(body, errorBlock(err, () => void load(page)));
     }

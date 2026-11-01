@@ -50,10 +50,59 @@ function settleReady(): void {
   resolve?.();
 }
 
+/**
+ * 用手机那一组背景的断点。
+ *
+ * 跟布局断点对齐（1023px 以下都是手机/平板那套界面，带底部标签栏）。
+ * 这里以前写的是 767，平板宽度落在中间：界面是移动版，背景却还是桌面那组，
+ * 看起来就像「移动端只会跟着 PC 走」。
+ */
+const MOBILE_QUERY = "(max-width: 1023px)";
+
+/**
+ * 当前设备该用哪一组背景。
+ *
+ * 两端各用各的：手机端没配就是没有壁纸，不拿桌面端那组顶上。
+ * 想两端一样就分别传，或者用「复制桌面端这组」。
+ */
+function pickBackgrounds(site: SiteInfo): { urls: string[]; mobile: boolean } {
+  const desktop = (site.backgrounds ?? []).filter(Boolean);
+  // 旧版的单图字段只在桌面端列表为空时兜底，属于历史数据迁移
+  if (desktop.length === 0 && site.background) desktop.push(site.background);
+  const mobileList = (site.backgrounds_mobile ?? []).filter(Boolean);
+  const isMobile =
+    typeof window.matchMedia === "function" && window.matchMedia(MOBILE_QUERY).matches;
+  return isMobile ? { urls: mobileList, mobile: true } : { urls: desktop, mobile: false };
+}
+
+let lastSite: SiteInfo | null = null;
+let watchingViewport = false;
+
+/**
+ * 视口跨过断点时重贴背景：手机横竖屏切换、桌面窗口被拉窄都会走到这里。
+ * 只在真的换了那一组时才重建（signature 里带了 mobile 标记）。
+ */
+function watchViewport(): void {
+  if (watchingViewport || typeof window.matchMedia !== "function") return;
+  watchingViewport = true;
+  const query = window.matchMedia(MOBILE_QUERY);
+  const onChange = (): void => {
+    if (lastSite) applySiteBackground(lastSite);
+  };
+  if (typeof query.addEventListener === "function") {
+    query.addEventListener("change", onChange);
+  } else {
+    // Safari 15 之前只有已废弃的写法
+    (query as MediaQueryList & { addListener?: (fn: () => void) => void }).addListener?.(onChange);
+  }
+}
+
 export function applySiteBackground(site: SiteInfo): void {
+  lastSite = site;
+  watchViewport();
   const root = document.documentElement;
-  const urls = (site.backgrounds ?? []).filter(Boolean);
-  if (urls.length === 0 && site.background) urls.push(site.background);
+  const picked = pickBackgrounds(site);
+  const urls = picked.urls;
   const mode: BackgroundMode = site.background_mode ?? "single";
   // 随机图模式不需要预先上传背景：即使列表为空，也要让 /random 的图进来。
   if (urls.length === 0 && mode !== "random") {
@@ -70,7 +119,7 @@ export function applySiteBackground(site: SiteInfo): void {
 
   // 登出、上传额度刷新都会重拉 /site。配置没变就别拆掉正在显示的背景层：
   // 拆了再建会让壁纸消失一瞬，还会平白重新下载同一个文件。
-  const signature = `${mode}|${intervalSeconds}|${urls.join("\n")}`;
+  const signature = `${mode}|${intervalSeconds}|${picked.mobile ? "m" : "d"}|${urls.join("\n")}`;
   if (current && current.signature === signature) return;
 
   stop();
@@ -91,7 +140,7 @@ export function applySiteBackground(site: SiteInfo): void {
   const run: BackgroundRun = { signature, layer, images, front: 0, timer: null };
   current = run;
 
-  void start(run, urls, mode, intervalSeconds * 1000);
+  void start(run, urls, mode, intervalSeconds * 1000, picked.mobile);
 }
 
 async function start(
@@ -99,6 +148,7 @@ async function start(
   urls: string[],
   mode: BackgroundMode,
   interval: number,
+  mobile: boolean,
 ): Promise<void> {
   if (mode === "single" || mode === "slideshow") {
     // 列表里可能混着已经失效的地址（换过存储、删过图都会留下旧 URL）。
@@ -128,7 +178,7 @@ async function start(
     if (initial !== null) cursor = initial;
     markInitial(run);
   }
-  random = await fetchRandom(urls);
+  random = await fetchRandom(urls, mobile);
   if (current !== run) return;
   if (random.length === 0) random = urls;
   if (!shown) {
@@ -147,7 +197,7 @@ async function start(
     if (document.visibilityState !== "visible" || current !== run) return;
     cursor = (cursor + 1) % random.length;
     if (cursor === 0) {
-      void fetchRandom(urls).then((next) => {
+      void fetchRandom(urls, mobile).then((next) => {
         if (current === run && next.length > 0) random = next;
       });
     }
@@ -249,17 +299,22 @@ function display(run: BackgroundRun, url: string, timeoutMs = 15_000): Promise<b
   });
 }
 
-async function fetchRandom(fallback: string[]): Promise<string[]> {
+/**
+ * 取随机背景图。
+ *
+ * 来源由后台决定（本站广场 / 公开相册合集 / 自定义 API），前端只认这一个
+ * 地址：自定义 API 由服务端代取，既不暴露地址，也不受对方 CORS 限制。
+ * 返回值既可能是对象数组（本站图，带 url 字段），也可能是一串地址。
+ */
+async function fetchRandom(fallback: string[], mobile: boolean): Promise<string[]> {
   try {
-    const list = await request<RandomImage[]>("/random", {
-      query: {
-        format: "json",
-        count: 16,
-        public_only: 1,
-      },
+    const payload = await request<Array<RandomImage | string>>("/site/backgrounds/random", {
+      // 两端各有一套来源，服务端按 device 选
+      query: { count: 16, device: mobile ? "mobile" : "desktop" },
     });
-    const urls = (Array.isArray(list) ? list : [list])
-      .map((item) => item.url || item.thumb_url || "")
+    const list = Array.isArray(payload) ? payload : [payload];
+    const urls = list
+      .map((item) => (typeof item === "string" ? item : item?.url || item?.thumb_url || ""))
       .filter(Boolean);
     return urls.length > 0 ? urls : fallback;
   } catch {

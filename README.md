@@ -150,7 +150,8 @@ docker compose logs --tail=50 pixora # 看到「Pixora 已启动」就说明起�
 ### 从源码构建
 
 需要 Rust stable 与 Node 20+。**前端要先构建**：它的产物会被 `rust-embed` 嵌进二进制，
-仓库里提交了一份（所以全新克隆可以直接 `cargo build`），改了前端就得重新构建再编 Rust。
+构建产物不入库，所以新克隆第一次编译前得先跑一遍 `npm run build`，否则 `cargo build`
+会在构建脚本那一步停下来并提示怎么补。改了前端同样要重新构建再编 Rust。
 
 ```bash
 # 1. 前端
@@ -216,7 +217,7 @@ crates/
 ├── pixora-queue/     进程内后台任务：邮件重试、Blob GC、对账、缩略图兜底
 └── pixora-server/    单二进制入口：路由、中间件、直链、静态资源
 web/                  前端（无框架 TypeScript + esbuild，产物 embed 进二进制）
-  └── dist/           构建产物，故意提交进仓库：cargo build 依赖它存在
+  └── dist/           构建产物，不入库；cargo build 前先 `npm run build`
 migrations/           三个方言各一套建表脚本
 deploy/               Dockerfile、docker-compose、Caddyfile、.env.example
 docs/                 技术方案、部署方案、接口契约、ADR、界面原型、截图
@@ -278,11 +279,14 @@ https://img.example.com/images/a3f9c1b8…e7.webp
 ## 开发
 
 ```bash
+# 第一次先构建前端，产物要嵌进二进制
+cd web && npm install && npm run build && cd ..
+
 # 后端（默认 SQLite，数据落在 ./data）
 cargo run -p pixora-server
 
-# 前端（另一个终端；改一行刷新即见，不必重编 Rust）
-cd web && npm install && npm run build
+# 之后改前端：另开一个终端跑 watch，用 PIXORA_WEB_DIR 读盘，改一行刷新即见
+cd web && npm run dev
 PIXORA_WEB_DIR=./web/dist cargo run -p pixora-server
 ```
 

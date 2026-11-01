@@ -140,6 +140,20 @@ export function mount(container: HTMLElement, ...content: Child[]): void {
   append(container, content);
 }
 
+/**
+ * 记下当前滚动位置，返回一个把它放回去的函数。
+ *
+ * 保存设置之后页面会重新拉数据、整页重画。中途要是先挂一个加载占位，
+ * 文档高度会压到一屏以内，浏览器顺手把 scrollY 夹回顶部，用户看到的就是
+ * 「点了保存跳回顶部」。开始重画前调一次，画完再调返回的函数。
+ */
+export function keepScroll(): () => void {
+  const y = window.scrollY;
+  return () => {
+    if (y > 0) window.scrollTo({ top: y, behavior: "auto" });
+  };
+}
+
 /** 取查询参数。 */
 export function param(name: string): string | null {
   return new URLSearchParams(location.search).get(name);

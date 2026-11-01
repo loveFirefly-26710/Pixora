@@ -74,6 +74,8 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   /* 顶栏高度：脚本会按实际渲染结果覆盖这个值 */
   --nav-h: 64px;
+  /* 顶栏浮起来之后，粘性元素要让开的高度：8px 上边距 + 顶栏本身 + 一点缝 */
+  --nav-offset: calc(var(--nav-h) + 18px);
   /* 歌单侧栏宽度与它离屏幕边的距离；广场 hero 打开侧栏时按这套尺寸让位 */
   --music-panel-w: 280px;
   --music-panel-gap: 12px;

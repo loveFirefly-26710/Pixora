@@ -100,6 +100,11 @@ fn api_routes() -> Router<Arc<AppState>> {
             get(r::public::site_background_asset),
         )
         .route("/site/avatar", get(r::public::site_avatar))
+        // 背景图随机源：本站广场 / 公开相册合集 / 管理员自定义 API，由服务端统一代理
+        .route(
+            "/site/backgrounds/random",
+            get(r::public::background_random),
+        )
         // 公告已读：登录用户按版本记录，游客由浏览器本地兜底
         .route(
             "/announcements/{version}/read",
@@ -283,6 +288,11 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/admin/storage/prefix", put(r::admin::storage_prefix))
         .route("/admin/storage/capacity", put(r::admin::storage_capacity))
         .route("/admin/storage/backends", post(r::admin::backend_create))
+        // 合并重复后端：同驱动 + 同配置只留一行
+        .route(
+            "/admin/storage/backends/dedupe",
+            post(r::admin::backend_dedupe),
+        )
         .route(
             "/admin/storage/backends/{id}",
             patch(r::admin::backend_update).delete(r::admin::backend_delete),

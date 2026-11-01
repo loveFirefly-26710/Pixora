@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pixora · 圆角布局方案预览</title>
+<style>
+  /* ============================================================
+     这是一份「方案预览」，不是应用的一部分。
+     用纯 HTML/CSS 把两种布局摆在一起，方便直接比对：
+       左：现在的直角满铺（顶栏、菜单、卡片都顶到边）
+       右：建议的圆角浮层（顶栏是一条浮起来的圆角条，卡片之间留缝）
+     右上角可以切深色主题，两套配色都按应用现有的令牌走。
+     ============================================================ */
+
+  :root {
+    --bg: #eef7f1;
+    --bg-2: #e0f0e8;
+    --surface: rgba(255, 255, 255, .82);
+    --surface-2: rgba(255, 255, 255, .58);
+    --surface-solid: #fbfefc;
+    --border: rgba(17, 70, 56, .12);
+    --border2: rgba(17, 70, 56, .23);
+    --text: #102c25;
+    --muted: #55756b;
+    --faint: #78948b;
+    --primary: #0e8f71;
+    --primary-soft: rgba(17, 169, 133, .1);
+    --shadow: 0 24px 70px rgba(24, 75, 62, .14);
+    --shadow-soft: 0 12px 34px rgba(24, 75, 62, .08);
+    --font-body: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-display: "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif;
+    --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #040c0e;
+    --bg-2: #071817;
+    --surface: rgba(9, 25, 25, .72);
+    --surface-2: rgba(15, 37, 35, .46);
+    --surface-solid: #081918;
+    --border: rgba(158, 236, 214, .12);
+    --border2: rgba(158, 236, 214, .24);
+    --text: #e8f7f1;
+    --muted: #93b2a9;
+    --faint: #647f78;
+    --primary: #a3f7dd;
+    --primary-soft: rgba(79, 224, 182, .12);
+    --shadow: 0 24px 70px rgba(0, 0, 0, .46);
+    --shadow-soft: 0 12px 34px rgba(0, 0, 0, .2);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 0 0 60px;
+    background:
+      radial-gradient(900px 520px at 18% -8%, var(--bg-2), transparent 62%),
+      radial-gradient(720px 460px at 88% 4%, var(--primary-soft), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 26px 22px 0;
+  }
+
+  /* 顶部说明条：只是这份预览的页头 */
+  .doc-head {
+    display: flex;
+    align-items: flex-end;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+
+  .doc-head h1 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 30px;
+    font-weight: 500;
+    letter-spacing: .04em;
+  }
+
+  .doc-head p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12.5px;
+    line-height: 1.7;
+    max-width: 620px;
+  }
+
+  .spacer { flex: 1; }
+
+  .theme-btn {
+    border: 1px solid var(--border2);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 12.5px;
+    padding: 7px 14px;
+    cursor: pointer;
+  }
+
+  .theme-btn:hover { border-color: var(--primary); color: var(--primary); }
+
+  /* 两栏对比 */
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+
+  @media (max-width: 1080px) {
+    .compare { grid-template-columns: 1fr; }
+  }
+
+  .col-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .col-label .pill {
+    border-radius: 999px;
+    padding: 2px 9px;
+    font-size: 11px;
+    border: 1px solid var(--border2);
+  }
+
+  .col-label .pill.now { color: var(--faint); }
+  .col-label .pill.next { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+
+  /* 预览用的「窗口」：模拟浏览器视口 */
+  .frame {
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    overflow: hidden;
+    background: var(--bg);
+    box-shadow: var(--shadow-soft);
+  }
+
+  .frame-inner {
+    height: 470px;
+    overflow: hidden;
+    position: relative;
+    background:
+      radial-gradient(520px 320px at 30% 0%, var(--bg-2), transparent 60%),
+      var(--bg);
+  }
+
+  /* ---------- 现状：直角满铺 ---------- */
+
+  .old-nav {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 46px;
+    padding: 0 14px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    font-size: 12.5px;
+  }
+
+  .old-body { display: flex; height: calc(100% - 46px); }
+
+  .old-side {
+    width: 132px;
+    flex: 0 0 132px;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    padding: 10px 8px;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+
+  .old-side div { padding: 6px 6px; }
+
+  .old-main {
+    flex: 1;
+    min-width: 0;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 0; /* 现状：卡片之间没有缝 */
+  }
+
+  .old-card {
+    border: 1px solid var(--border);
+    background: var(--surface-solid);
+    padding: 12px;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+
+  .old-card b { display: block; color: var(--text); font-size: 12.5px; margin-bottom: 6px; }
+
+  /* ---------- 建议：圆角浮层 ---------- */
+
+  .new-shell {
+    height: 100%;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .new-nav {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 46px;
+    padding: 0 14px;
+    /* 关键：不再顶到窗口两边，而是一条浮起来的圆角条 */
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(14px) saturate(1.1);
+    -webkit-backdrop-filter: blur(14px) saturate(1.1);
+    font-size: 12.5px;
+    flex: 0 0 auto;
+  }
+
+  .new-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    gap: 10px;
+  }
+
+  .new-side {
+    width: 132px;
+    flex: 0 0 132px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
+    padding: 10px 8px;
+    font-size: 11.5px;
+    color: var(--muted);
+    overflow: hidden;
+  }
+
+  .new-side .item {
+    padding: 6px 8px;
+    border-radius: 8px;
+  }
+
+  .new-side .item.on {
+    background: var(--primary-soft);
+    color: var(--primary);
+  }
+
+  .new-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+  }
+
+  .new-card {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
+    padding: 12px;
+    font-size: 11.5px;
+    color: var(--muted);
+    box-shadow: var(--shadow-soft);
+  }
+
+  .new-card b { display: block; color: var(--text); font-size: 12.5px; margin-bottom: 6px; }
+
+  .new-card .row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .chip {
+    border: 1px solid var(--border2);
+    border-radius: 999px;
+    padding: 3px 9px;
+    font-size: 10.5px;
+    color: var(--muted);
+  }
+
+  .chip.on { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+
+  .btn {
+    border: 1px solid var(--primary);
+    background: var(--primary);
+    color: #fff;
+    border-radius: 9px;
+    padding: 5px 11px;
+    font-size: 11.5px;
+    font: inherit;
+  }
+
+  :root[data-theme="dark"] .btn { color: #03241b; }
+
+  /* 规格说明 */
+  .specs {
+    margin-top: 22px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+  }
+
+  .spec {
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--surface);
+    padding: 14px 16px;
+  }
+
+  .spec h3 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .spec dl {
+    margin: 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 6px 12px;
+    font-size: 11.5px;
+  }
+
+  .spec dt { color: var(--faint); font-family: var(--font-mono); font-size: 10.5px; }
+  .spec dd { margin: 0; color: var(--muted); }
+
+  .note {
+    margin-top: 18px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--primary);
+    border-radius: 12px;
+    background: var(--surface-2);
+    padding: 12px 14px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.8;
+  }
+
+  .note code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--primary-soft);
+    color: var(--primary);
+    border-radius: 5px;
+    padding: 1px 5px;
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <header class="doc-head">
+      <div>
+        <h1>圆角布局 · 方案预览</h1>
+        <p>
+          左图是现在的做法：顶栏、侧栏、卡片都顶到窗口边缘，卡片之间没有缝。
+          右图是建议的做法：顶栏变成一条浮起来的圆角条，侧栏与卡片各自独立成块，块与块之间留 10–14px 的缝。
+          两边用的是同一套颜色令牌，切换主题可以看深色下的效果。
+        </p>
+      </div>
+      <span class="spacer"></span>
+      <button class="theme-btn" id="themeBtn" type="button">切换到夜航主题</button>
+    </header>
+
+    <div class="compare">
+      <section>
+        <div class="col-label"><span class="pill now">现状</span>直角满铺 · 无间隙</div>
+        <div class="frame">
+          <div class="frame-inner">
+            <div class="old-nav">
+              <b>Pixora</b><span>广场</span><span>相册</span><span>上传</span>
+            </div>
+            <div class="old-body">
+              <aside class="old-side">
+                <div>用户中心</div>
+                <div>相册</div>
+                <div>上传</div>
+                <div>账号信息</div>
+                <div>安全</div>
+              </aside>
+              <div class="old-main">
+                <div class="old-card">
+                  <b>站点</b>
+                  顶栏贴着窗口上沿，底色一直铺到两边；下面这张卡片与下一张之间没有间距。
+                </div>
+                <div class="old-card">
+                  <b>外观</b>
+                  两张卡片的分隔只靠一条 1px 的边线，看上去像一整块被切成两段。
+                </div>
+                <div class="old-card">
+                  <b>存储分布</b>
+                  直角、无间隙，视觉上偏「后台系统」，与广场那套卡片语言不太一致。
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="col-label"><span class="pill next">建议</span>圆角浮层 · 留缝</div>
+        <div class="frame">
+          <div class="frame-inner">
+            <div class="new-shell">
+              <div class="new-nav">
+                <b>Pixora</b>
+                <span>广场</span><span>相册</span><span>上传</span>
+                <span class="spacer"></span>
+                <span class="chip on">搜索</span>
+              </div>
+              <div class="new-body">
+                <aside class="new-side">
+                  <div class="item">用户中心</div>
+                  <div class="item">相册</div>
+                  <div class="item">上传</div>
+                  <div class="item on">系统设置</div>
+                  <div class="item">安全</div>
+                </aside>
+                <div class="new-main">
+                  <div class="new-card">
+                    <b>站点</b>
+                    顶栏是一条独立浮起的圆角条，左右各留 10px；卡片之间留 10–14px。
+                  </div>
+                  <div class="new-card">
+                    <b>外观</b>
+                    每张卡片自己的圆角（14px）与阴影，边界清楚，滚动时不会连成一片。
+                    <div class="row"><span class="btn">保存设置</span><span class="chip">查看超限日志</span></div>
+                  </div>
+                  <div class="new-card">
+                    <b>存储分布</b>
+                    卡片彼此独立后，短卡片不会被拉长，两列的高度差也更自然。
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="specs">
+      <div class="spec">
+        <h3>顶部栏</h3>
+        <dl>
+          <dt>圆角</dt><dd>14px（与卡片一致）</dd>
+          <dt>外边距</dt><dd>左右 10–12px，上方 10px</dd>
+          <dt>底色</dt><dd>surface + 14px 背景模糊</dd>
+          <dt>滚动</dt><dd>sticky 保留，但只在内容区内粘住</dd>
+        </dl>
+      </div>
+      <div class="spec">
+        <h3>侧栏 / 菜单</h3>
+        <dl>
+          <dt>圆角</dt><dd>14px</dd>
+          <dt>选中项</dt><dd>8px 圆角 + primary-soft 底色</dd>
+          <dt>与内容</dt><dd>间距 10px，不再共用一条分隔线</dd>
+        </dl>
+      </div>
+      <div class="spec">
+        <h3>卡片</h3>
+        <dl>
+          <dt>圆角</dt><dd>14px（大卡片 16px）</dd>
+          <dt>间距</dt><dd>10–14px，统一由容器 gap 控制</dd>
+          <dt>阴影</dt><dd>shadow-soft，不再只用 1px 边线</dd>
+          <dt>内边距</dt><dd>14px，圆角处留出呼吸感</dd>
+        </dl>
+      </div>
+      <div class="spec">
+        <h3>需要改的地方</h3>
+        <dl>
+          <dt>theme.css</dt><dd><code>.navbar</code> 加左右外边距与圆角</dd>
+          <dt>theme.css</dt><dd><code>.sidebar</code> 改成独立圆角块</dd>
+          <dt>components.css</dt><dd><code>.card</code> 圆角 14px、补阴影</dd>
+          <dt>components.css</dt><dd>容器 <code>gap</code> 统一成 12px</dd>
+        </dl>
+      </div>
+    </div>
+
+    <div class="note">
+      这套样式已经落到 <code>theme.css</code> 与 <code>components.css</code>：顶栏、侧栏、底栏改成浮起的圆角块，
+      新增 <code>--nav-offset</code> 统一粘性元素的让位高度，卡片补了阴影。页面结构没动。
+      这份文件留作对照，改之前可以先在这里看效果。
+    </div>
+  </div>
+
+<script>
+  const btn = document.getElementById("themeBtn");
+  const root = document.documentElement;
+  const sync = () => {
+    const dark = root.dataset.theme === "dark";
+    btn.textContent = dark ? "切换到萤昼主题" : "切换到夜航主题";
+  };
+  btn.addEventListener("click", () => {
+    root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+    sync();
+  });
+  sync();
+</script>
+</body>
+</html>

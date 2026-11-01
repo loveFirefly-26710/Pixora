@@ -11,7 +11,7 @@
  */
 
 import { ApiError, request, requestPage } from "../core/api";
-import { h, mount } from "../core/dom";
+import { h, keepScroll, mount } from "../core/dom";
 import { formatDateTime, relativeTime } from "../core/format";
 import { confirmDialog } from "../core/modal";
 import { navigate, type PageContext } from "../core/router";
@@ -40,7 +40,10 @@ interface AdminSessionRow {
   last_seen_at: string;
   expires_at: string | null;
   revoked_at: string | null;
-  state: "active" | "saved" | "expired" | "revoked";
+  /** 用户删除的时间（延迟删除的标记，保留期内仍可审计） */
+  deleted_at?: string | null;
+  deleted_by?: string | null;
+  state: "active" | "saved" | "expired" | "revoked" | "deleted";
   remember: boolean;
   current: boolean;
 }
@@ -50,6 +53,8 @@ const STATE_LABEL: Record<AdminSessionRow["state"], string> = {
   saved: "免登录",
   expired: "已过期",
   revoked: "已下线",
+  // 用户自己删掉的记录：cookie 已失效，行留到保留期满
+  deleted: "用户已删除",
 };
 
 const STATE_TONE: Record<AdminSessionRow["state"], "ok" | "info" | "warn" | "mute"> = {
@@ -57,6 +62,7 @@ const STATE_TONE: Record<AdminSessionRow["state"], "ok" | "info" | "warn" | "mut
   saved: "info",
   expired: "warn",
   revoked: "mute",
+  deleted: "mute",
 };
 
 export async function render(ctx: PageContext): Promise<void> {
@@ -89,7 +95,11 @@ export async function render(ctx: PageContext): Promise<void> {
   };
 
   async function load(page: number): Promise<void> {
-    mount(body, loadingBlock("正在读取会话记录…"));
+    // 翻页、删记录都会走这里。已经有内容时不摆占位，免得页面塌一下
+    // 把滚动位置带回顶部
+    const restoreScroll = keepScroll();
+    const first = !body.hasChildNodes();
+    if (first) mount(body, loadingBlock("正在读取会话记录…"));
     mount(foot);
     try {
       const result = await requestPage<AdminSessionRow>("/admin/sessions", {
@@ -97,6 +107,7 @@ export async function render(ctx: PageContext): Promise<void> {
       });
       if (result.items.length === 0) {
         mount(body, emptyState("🔐", "没有匹配的会话记录。"));
+        restoreScroll();
         return;
       }
       mount(
@@ -132,6 +143,7 @@ export async function render(ctx: PageContext): Promise<void> {
         ),
       );
       mount(foot, pagination(result.meta, (next) => void load(next)) ?? "");
+      restoreScroll();
     } catch (err) {
       mount(body, errorBlock(err, () => void load(page)));
     }

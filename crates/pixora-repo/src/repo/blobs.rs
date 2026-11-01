@@ -323,6 +323,48 @@ impl Repo {
         ))
     }
 
+    /// 按用户拆的占用。`binned` 选在用的还是回收站里的。
+    ///
+    /// 口径跟存储分布一样，原图与缩略图都算。同一份实体在同一个用户名下只算
+    /// 一次；跨用户共享的那份各算一次，所以加总不等于全站实体总量，
+    /// 去重命中越多差得越多。
+    pub async fn user_storage_stats(&self, binned: bool, limit: i64) -> Result<Vec<UserStorageStat>> {
+        let condition = if binned {
+            "i.deleted_at IS NOT NULL"
+        } else {
+            "i.deleted_at IS NULL"
+        };
+        let rows = self
+            .db
+            .fetch_all(
+                &format!(
+                    "SELECT uid, email, COUNT(*) AS total, {} AS bytes FROM ( \
+                        SELECT i.owner_id AS uid, u.email AS email, b.id AS bid, b.size AS size \
+                          FROM images i JOIN blobs b ON b.id = i.blob_id \
+                          JOIN users u ON u.id = i.owner_id WHERE {condition} \
+                        UNION \
+                        SELECT i.owner_id, u.email, b.id, b.size \
+                          FROM images i JOIN blobs b ON b.id = i.thumb_blob_id \
+                          JOIN users u ON u.id = i.owner_id \
+                         WHERE {condition} AND i.thumb_blob_id IS NOT NULL \
+                     ) AS refs GROUP BY uid, email ORDER BY bytes DESC LIMIT ?",
+                    self.db.dialect().sum_i64("size")
+                ),
+                Args::new().int(limit),
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(UserStorageStat {
+                    user_id: get_i64(row, "uid")?,
+                    email: get_str(row, "email")?,
+                    count: get_i64(row, "total")?,
+                    bytes: get_i64(row, "bytes")?,
+                })
+            })
+            .collect()
+    }
+
     /// 已经没有任何图片引用的实体：(条数, 字节)。
     ///
     /// 彻底删除之后、后台回收之前，实体会短暂停在这个状态。界面上把它单独列一行，

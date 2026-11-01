@@ -391,6 +391,11 @@ pub struct Session {
     /// 「记住我」签发的会话写绝对到期时间；普通会话为 `None`
     pub expires_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+    /// 用户点「删除」的时间。列表里看不到，但行还在，供管理员审计；
+    /// 保留期到了才物理删除。
+    pub deleted_at: Option<DateTime<Utc>>,
+    /// 谁删的：user / admin / system
+    pub deleted_by: Option<String>,
 }
 
 /// 会话有效期策略。两个口径取自系统设置，管理员可改。
@@ -415,7 +420,7 @@ impl SessionPolicy {
 impl Session {
     pub const COLUMNS: &'static str =
         "id, user_id, token_hash, device, label, ip, user_agent, created_at, \
-         last_seen_at, expires_at, revoked_at";
+         last_seen_at, expires_at, revoked_at, deleted_at, deleted_by";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -430,6 +435,8 @@ impl Session {
             last_seen_at: get_ts(row, "last_seen_at")?,
             expires_at: get_opt_ts(row, "expires_at")?,
             revoked_at: get_opt_ts(row, "revoked_at")?,
+            deleted_at: get_opt_ts(row, "deleted_at")?,
+            deleted_by: get_opt_str(row, "deleted_by")?,
         })
     }
 
@@ -507,12 +514,15 @@ pub struct SessionRecord {
     pub last_seen_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+    /// 用户删除的时间（延迟删除）。有值时这一行只剩审计价值
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by: Option<String>,
 }
 
 impl SessionRecord {
     pub const COLUMNS: &'static str =
         "s.id, s.user_id, u.uid, u.email, s.device, s.label, s.ip, s.user_agent, \
-         s.created_at, s.last_seen_at, s.expires_at, s.revoked_at";
+         s.created_at, s.last_seen_at, s.expires_at, s.revoked_at, s.deleted_at, s.deleted_by";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -528,10 +538,15 @@ impl SessionRecord {
             last_seen_at: get_ts(row, "last_seen_at")?,
             expires_at: get_opt_ts(row, "expires_at")?,
             revoked_at: get_opt_ts(row, "revoked_at")?,
+            deleted_at: get_opt_ts(row, "deleted_at")?,
+            deleted_by: get_opt_str(row, "deleted_by")?,
         })
     }
 
     pub fn state(&self, policy: SessionPolicy, now: DateTime<Utc>) -> &'static str {
+        if self.deleted_at.is_some() {
+            return "deleted";
+        }
         if self.revoked_at.is_some() {
             return "revoked";
         }
@@ -869,11 +884,14 @@ pub struct ApiToken {
     pub expires_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// 用户点「删除」的时间（延迟删除的标记，保留期内仍可供审计）
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by: Option<String>,
 }
 
 impl ApiToken {
     pub const COLUMNS: &'static str = "id, user_id, name, token_hash, display, scopes, \
-         last_used_at, expires_at, revoked_at, created_at";
+         last_used_at, expires_at, revoked_at, created_at, deleted_at, deleted_by";
 
     pub fn from_row(row: &AnyRow) -> Result<Self> {
         Ok(Self {
@@ -887,11 +905,15 @@ impl ApiToken {
             expires_at: get_opt_ts(row, "expires_at")?,
             revoked_at: get_opt_ts(row, "revoked_at")?,
             created_at: get_ts(row, "created_at")?,
+            deleted_at: get_opt_ts(row, "deleted_at")?,
+            deleted_by: get_opt_str(row, "deleted_by")?,
         })
     }
 
     pub fn is_usable(&self, at: DateTime<Utc>) -> bool {
-        self.revoked_at.is_none() && self.expires_at.map(|exp| exp > at).unwrap_or(true)
+        self.deleted_at.is_none()
+            && self.revoked_at.is_none()
+            && self.expires_at.map(|exp| exp > at).unwrap_or(true)
     }
 
     pub fn allows(&self, scope: &str) -> bool {
@@ -1342,6 +1364,10 @@ pub struct StorageStats {
     pub pending_bytes: i64,
     pub average_size: i64,
     pub drivers: Vec<DriverStat>,
+    /// 按用户拆的在用占用（饼图用，按字节降序）
+    pub users: Vec<UserStorageStat>,
+    /// 按用户拆的回收站占用（管理员据此知道谁的回收站没清）
+    pub binned_users: Vec<UserStorageStat>,
     pub mimes: Vec<MimeStat>,
     /// 近 30 天每日图片数
     pub trend: Vec<TrendPoint>,
@@ -1356,6 +1382,16 @@ pub struct DriverStat {
     /// 图片张数（不是实体条数：一张图带一个缩略图不该显示成两张）
     pub count: i64,
     /// 这个后端上仍被引用的实体字节（原图 + 缩略图，每个实体只算一次）
+    pub bytes: i64,
+}
+
+/// 按用户拆的占用。回收站与饼图都用这一份结构。
+#[derive(Debug, Clone)]
+pub struct UserStorageStat {
+    pub user_id: i64,
+    pub email: String,
+    /// 实体条数（原图 + 缩略图），饼图里当参考，不当「张数」展示
+    pub count: i64,
     pub bytes: i64,
 }
 
@@ -1414,6 +1450,8 @@ mod tests {
             last_seen_at: now - chrono::Duration::minutes(5),
             expires_at: Some(now + chrono::Duration::days(28)),
             revoked_at: None,
+            deleted_at: None,
+            deleted_by: None,
         };
         assert_eq!(base.state(policy, now, true), "active");
 
